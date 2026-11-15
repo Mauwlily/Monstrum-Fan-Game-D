@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-We currently support the latest release of this project with security updates and bug fixes.
+Only the latest release/commit of this project is actively maintained and receives security updates.
 
 | Version | Supported          |
 | ------- | ------------------ |
@@ -11,24 +11,23 @@ We currently support the latest release of this project with security updates an
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability within this project, please **do not** open a public issue. Publicly disclosing a vulnerability can put the community at risk.
+If you discover a security vulnerability, please **do not open a public issue or discussion**. 
 
-Instead, please report the vulnerability using one of the following methods:
+Instead, report it privately via GitHub:
 
-1. **GitHub Security Advisory (Preferred):**  
-   Go to the **Security** tab of this repository, select **Advisories**, and click **New draft security advisory**.
-2. **Email:**  
-   Not available
+1. Navigate to the **Security** tab of this repository.
+2. Click on **Advisories** on the left menu.
+3. Click the **Report a vulnerability** button.
 
 ### What to include in your report:
 
-- A clear description of the issue
-- Steps to reproduce the vulnerability (proof of concept)
-- Potential impact of the issue
-- Any suggested fixes or mitigations
+- A description of the vulnerability and its potential impact.
+- Clear steps to reproduce the issue (code, logs, or proof-of-concept).
+- Any proposed fixes or workarounds, if available.
 
-### Response Timeline
+### What to expect:
 
-- **Acknowledgment:** We will acknowledge receipt of your report within 48 hours.
-- **Assessment:** We will confirm the vulnerability and determine its impact within 5 business days.
-- **Fix:** We will release a patch as soon as possible, depending on the severity of the issue.
+As an individual maintainer:
+- I will review reports as quickly as my personal schedule allows.
+- Once verified, I will collaborate with you within the private advisory to prepare and release a fix.
+- You will be properly credited in the release notes unless you prefer to remain anonymous.
