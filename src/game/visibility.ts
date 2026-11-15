@@ -28,16 +28,16 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
   const segments: OccluderSegment[] = [];
   const { width, height, tileSize: ts, tiles } = map;
 
-  const isWalk = (tx: number, ty: number): boolean => {
-    if (tx < 0 || tx >= width || ty < 0 || ty >= height) return false;
-    return isTileWalkable(tiles[ty][tx]);
+  const isTransparent = (tx: number, ty: number): boolean => {
+    if (tx < 0 || tx >= width || ty < 0 || ty >= height) return true;
+    return tiles[ty][tx] !== 'WALL';
   };
 
   // Horizontal boundaries y = 0..height
   for (let y = 0; y <= height; y++) {
     const wy = y * ts;
     let runStart = -1;
-    let runMode = 0; // 1 = top-of-wall (walk above, solid below), 2 = bottom-of-wall (solid above, walk below)
+    let runMode = 0; // 1 = top-of-wall (open above, wall below), 2 = bottom-of-wall (wall above, open below)
 
     const flushRun = (endX: number) => {
       if (runStart !== -1 && endX > runStart) {
@@ -54,8 +54,8 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
     };
 
     for (let x = 0; x < width; x++) {
-      const above = isWalk(x, y - 1);
-      const below = isWalk(x, y);
+      const above = isTransparent(x, y - 1);
+      const below = isTransparent(x, y);
       const mode = above && !below ? 1 : !above && below ? 2 : 0;
       if (mode !== runMode) {
         flushRun(x);
@@ -72,7 +72,7 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
   for (let x = 0; x <= width; x++) {
     const wx = x * ts;
     let runStart = -1;
-    let runMode = 0; // 1 = left-of-wall (walk left, solid right), 2 = right-of-wall (solid left, walk right)
+    let runMode = 0; // 1 = left-of-wall (open left, wall right), 2 = right-of-wall (wall left, open right)
 
     const flushRun = (endY: number) => {
       if (runStart !== -1 && endY > runStart) {
@@ -89,8 +89,8 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
     };
 
     for (let y = 0; y < height; y++) {
-      const left = isWalk(x - 1, y);
-      const right = isWalk(x, y);
+      const left = isTransparent(x - 1, y);
+      const right = isTransparent(x, y);
       const mode = left && !right ? 1 : !left && right ? 2 : 0;
       if (mode !== runMode) {
         flushRun(y);
@@ -199,8 +199,8 @@ export function isPointBlockedForSight(
 ): boolean {
   const tx = Math.floor(wx / map.tileSize);
   const ty = Math.floor(wy / map.tileSize);
-  if (tx < 0 || tx >= map.width || ty < 0 || ty >= map.height) return true;
-  if (!isTileWalkable(map.tiles[ty][tx])) return true;
+  if (tx < 0 || tx >= map.width || ty < 0 || ty >= map.height) return false;
+  if (map.tiles[ty][tx] === 'WALL') return true;
 
   const door = doorsByTile.get(ty * map.width + tx);
   if (door && door.openProgress <= 0.35 && !door.isBroken) {

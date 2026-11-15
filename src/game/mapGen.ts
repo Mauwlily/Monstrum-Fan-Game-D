@@ -286,7 +286,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   };
 
   // --- 2. MAIN DECK ZONES BY ARCHETYPE ---
-  // Stern Helideck & Lifeboat Davit (always outdoor at stern)
+  // Stern Helideck (always outdoor at stern)
   const heliX1 = 4;
   const heliX2 = 12;
   const heliY1 = 9;
@@ -297,19 +297,31 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   setTile(heliTx, heliTy, 'ESCAPE_HELI', 'Helideck', 'WEATHER');
   reserveAround(heliTx, heliTy, 2);
 
-  // Lifeboat Davit on Port (top) or Starboard (bottom) stern edge
-  const davitOnPort = !flipY;
-  const davitY1 = davitOnPort ? 5 : 21;
-  const davitY2 = davitOnPort ? 7 : 23;
-  addRoom('Lifeboat Davit', 'MAIN', 7, davitY1, 12, davitY2, 'EXTERIOR_DECK', 'WEATHER');
-  const lifeboatTx = 9;
-  const lifeboatTy = davitOnPort ? 5 : 23;
-  setTile(lifeboatTx, lifeboatTy, 'ESCAPE_LIFEBOAT', 'Lifeboat Davit', 'WEATHER');
-  reserveAround(lifeboatTx, lifeboatTy, 1);
-
   // Forecastle at bow
   addRoom('Forecastle', 'MAIN', 52, 8, 59, 20, 'EXTERIOR_DECK', 'WEATHER');
   addProp('CAPSTAN', 'MAIN', 56, 14, 1, 1, { blocking: true, room: 'Forecastle' });
+
+  // Lifeboat Davit relocated far forward along the Forecastle Port or Starboard rail (always >= 45 tiles from Helideck!)
+  const davitOnPort = !flipY;
+  const lifeboatTx = 52;
+  const bowBounds = mainBounds(lifeboatTx) ?? { top: 8, bot: 20 };
+  // Guarantee an unbroken 4x3 deck bay flush against the ocean void edge for the hydraulic davit crane
+  const lifeboatTy = davitOnPort ? bowBounds.top : bowBounds.bot;
+  const davitY1 = davitOnPort ? lifeboatTy : Math.max(15, lifeboatTy - 2);
+  const davitY2 = davitOnPort ? Math.min(13, lifeboatTy + 2) : lifeboatTy;
+  // Carve flat hull edge at tx=51..54 so outboard rail runs horizontally behind the davit
+  for (let dx = 51; dx <= 54; dx++) {
+    for (let dy = davitY1; dy <= davitY2; dy++) {
+      setTile(dx, dy, 'EXTERIOR_DECK', 'Lifeboat Davit', 'WEATHER');
+    }
+    const outVoidY = davitOnPort ? lifeboatTy - 1 : lifeboatTy + 1;
+    if (outVoidY >= 0 && outVoidY < height) {
+      tiles[outVoidY][dx] = 'VOID';
+    }
+  }
+  addRoom('Lifeboat Davit', 'MAIN', 51, davitY1, 54, davitY2, 'EXTERIOR_DECK', 'WEATHER');
+  setTile(lifeboatTx, lifeboatTy, 'ESCAPE_LIFEBOAT', 'Lifeboat Davit', 'WEATHER');
+  reserveAround(lifeboatTx, lifeboatTy, 1);
 
   // Deckhouse & Container Bay positions depend on Archetype + Seed Shifts
   const shiftA = randInt(rng, -1, 1);
@@ -975,6 +987,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     'AVIATION_FUEL',
     'IGNITION_KEY',
     'ROTOR_FUSE',
+    'BACKPACK',
     'BOLT_CUTTERS',
     'BOLT_CUTTERS',
     'FIRE_EXTINGUISHER',

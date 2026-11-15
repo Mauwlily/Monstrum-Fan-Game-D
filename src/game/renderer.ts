@@ -118,6 +118,7 @@ export class GameRenderer {
     this.drawLightSwitches(ctx, engine, timeSec);
     this.drawDoors(ctx, engine);
     this.drawDroppedLights(ctx, engine, timeSec);
+    this.drawWorldPickups(ctx, engine, timeSec);
     this.drawParticles(ctx, engine);
 
     if (engine.player.hidingSpotId === null) {
@@ -934,60 +935,641 @@ export class GameRenderer {
     engine: MonstrumGameEngine,
     timeSec: number
   ): void {
-    // 1. Helideck pad + Helicopter silhouette
-    const hx = engine.map.heliPos.x + 22;
+    const ts = engine.map.tileSize;
+    const esc = engine.escape;
+
+    // --- 1. STERN HELIDECK & CARGO CHOPPER ---
+    const hx = engine.map.heliPos.x + 14;
     const hy = engine.map.heliPos.y;
+    const hasFuel = esc.heliParts.includes('AVIATION_FUEL');
+    const hasFuse = esc.heliParts.includes('ROTOR_FUSE');
+    const hasKey = esc.heliParts.includes('IGNITION_KEY');
+    const heliReady = esc.heliState === 'READY';
+    const heliActivating = esc.heliState === 'ACTIVATING';
+    const heliSpool = heliReady ? 1 : heliActivating ? esc.heliActivationProgress : 0;
+
     ctx.save();
-    ctx.strokeStyle = engine.escape.heliParts.length === 3 ? '#fbbf24' : 'rgba(251, 191, 36, 0.45)';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([10, 6]);
+    // Octagonal weathered yellow helipad outline & safety circle
+    const padR = 64;
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.35)';
     ctx.beginPath();
-    ctx.arc(hx, hy, 54, 0, Math.PI * 2);
+    ctx.arc(hx, hy, padR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = heliReady
+      ? '#34d399'
+      : esc.heliParts.length === 3
+        ? '#fbbf24'
+        : 'rgba(251, 191, 36, 0.5)';
+    ctx.lineWidth = 3.2;
+    ctx.setLineDash([12, 7]);
+    ctx.beginPath();
+    ctx.arc(hx, hy, padR, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    ctx.font = '700 32px "Barlow Condensed", sans-serif';
+    // Inner aiming ring & stencil H
+    ctx.strokeStyle = 'rgba(248, 250, 252, 0.2)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(hx, hy, 44, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.font = '700 34px "Barlow Condensed", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(251, 191, 36, 0.35)';
-    ctx.fillText('H', hx, hy);
+    ctx.fillStyle = heliReady ? 'rgba(52, 211, 153, 0.4)' : 'rgba(251, 191, 36, 0.28)';
+    ctx.fillText('H', hx + 8, hy);
 
+    // 4 Corner Deck Perimeter Strobe Lights
+    const strobeOn = Math.sin(timeSec * (heliReady ? 6 : 12)) > 0;
+    for (const [sx, sy] of [
+      [-52, -48],
+      [52, -48],
+      [-52, 48],
+      [52, 48],
+    ]) {
+      ctx.fillStyle = '#0f172a';
+      ctx.beginPath();
+      ctx.arc(hx + sx, hy + sy, 4, 0, Math.PI * 2);
+      ctx.fill();
+      if (heliReady || (heliActivating && strobeOn)) {
+        ctx.fillStyle = heliReady ? '#34d399' : '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(hx + sx, hy + sy, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.fillStyle = hasFuse ? 'rgba(251, 191, 36, 0.45)' : '#334155';
+        ctx.beginPath();
+        ctx.arc(hx + sx, hy + sy, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Helicopter Body Anchor (centered at heliPos)
     const lx = engine.map.heliPos.x;
     const ly = engine.map.heliPos.y;
-    ctx.fillStyle = '#334155';
-    ctx.beginPath();
-    ctx.ellipse(lx, ly, 24, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    const rotorAngle = engine.escape.heliLaunchProgress > 0 ? timeSec * 14 : 0.4;
+    const heliVibX = heliSpool > 0.15 ? Math.sin(timeSec * 52) * heliSpool * 0.9 : 0;
+    const heliVibY = heliSpool > 0.15 ? Math.cos(timeSec * 46) * heliSpool * 0.9 : 0;
+
     ctx.save();
-    ctx.translate(lx, ly);
-    ctx.rotate(rotorAngle);
-    ctx.strokeStyle = 'rgba(226, 232, 240, 0.65)';
-    ctx.lineWidth = 3;
+    ctx.translate(lx + heliVibX, ly + heliVibY);
+
+    // Helicopter ground drop shadow
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.56)';
     ctx.beginPath();
-    ctx.moveTo(-34, 0);
-    ctx.lineTo(34, 0);
-    ctx.moveTo(0, -34);
-    ctx.lineTo(0, 34);
+    ctx.ellipse(2, 5, 36, 17, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(-46, 0, 32, 8);
+
+    // Twin tubular landing skids & cross-struts
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-22, -16);
+    ctx.lineTo(24, -16);
+    ctx.lineTo(29, -13);
+    ctx.moveTo(-22, 16);
+    ctx.lineTo(24, 16);
+    ctx.lineTo(29, 13);
+    // Struts
+    ctx.moveTo(-10, -16);
+    ctx.lineTo(-8, -11);
+    ctx.moveTo(12, -16);
+    ctx.lineTo(10, -11);
+    ctx.moveTo(-10, 16);
+    ctx.lineTo(-8, 11);
+    ctx.moveTo(12, 16);
+    ctx.lineTo(10, 11);
     ctx.stroke();
+
+    // Tail Boom & Horizontal/Vertical Stabilizers
+    ctx.fillStyle = '#1e293b';
+    ctx.beginPath();
+    ctx.moveTo(-14, -6);
+    ctx.lineTo(-48, -2.5);
+    ctx.lineTo(-48, 2.5);
+    ctx.lineTo(-14, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Tail fin & spinning tail rotor
+    ctx.fillStyle = '#d97706';
+    ctx.fillRect(-49, -7, 4, 14);
+    ctx.fillStyle = '#0f172a';
+    const tailSpin = heliSpool > 0 ? Math.sin(timeSec * (12 + heliSpool * 44)) * 7 : 6;
+    ctx.fillRect(-48, -tailSpin, 2, tailSpin * 2);
+
+    // Fuselage Cabin Shell
+    const bodyGrad = ctx.createLinearGradient(0, -15, 0, 15);
+    bodyGrad.addColorStop(0, '#334155');
+    bodyGrad.addColorStop(0.5, '#475569');
+    bodyGrad.addColorStop(1, '#1e293b');
+    ctx.fillStyle = bodyGrad;
+    ctx.beginPath();
+    ctx.moveTo(-18, -11);
+    ctx.quadraticCurveTo(4, -16, 26, -9);
+    ctx.quadraticCurveTo(35, 0, 26, 9);
+    ctx.quadraticCurveTo(4, 16, -18, 11);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = heliReady ? '#34d399' : '#64748b';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // High-vis rescue stripe along fuselage flanks
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-14, -10.5);
+    ctx.lineTo(12, -11);
+    ctx.moveTo(-14, 10.5);
+    ctx.lineTo(12, 11);
+    ctx.stroke();
+
+    // Part 3: IGNITION_KEY — Cockpit Canopy & Lit Avionics Console + Wing Nav Strobes
+    ctx.fillStyle = hasKey ? '#082f49' : '#090d14';
+    ctx.beginPath();
+    ctx.moveTo(14, -9);
+    ctx.quadraticCurveTo(30, -6, 30, 0);
+    ctx.quadraticCurveTo(30, 6, 14, 9);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = hasKey ? '#38bdf8' : '#334155';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    if (hasKey) {
+      // Glowing green/amber cockpit instrument glow
+      ctx.fillStyle = 'rgba(56, 189, 248, 0.55)';
+      ctx.fillRect(19, -5.5, 4, 11);
+      ctx.fillStyle = '#34d399';
+      ctx.fillRect(21, -3, 2, 2);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillRect(21, 1, 2, 2);
+      // Red/Green nav lights on fuselage sponsons
+      const navBlink = Math.sin(timeSec * 5) > -0.3;
+      if (navBlink) {
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.arc(8, -14.5, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#22c55e';
+        ctx.beginPath();
+        ctx.arc(8, 14.5, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Part 1: AVIATION_FUEL — External Fuel Cell & Hose (Port Flank)
+    if (hasFuel) {
+      ctx.fillStyle = '#b91c1c';
+      traceRoundedRect(ctx, -12, -20, 14, 7, 2);
+      ctx.fill();
+      ctx.strokeStyle = '#fca5a5';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(-4, -13);
+      ctx.quadraticCurveTo(-2, -9, 2, -10);
+      ctx.stroke();
+      ctx.fillStyle = '#34d399';
+      ctx.beginPath();
+      ctx.arc(-5, -16.5, 1.7, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Dry open filler port & disconnected dangling hose
+      ctx.fillStyle = '#090d14';
+      ctx.beginPath();
+      ctx.arc(-2, -13, 2.8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(-2, -13);
+      ctx.quadraticCurveTo(-8, -19, -13, -17);
+      ctx.stroke();
+    }
+
+    // Part 2: ROTOR_FUSE — Starboard Turbine Electronics Bay
+    if (hasFuse) {
+      ctx.fillStyle = '#1e293b';
+      traceRoundedRect(ctx, -8, 12, 13, 6.5, 1.5);
+      ctx.fill();
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = '#34d399';
+      ctx.beginPath();
+      ctx.arc(-1.5, 15.2, 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Exposed dark/sparking turbine relay socket
+      ctx.fillStyle = '#090d14';
+      ctx.fillRect(-7, 12, 11, 5.5);
+      ctx.strokeStyle = '#f97316';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-7, 12, 11, 5.5);
+      if (Math.sin(timeSec * 19) > 0.78) {
+        ctx.fillStyle = '#fde047';
+        ctx.beginPath();
+        ctx.arc(-2, 14.5, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Dorsal Turbine Cowling & Dual Exhausts
+    ctx.fillStyle = '#1e293b';
+    traceRoundedRect(ctx, -10, -6.5, 18, 13, 3);
+    ctx.fill();
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.arc(-11, -3.5, 2.6, 0, Math.PI * 2);
+    ctx.arc(-11, 3.5, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Rotor Assembly (gradual acceleration during ACTIVATING -> full blur disc at READY)
+    const rotorAngle =
+      heliSpool > 0
+        ? timeSec * (2 + heliSpool * 24)
+        : 0.42;
+
+    if (heliSpool > 0.22) {
+      const discAlpha = Math.min(0.32, (heliSpool - 0.22) * 0.42);
+      ctx.fillStyle = `rgba(226, 232, 240, ${discAlpha})`;
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(251, 191, 36, ${discAlpha * 1.4})`;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.rotate(rotorAngle);
+    const bladeAlpha = heliSpool > 0.5 ? 0.45 : 0.85;
+    ctx.strokeStyle = `rgba(226, 232, 240, ${bladeAlpha})`;
+    ctx.lineWidth = 3.4;
+    ctx.beginPath();
+    ctx.moveTo(-44, 0);
+    ctx.lineTo(44, 0);
+    ctx.moveTo(0, -44);
+    ctx.lineTo(0, 44);
+    ctx.stroke();
+    // Blade tip warning stripes
+    ctx.strokeStyle = `rgba(251, 191, 36, ${bladeAlpha})`;
+    ctx.lineWidth = 3.4;
+    ctx.beginPath();
+    ctx.moveTo(-44, 0);
+    ctx.lineTo(-37, 0);
+    ctx.moveTo(37, 0);
+    ctx.lineTo(44, 0);
+    ctx.moveTo(0, -44);
+    ctx.lineTo(0, -37);
+    ctx.moveTo(0, 37);
+    ctx.lineTo(0, 44);
+    ctx.stroke();
+    ctx.restore();
+
+    // Rotor Hub Cap
+    ctx.fillStyle = '#94a3b8';
+    ctx.beginPath();
+    ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.arc(0, 0, 2, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.restore();
     ctx.restore();
 
-    // 2. Lifeboat Davit
+    // --- 2. BOW LIFEBOAT & HYDRAULIC DAVIT CRANE ---
     const bx = engine.map.lifeboatPos.x;
     const by = engine.map.lifeboatPos.y;
+    const bTx = engine.map.lifeboatPos.tx;
+    const bTy = engine.map.lifeboatPos.ty;
+    // Detect which side is outboard VOID rail (port top = -1, starboard bottom = +1)
+    const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
+    const outSign = voidNorth ? -1 : 1;
+
+    const hasPatch = esc.lifeboatParts.includes('HULL_PATCH');
+    const hasCrank = esc.lifeboatParts.includes('WINCH_CRANK');
+    const hasBattery = esc.lifeboatParts.includes('MARINE_BATTERY');
+    const boatReady = esc.lifeboatState === 'READY';
+    const boatActivating = esc.lifeboatState === 'ACTIVATING';
+    const craneSwing = boatReady ? 1 : boatActivating ? esc.lifeboatActivationProgress : 0;
+
+    // Davit deck pedestals sit slightly inboard of rail, arms swing boat outward over sea (-outSign*0 -> +outSign*34)
+    const inboardY = by - outSign * 14;
+    const swingOutDist = craneSwing * 36;
+    const boatY = by - outSign * 2 + outSign * swingOutDist;
+    const boatX = bx + 16;
+
     ctx.save();
-    ctx.fillStyle = '#ea580c';
-    ctx.beginPath();
-    ctx.ellipse(bx, by, 22, 11, 0, 0, Math.PI * 2);
+    // Deck mounting plate & yellow safety hazard border around davit bay
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.45)';
+    traceRoundedRect(ctx, bx - 16, by - 16, ts + 28, ts, 4);
     ctx.fill();
-    ctx.strokeStyle = engine.escape.lifeboatParts.length === 3 ? '#38bdf8' : '#fed7aa';
+    ctx.strokeStyle = boatReady
+      ? '#34d399'
+      : esc.lifeboatParts.length === 3
+        ? '#38bdf8'
+        : 'rgba(56, 189, 248, 0.45)';
     ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    traceRoundedRect(ctx, bx - 16, by - 16, ts + 28, ts, 4);
     ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Twin Steel A-Frame Davit Pedestals (fore & aft)
+    const leftPedX = bx - 8;
+    const rightPedX = bx + 40;
+    for (const px of [leftPedX, rightPedX]) {
+      ctx.fillStyle = '#334155';
+      traceRoundedRect(ctx, px - 6, inboardY - 6, 12, 12, 2);
+      ctx.fill();
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      // Swinging hydraulic davit boom arm extending from pedestal over the hull rail
+      const armReach = 12 + swingOutDist * 1.05;
+      const tipY = inboardY + outSign * armReach;
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.lineWidth = 6.5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(px + 2, inboardY + 2);
+      ctx.lineTo(px + 2, tipY + 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 4.8;
+      ctx.beginPath();
+      ctx.moveTo(px, inboardY);
+      ctx.lineTo(px, tipY);
+      ctx.stroke();
+
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.arc(px, tipY, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Center Hydraulic Winch Drum Box (between the two pedestals)
+    const winchX = (leftPedX + rightPedX) / 2;
+    ctx.fillStyle = '#1e293b';
+    traceRoundedRect(ctx, winchX - 10, inboardY - 6, 20, 12, 2);
+    ctx.fill();
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Part 2: WINCH_CRANK — Bare Spline vs Geared Crank Wheel + Cable Tension
+    if (hasCrank) {
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.arc(winchX + 12, inboardY, 5.5, 0, Math.PI * 2);
+      ctx.stroke();
+      const crankAng = boatActivating ? timeSec * 9 : 0.6;
+      ctx.beginPath();
+      ctx.moveTo(winchX + 12, inboardY);
+      ctx.lineTo(winchX + 12 + Math.cos(crankAng) * 7, inboardY + Math.sin(crankAng) * 7);
+      ctx.stroke();
+    } else {
+      // Bare stripped spline stub
+      ctx.fillStyle = '#475569';
+      ctx.fillRect(winchX + 9, inboardY - 2, 5, 4);
+    }
+
+    // Part 3: MARINE_BATTERY — Deck Power Tray & Floodlight
+    const batX = bx - 14;
+    const batY = inboardY - outSign * 4;
+    ctx.fillStyle = '#0f172a';
+    traceRoundedRect(ctx, batX - 5, batY - 5, 10, 10, 1.5);
+    ctx.fill();
+    if (hasBattery) {
+      ctx.fillStyle = '#0284c7';
+      ctx.fillRect(batX - 4, batY - 4, 8, 8);
+      ctx.fillStyle = '#22d3ee';
+      ctx.beginPath();
+      ctx.arc(batX, batY, 2, 0, Math.PI * 2);
+      ctx.fill();
+      if (boatActivating || boatReady) {
+        // Davit crane spotlight cone illuminating boat over water
+        const spot = ctx.createRadialGradient(boatX, boatY, 4, boatX, boatY, 42);
+        spot.addColorStop(0, boatReady ? 'rgba(52, 211, 153, 0.25)' : 'rgba(56, 189, 248, 0.22)');
+        spot.addColorStop(1, 'rgba(56, 189, 248, 0)');
+        ctx.fillStyle = spot;
+        ctx.beginPath();
+        ctx.arc(boatX, boatY, 42, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      ctx.strokeStyle = '#ca8a04';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(batX - 4.5, batY - 4.5, 9, 9);
+    }
+
+    // Lifeboat Hull (suspended & swung out over the ocean as crane activates)
+    const boatBob = boatReady ? Math.sin(timeSec * 2.8) * 1.4 : 0;
+    ctx.save();
+    ctx.translate(boatX, boatY + boatBob);
+
+    // Water/deck contact shadow beneath boat
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.52)';
+    ctx.beginPath();
+    ctx.ellipse(2, 4, 28, 12.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Enclosed Rescue-Orange Lifeboat Hull
+    const hullGrad = ctx.createLinearGradient(0, -12, 0, 12);
+    hullGrad.addColorStop(0, '#fb923c');
+    hullGrad.addColorStop(0.5, '#ea580c');
+    hullGrad.addColorStop(1, '#9a3412');
+    ctx.fillStyle = hullGrad;
+    ctx.beginPath();
+    ctx.moveTo(-27, 0);
+    ctx.quadraticCurveTo(-18, -12, 0, -12);
+    ctx.quadraticCurveTo(20, -12, 27, 0);
+    ctx.quadraticCurveTo(20, 12, 0, 12);
+    ctx.quadraticCurveTo(-18, 12, -27, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = boatReady ? '#34d399' : '#fed7aa';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // Reflective white/slate top cabin canopy & hatch
+    ctx.fillStyle = '#e2e8f0';
+    traceRoundedRect(ctx, -14, -7, 26, 14, 5);
+    ctx.fill();
+    ctx.fillStyle = '#0f172a';
+    traceRoundedRect(ctx, 4, -4.5, 6, 9, 2);
+    ctx.fill();
+
+    // Part 1: HULL_PATCH — Fractured Hull Crack vs Bolted Steel Patch
+    if (hasPatch) {
+      ctx.fillStyle = '#475569';
+      traceRoundedRect(ctx, -11, -5, 11, 10, 1.5);
+      ctx.fill();
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = '#e2e8f0';
+      for (const [rx, ry] of [
+        [-9, -3],
+        [-2, -3],
+        [-9, 3],
+        [-2, 3],
+      ]) {
+        ctx.fillRect(rx, ry, 1.4, 1.4);
+      }
+    } else {
+      // Jagged hull fracture
+      ctx.strokeStyle = '#090d14';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(-10, -4);
+      ctx.lineTo(-6, -1);
+      ctx.lineTo(-8, 2);
+      ctx.lineTo(-3, 5);
+      ctx.stroke();
+    }
+
+    // Steel hoisting shackles & lift cables connecting davit tips to boat bow/stern
+    ctx.strokeStyle = hasCrank ? '#e2e8f0' : 'rgba(148, 163, 184, 0.45)';
+    ctx.lineWidth = hasCrank ? 1.5 : 1;
+    ctx.beginPath();
+    ctx.moveTo(-22, 0);
+    ctx.lineTo(leftPedX - boatX, inboardY + outSign * (12 + swingOutDist * 1.05) - (boatY + boatBob));
+    ctx.moveTo(22, 0);
+    ctx.lineTo(rightPedX - boatX, inboardY + outSign * (12 + swingOutDist * 1.05) - (boatY + boatBob));
+    ctx.stroke();
+
     ctx.restore();
+    ctx.restore();
+  }
+
+  private drawWorldPickups(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    timeSec: number
+  ): void {
+    const deck = engine.getCurrentDeck();
+    for (const wp of engine.worldPickups) {
+      if (wp.deck !== deck) continue;
+      const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
+      ctx.save();
+      ctx.translate(wp.x, wp.y);
+
+      // Ground halo ring so dropped items stay readable in torchlight
+      ctx.strokeStyle =
+        wp.item === 'BACKPACK'
+          ? 'rgba(249, 115, 22, 0.72)'
+          : wp.item === 'AVIATION_FUEL' || wp.item === 'IGNITION_KEY' || wp.item === 'ROTOR_FUSE'
+            ? 'rgba(251, 191, 36, 0.65)'
+            : wp.item === 'WINCH_CRANK' || wp.item === 'MARINE_BATTERY' || wp.item === 'HULL_PATCH'
+              ? 'rgba(56, 189, 248, 0.65)'
+              : 'rgba(163, 230, 53, 0.55)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.beginPath();
+      ctx.ellipse(1, 2, 8, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (wp.item === 'BACKPACK') {
+        // Rugged Expedition Rucksack
+        ctx.fillStyle = '#c2410c';
+        traceRoundedRect(ctx, -8, -9, 16, 18, 4);
+        ctx.fill();
+        ctx.strokeStyle = '#fed7aa';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, -5, -4, 10, 9, 2);
+        ctx.fill();
+        ctx.fillStyle = '#fb923c';
+        ctx.fillRect(-6, -9, 12, 2.4);
+      } else if (wp.item === 'AVIATION_FUEL') {
+        ctx.fillStyle = '#dc2626';
+        traceRoundedRect(ctx, -6, -7, 12, 14, 2);
+        ctx.fill();
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(1, -9, 4, 3);
+      } else if (wp.item === 'IGNITION_KEY') {
+        ctx.strokeStyle = '#fbbf24';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(-3, 0, 3.5, 0, Math.PI * 2);
+        ctx.moveTo(0.5, 0);
+        ctx.lineTo(7, 0);
+        ctx.lineTo(7, 3);
+        ctx.stroke();
+      } else if (wp.item === 'ROTOR_FUSE') {
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, -7, -4, 14, 8, 2);
+        ctx.fill();
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(-7, -3, 3, 6);
+        ctx.fillRect(4, -3, 3, 6);
+        ctx.fillStyle = '#34d399';
+        ctx.fillRect(-2, -1.5, 4, 3);
+      } else if (wp.item === 'HULL_PATCH') {
+        ctx.fillStyle = '#475569';
+        traceRoundedRect(ctx, -7, -6, 14, 12, 1.5);
+        ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      } else if (wp.item === 'WINCH_CRANK') {
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2.2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 5.5, 0, Math.PI * 2);
+        ctx.moveTo(0, 0);
+        ctx.lineTo(7, -4);
+        ctx.stroke();
+      } else if (wp.item === 'MARINE_BATTERY') {
+        ctx.fillStyle = '#0369a1';
+        traceRoundedRect(ctx, -6, -6, 12, 12, 1.5);
+        ctx.fill();
+        ctx.fillStyle = '#38bdf8';
+        ctx.fillRect(-4, -8, 3, 2);
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(1, -8, 3, 2);
+      } else {
+        // General Tool Drop
+        ctx.fillStyle =
+          wp.item === 'FLARE'
+            ? '#fb7185'
+            : wp.item === 'GLOWSTICK'
+              ? '#34d399'
+              : wp.item === 'FIRE_EXTINGUISHER'
+                ? '#ef4444'
+                : wp.item === 'BOLT_CUTTERS'
+                  ? '#cbd5e1'
+                  : '#a3e635';
+        traceRoundedRect(ctx, -6, -3, 12, 6, 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
   }
 
   private drawContainers(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
@@ -1291,21 +1873,40 @@ export class GameRenderer {
     drawBoot(leftStride, -4.4 * crouchScale);
     drawBoot(-leftStride, 4.4 * crouchScale);
 
-    // 3. Strapped canvas maritime utility pack / emergency satchel
+    // 3. Strapped canvas utility satchel OR expanded Crew Expedition Backpack
     ctx.save();
     ctx.translate(-5.8 * crouchScale, 0);
-    ctx.fillStyle = '#1f2d27';
-    traceRoundedRect(ctx, -4.4, -7.2 * crouchScale, 7.6, 14.4 * crouchScale, 2.5);
-    ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-    // Canvas pack flap & high-vis survival strap
-    ctx.fillStyle = '#2d3f37';
-    traceRoundedRect(ctx, -3.5, -5.8 * crouchScale, 4.8, 11.6 * crouchScale, 1.6);
-    ctx.fill();
-    ctx.fillStyle = p.inventory.length > 1 ? '#d97706' : '#475569';
-    ctx.fillRect(-1.8, -5.4 * crouchScale, 1.6, 10.8 * crouchScale);
+    if (p.hasBackpack) {
+      // Larger rugged orange-trimmed crew expedition backpack (+2 slots upgrade)
+      ctx.fillStyle = '#7c2d12';
+      traceRoundedRect(ctx, -6.2, -9.2 * crouchScale, 10, 18.4 * crouchScale, 3);
+      ctx.fill();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1.3;
+      ctx.stroke();
+      ctx.fillStyle = '#c2410c';
+      traceRoundedRect(ctx, -4.8, -7.2 * crouchScale, 6.2, 14.4 * crouchScale, 2);
+      ctx.fill();
+      // Twin SOLAS orange straps & bedroll
+      ctx.fillStyle = '#fb923c';
+      ctx.fillRect(-3.6, -7.5 * crouchScale, 1.8, 15 * crouchScale);
+      ctx.fillStyle = '#334155';
+      traceRoundedRect(ctx, -7.6, -5.8 * crouchScale, 2.6, 11.6 * crouchScale, 1.2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#1f2d27';
+      traceRoundedRect(ctx, -4.4, -7.2 * crouchScale, 7.6, 14.4 * crouchScale, 2.5);
+      ctx.fill();
+      ctx.strokeStyle = '#0f172a';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      // Canvas pack flap & high-vis survival strap
+      ctx.fillStyle = '#2d3f37';
+      traceRoundedRect(ctx, -3.5, -5.8 * crouchScale, 4.8, 11.6 * crouchScale, 1.6);
+      ctx.fill();
+      ctx.fillStyle = p.inventory.length > 1 ? '#d97706' : '#475569';
+      ctx.fillRect(-1.8, -5.4 * crouchScale, 1.6, 10.8 * crouchScale);
+    }
     ctx.restore();
 
     // 4. Left arm (counter-swinging in oilskin sleeve with deckhand glove)
@@ -2156,7 +2757,34 @@ export class GameRenderer {
     }
 
     // 8. Raycasted Escape Zone Beacons (only visible within player LoS, never through walls)
-    const beacons = [engine.map.lifeboatPos, engine.map.heliPos];
+    const bTx = engine.map.lifeboatPos.tx;
+    const bTy = engine.map.lifeboatPos.ty;
+    const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
+    const outSign = voidNorth ? -1 : 1;
+    const boatSwing =
+      engine.escape.lifeboatState === 'READY'
+        ? 1
+        : engine.escape.lifeboatState === 'ACTIVATING'
+          ? engine.escape.lifeboatActivationProgress
+          : 0;
+    const hasBoatBattery = engine.escape.lifeboatParts.includes('MARINE_BATTERY');
+    const boatBeaconX = engine.map.lifeboatPos.x + 14;
+    const boatBeaconY = engine.map.lifeboatPos.y + outSign * boatSwing * 32;
+
+    const beacons = [
+      {
+        x: boatBeaconX,
+        y: boatBeaconY,
+        r: hasBoatBattery ? 145 : 115,
+        alpha: hasBoatBattery ? 0.85 : 0.65,
+      },
+      {
+        x: engine.map.heliPos.x,
+        y: engine.map.heliPos.y,
+        r: engine.escape.heliState !== 'IDLE' ? 150 : 120,
+        alpha: engine.escape.heliState !== 'IDLE' ? 0.82 : 0.65,
+      },
+    ];
     for (const bc of beacons) {
       const bPoly = computeVisibilityPolygon(
         engine.map,
@@ -2165,12 +2793,12 @@ export class GameRenderer {
         bc.y,
         0,
         Math.PI * 2,
-        115,
+        bc.r,
         40
       );
       if (bPoly.length < 3) continue;
-      const g = lctx.createRadialGradient(bc.x, bc.y, 4, bc.x, bc.y, 115);
-      g.addColorStop(0, 'rgba(0,0,0,0.62)');
+      const g = lctx.createRadialGradient(bc.x, bc.y, 6, bc.x, bc.y, bc.r);
+      g.addColorStop(0, `rgba(0,0,0,${bc.alpha})`);
       g.addColorStop(1, 'rgba(0,0,0,0)');
       lctx.fillStyle = g;
       lctx.beginPath();
@@ -2398,6 +3026,9 @@ export class GameRenderer {
     if (nearest.kind === 'CONTAINER') {
       tx = nearest.container.x;
       ty = nearest.container.y;
+    } else if (nearest.kind === 'PICKUP') {
+      tx = nearest.pickup.x;
+      ty = nearest.pickup.y;
     } else if (nearest.kind === 'HIDING') {
       tx = nearest.spot.x;
       ty = nearest.spot.y;
@@ -2620,7 +3251,7 @@ export class GameRenderer {
 export function getRoomGuidanceLabel(room: RoomName): string {
   switch (room) {
     case 'Lifeboat Davit':
-      return 'Port Stern Davit';
+      return 'Bow Lifeboat Davit';
     case 'Helideck':
       return 'Stern Helideck';
     default:

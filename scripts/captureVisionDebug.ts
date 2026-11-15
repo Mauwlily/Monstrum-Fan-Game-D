@@ -388,12 +388,110 @@ async function main(): Promise<void> {
     await page.waitForTimeout(80);
     await shot('10_flicker_and_survivor.png');
 
+    // 11. ESCAPE_HELI_OVERHAUL: Verify spatial separation (>= 40 tiles), 6-slot backpack, overhauled chopper, & [J] Journal
+    await page.evaluate(() => {
+      window.__monstrumDebug!.loadScenario('ESCAPE_HELI_OVERHAUL');
+    });
+    await page.waitForTimeout(100);
+    const heliInfo = await page.evaluate(() => window.__monstrumDebug!.getEscapeInfo());
+    console.log('ESCAPE_HELI_OVERHAUL info:', heliInfo);
+    check(heliInfo !== null, 'Expected escape info in ESCAPE_HELI_OVERHAUL');
+    if (heliInfo) {
+      check(
+        heliInfo.tileDist >= 40,
+        `Expected Helideck & Bow Lifeboat >= 40 tiles apart, got ${heliInfo.tileDist.toFixed(1)}`
+      );
+      check(
+        heliInfo.maxInventorySlots === 6 && heliInfo.hasBackpack === true,
+        `Expected 6 slots with Backpack, got ${heliInfo.maxInventorySlots}`
+      );
+    }
+    await shot('11_escape_heli_overhaul.png');
+
+    // Verify floor drop [G] without consuming item & Journal [J] modal
+    await page.evaluate(() => {
+      window.__monstrumDebug!.selectSlot(1); // FLARE
+      window.__monstrumDebug!.dropSelectedItem();
+    });
+    await page.waitForTimeout(60);
+    const afterDrop = await page.evaluate(() => window.__monstrumDebug!.getEscapeInfo());
+    console.log('After G drop info:', afterDrop);
+    check(
+      afterDrop?.inventory.length === 3 && afterDrop.worldPickupsCount === 2,
+      `Expected flare dropped onto deck (inv=3, pickups=2), got ${JSON.stringify(afterDrop)}`
+    );
+
+    await page.evaluate(() => {
+      window.__monstrumDebug!.toggleJournal();
+    });
+    await page.waitForTimeout(100);
+    const journalText = await page.evaluate(() => document.body.innerText);
+    check(
+      journalText.includes('Crew Escape Field Journal') &&
+        journalText.includes('INSTALLED') &&
+        journalText.includes('IN PACK') &&
+        journalText.includes('MISSING'),
+      'Expected Escape Journal to show INSTALLED / IN PACK / MISSING badges'
+    );
+    await shot('13_escape_journal.png');
+    await page.evaluate(() => {
+      window.__monstrumDebug!.toggleJournal();
+    });
+
+    // Confirm old always-visible HUD counters are removed
+    const hudText = await page.evaluate(() => document.body.innerText);
+    check(
+      !hudText.includes('Lifeboat (Main Deck):') && !hudText.includes('Helicopter (Helideck):'),
+      'Expected always-visible escape part counters to be removed from main HUD'
+    );
+
+    // 12. ESCAPE_LIFEBOAT_CRANE: Verify 4-slot base inventory, swung crane boat visual, & E victory cutscene
+    await page.evaluate(() => {
+      window.__monstrumDebug!.loadScenario('ESCAPE_LIFEBOAT_CRANE');
+    });
+    await page.waitForTimeout(100);
+    const boatInfo = await page.evaluate(() => window.__monstrumDebug!.getEscapeInfo());
+    console.log('ESCAPE_LIFEBOAT_CRANE info:', boatInfo);
+    check(
+      boatInfo?.maxInventorySlots === 4 && boatInfo?.hasBackpack === false,
+      `Expected base 4-slot pack before Backpack pickup, got ${JSON.stringify(boatInfo)}`
+    );
+    await shot('12_escape_lifeboat_crane.png');
+
+    // Press E near READY bow lifeboat -> triggers VICTORY_CUTSCENE
+    await page.evaluate(() => {
+      window.__monstrumDebug!.tryInteract();
+    });
+    await page.waitForTimeout(160);
+    const cutsceneStatus = await page.evaluate(() => window.__monstrumDebug!.getStatus());
+    console.log('After Press E on READY Lifeboat status:', cutsceneStatus);
+    check(
+      cutsceneStatus === 'VICTORY_CUTSCENE',
+      `Expected VICTORY_CUTSCENE after pressing E at READY lifeboat, got ${cutsceneStatus}`
+    );
+    await shot('14_noir_escape_cutscene.png');
+
+    // Advance 3 noir frames via Space -> transitions to VICTORY EndModal
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(100);
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(100);
+    await page.keyboard.press('Space');
+    await page.waitForTimeout(140);
+    const finalStatus = await page.evaluate(() => window.__monstrumDebug!.getStatus());
+    const finalText = await page.evaluate(() => document.body.innerText);
+    console.log('After 3 cutscene frames status:', finalStatus);
+    check(
+      finalStatus === 'VICTORY' && finalText.includes('You Escaped Alive :D'),
+      `Expected VICTORY EndModal after noir cutscene, got status=${finalStatus}`
+    );
+
     check(consoleErrors.length === 0, `Console errors detected: ${consoleErrors.join('; ')}`);
     check(pageErrors.length === 0, `Page errors detected: ${pageErrors.join('; ')}`);
 
     assert(failures.length === 0, `${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
 
-    console.log('ALL VISION, GRAPHICS, SURVIVOR, FLICKER & HIDING-KILL DEBUG ASSERTIONS PASSED.');
+    console.log('ALL VISION, GRAPHICS, ESCAPE OVERHAUL, JOURNAL, BACKPACK & CUTSCENE ASSERTIONS PASSED.');
   } finally {
     await browser.close();
     if (proc) {

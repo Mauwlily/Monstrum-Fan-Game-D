@@ -1,4 +1,4 @@
-export type GameStatus = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY' | 'GAME_OVER';
+export type GameStatus = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY_CUTSCENE' | 'VICTORY' | 'GAME_OVER';
 
 export type DifficultyLevel = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -76,13 +76,14 @@ export type ItemId =
   | 'GLOWSTICK'
   | 'FLARE'
   | 'FIRE_EXTINGUISHER'
-  | 'BOLT_CUTTERS';
+  | 'BOLT_CUTTERS'
+  | 'BACKPACK';
 
 export interface ItemMeta {
   id: ItemId;
   name: string;
   shortName: string;
-  category: 'LIFEBOAT_PART' | 'HELI_PART' | 'TOOL';
+  category: 'LIFEBOAT_PART' | 'HELI_PART' | 'TOOL' | 'UPGRADE';
   description: string;
   color: string;
 }
@@ -175,6 +176,14 @@ export const ITEM_CATALOG: Record<ItemId, ItemMeta> = {
     category: 'TOOL',
     description: 'Cuts padlocked bulkhead doors.',
     color: '#cbd5e1',
+  },
+  BACKPACK: {
+    id: 'BACKPACK',
+    name: 'Crew Backpack',
+    shortName: 'Backpack',
+    category: 'UPGRADE',
+    description: 'Permanently expands pack capacity from 4 to 6 slots.',
+    color: '#f97316',
   },
 };
 
@@ -336,6 +345,8 @@ export interface PlayerState {
   climbingStairId: string | null;
   climbProgress: number; // 0..1 timed climb progress
   inventory: ItemId[];
+  maxInventorySlots: number;
+  hasBackpack: boolean;
   selectedSlot: number;
   stepTimer: number;
   walkPhase: number;
@@ -421,11 +432,27 @@ export interface Particle {
   color: string;
 }
 
+export interface WorldPickup {
+  id: number;
+  x: number;
+  y: number;
+  deck: ShipDeck;
+  item: ItemId;
+}
+
+export type EscapeActivationState = 'IDLE' | 'ACTIVATING' | 'READY';
+
 export interface EscapeProgress {
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
-  lifeboatLaunchProgress: number; // 0..1 (hold E at escape once all 3 installed)
-  heliLaunchProgress: number; // 0..1
+  lifeboatPartProgress: number;
+  heliPartProgress: number;
+  lifeboatActivatingHold: number;
+  heliActivatingHold: number;
+  lifeboatState: EscapeActivationState;
+  heliState: EscapeActivationState;
+  lifeboatActivationProgress: number; // 0..1 timed hydraulic crane swing-out
+  heliActivationProgress: number; // 0..1 timed turbine spin-up
 }
 
 export interface RunStats {
@@ -452,17 +479,24 @@ export interface HudSnapshot {
   currentRoom: RoomName;
   shipArchetype: ShipArchetype;
   inventory: ItemId[];
+  maxInventorySlots: number;
+  hasBackpack: boolean;
   selectedSlot: number;
+  journalOpen: boolean;
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
+  lifeboatState: EscapeActivationState;
+  heliState: EscapeActivationState;
+  lifeboatActivationProgress: number;
+  heliActivationProgress: number;
   promptText: string | null;
   promptSubtext: string | null;
   bruteState: BruteBehaviorState;
   bruteDistance: number;
   elapsedSeconds: number;
   toastMessage: string | null;
-  launchProgress: number;
-  launchLabel: string | null;
+  actionProgress: number;
+  actionLabel: string | null;
   climbProgress: number;
   climbLabel: string | null;
   zoom: number;
@@ -477,7 +511,9 @@ export type DebugScenarioId =
   | 'DOOR_KEYHOLE_AND_FLARE'
   | 'BRUTE_BEAM_CORNER'
   | 'STAIR_BRUTE_GLOW'
-  | 'FLICKER_AND_SURVIVOR';
+  | 'FLICKER_AND_SURVIVOR'
+  | 'ESCAPE_HELI_OVERHAUL'
+  | 'ESCAPE_LIFEBOAT_CRANE';
 
 export interface AcousticContext {
   bruteDistance: number;

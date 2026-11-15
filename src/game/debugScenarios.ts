@@ -56,6 +56,16 @@ export const DEBUG_SCENARIOS: Array<{ id: DebugScenarioId; label: string; summar
     label: 'Survivor & Flicker',
     summary: 'Remade maritime crew survivor mid-stride inside a flickering lit compartment.',
   },
+  {
+    id: 'ESCAPE_HELI_OVERHAUL',
+    label: 'Helideck Overhaul',
+    summary: 'Overhauled stern Helicopter with partial visual repairs & 6-slot Crew Backpack.',
+  },
+  {
+    id: 'ESCAPE_LIFEBOAT_CRANE',
+    label: 'Lifeboat Crane',
+    summary: 'Bow Forecastle Lifeboat swung clear over rail by hydraulic davit + floor Backpack pickup.',
+  },
 ];
 
 function tileCenter(tx: number, ty: number, ts: number): { x: number; y: number } {
@@ -463,8 +473,11 @@ export function applyDebugScenarioToEngine(
 
   // Common clean baseline reset
   engine.droppedLights = [];
+  engine.worldPickups = [];
   engine.ripples = [];
   engine.particles = [];
+  engine.journalOpen = false;
+  engine.holdingInteract = false;
   p.hidingSpotId = null;
   p.peekingDoorId = null;
   p.peekingSpotId = null;
@@ -477,6 +490,22 @@ export function applyDebugScenarioToEngine(
   p.walkPhase = 0;
   p.battery = 100;
   p.stamina = 100;
+  p.inventory = ['GLOWSTICK'];
+  p.maxInventorySlots = 4;
+  p.hasBackpack = false;
+  p.selectedSlot = 0;
+  engine.escape = {
+    lifeboatParts: [],
+    heliParts: [],
+    lifeboatPartProgress: 0,
+    heliPartProgress: 0,
+    lifeboatActivatingHold: 0,
+    heliActivatingHold: 0,
+    lifeboatState: 'IDLE',
+    heliState: 'IDLE',
+    lifeboatActivationProgress: 0,
+    heliActivationProgress: 0,
+  };
   engine.zoom = 1.25;
   engine.targetZoom = 1.25;
   engine.debugConfig.enabled = true;
@@ -749,6 +778,69 @@ export function applyDebugScenarioToEngine(
       b.y = map.bruteSpawn.y;
       probePoints = [occludedProbe];
     }
+    engine.debugConfig.freezeAi = true;
+  } else if (scenarioId === 'ESCAPE_HELI_OVERHAUL') {
+    const hx = engine.map.heliPos.x;
+    const hy = engine.map.heliPos.y;
+    p.x = hx + 72;
+    p.y = hy + 22;
+    p.angle = Math.atan2(hy - p.y, hx - p.x);
+    p.flashlightOn = true;
+    p.hasBackpack = true;
+    p.maxInventorySlots = 6;
+    p.inventory = ['IGNITION_KEY', 'FLARE', 'GLOWSTICK', 'BOLT_CUTTERS'];
+    engine.escape.heliParts = ['AVIATION_FUEL', 'ROTOR_FUSE'];
+    engine.escape.heliState = 'IDLE';
+    engine.escape.heliActivationProgress = 0;
+    engine.escape.lifeboatParts = ['HULL_PATCH'];
+    // Subtle deck work light glowsticks framing stern pad
+    engine.droppedLights.push({
+      id: 9101,
+      x: hx - 32,
+      y: hy - 34,
+      type: 'GLOWSTICK',
+      life: 60,
+      maxLife: 60,
+      lureTimer: 0,
+    });
+    engine.worldPickups.push({
+      id: 9102,
+      x: hx + 44,
+      y: hy - 34,
+      deck: 'MAIN',
+      item: 'BATTERY_PACK',
+    });
+    engine.zoom = 1.3;
+    engine.targetZoom = 1.3;
+    b.x = engine.map.bruteSpawn.x;
+    b.y = engine.map.bruteSpawn.y;
+    engine.debugConfig.freezeAi = true;
+  } else if (scenarioId === 'ESCAPE_LIFEBOAT_CRANE') {
+    const bx = engine.map.lifeboatPos.x;
+    const by = engine.map.lifeboatPos.y;
+    const voidNorth = engine.map.tiles[engine.map.lifeboatPos.ty - 1]?.[engine.map.lifeboatPos.tx] === 'VOID';
+    const standY = voidNorth ? by + 48 : by - 48;
+    p.x = bx + 16;
+    p.y = standY;
+    p.angle = Math.atan2(by - p.y, bx + 16 - p.x);
+    p.flashlightOn = true;
+    p.hasBackpack = false;
+    p.maxInventorySlots = 4;
+    p.inventory = ['FLARE', 'GLOWSTICK', 'BATTERY_PACK', 'BOLT_CUTTERS'];
+    engine.escape.lifeboatParts = ['HULL_PATCH', 'WINCH_CRANK', 'MARINE_BATTERY'];
+    engine.escape.lifeboatState = 'READY';
+    engine.escape.lifeboatActivationProgress = 1;
+    engine.worldPickups.push({
+      id: 9201,
+      x: p.x + 56,
+      y: standY + (voidNorth ? 6 : -6),
+      deck: 'MAIN',
+      item: 'BACKPACK',
+    });
+    engine.zoom = 1.3;
+    engine.targetZoom = 1.3;
+    b.x = engine.map.bruteSpawn.x;
+    b.y = engine.map.bruteSpawn.y;
     engine.debugConfig.freezeAi = true;
   }
 

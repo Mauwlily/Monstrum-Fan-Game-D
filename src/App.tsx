@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DebugPanel, DebugTelemetry, ProbeReading } from './components/DebugPanel';
+import { EscapeCutsceneModal } from './components/EscapeCutsceneModal';
+import { EscapeJournalModal } from './components/EscapeJournalModal';
 import { GameHud } from './components/GameHud';
 import { EndModal, PauseModal } from './components/GameModals';
 import { TitleMenu } from './components/TitleMenu';
@@ -13,6 +15,7 @@ import {
   DifficultyConfig,
   GameStatus,
   HudSnapshot,
+  ItemId,
   RunStats,
 } from './game/types';
 
@@ -23,7 +26,25 @@ declare global {
       setOverlays: (patch: Partial<DebugOverlayConfig>) => void;
       step: (dtSec?: number) => void;
       tryInteract: () => void;
+      holdInteract: (holding: boolean) => void;
       toggleFlashlight: () => void;
+      toggleJournal: () => void;
+      dropSelectedItem: () => void;
+      selectSlot: (idx: number) => void;
+      getEscapeInfo: () => {
+        heliPos: { tx: number; ty: number };
+        lifeboatPos: { tx: number; ty: number };
+        tileDist: number;
+        inventory: ItemId[];
+        maxInventorySlots: number;
+        hasBackpack: boolean;
+        journalOpen: boolean;
+        worldPickupsCount: number;
+        heliParts: ItemId[];
+        lifeboatParts: ItemId[];
+        heliState: string;
+        lifeboatState: string;
+      } | null;
       getTelemetry: () => DebugTelemetry | null;
       getStatus: () => GameStatus;
       probePixels: () => ProbeReading[];
@@ -103,7 +124,7 @@ export default function App() {
           },
           onVictory: (stats) => {
             setRunStats(stats);
-            setStatus('VICTORY');
+            setStatus('VICTORY_CUTSCENE');
           },
         },
         Number.isFinite(parsedSeed) ? parsedSeed : undefined
@@ -347,12 +368,57 @@ export default function App() {
         renderImmediateFrame();
         syncDebugTelemetry();
       },
+      holdInteract: (holding: boolean) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.holdingInteract = holding;
+      },
       toggleFlashlight: () => {
         const engine = engineRef.current;
         if (!engine) return;
         engine.toggleFlashlight();
         renderImmediateFrame();
         syncDebugTelemetry();
+      },
+      toggleJournal: () => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.toggleJournal();
+        renderImmediateFrame();
+        syncDebugTelemetry();
+      },
+      dropSelectedItem: () => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.dropSelectedItem();
+        renderImmediateFrame();
+        syncDebugTelemetry();
+      },
+      selectSlot: (idx: number) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.selectSlot(idx);
+        renderImmediateFrame();
+      },
+      getEscapeInfo: () => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        const h = engine.map.heliPos;
+        const b = engine.map.lifeboatPos;
+        return {
+          heliPos: { tx: h.tx, ty: h.ty },
+          lifeboatPos: { tx: b.tx, ty: b.ty },
+          tileDist: Math.hypot(h.tx - b.tx, h.ty - b.ty),
+          inventory: [...engine.player.inventory],
+          maxInventorySlots: engine.player.maxInventorySlots,
+          hasBackpack: engine.player.hasBackpack,
+          journalOpen: engine.journalOpen,
+          worldPickupsCount: engine.worldPickups.length,
+          heliParts: [...engine.escape.heliParts],
+          lifeboatParts: [...engine.escape.lifeboatParts],
+          heliState: engine.escape.heliState,
+          lifeboatState: engine.escape.lifeboatState,
+        };
       },
       getTelemetry: () => syncDebugTelemetry(),
       getStatus: () => statusRef.current,
@@ -381,6 +447,11 @@ export default function App() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Escape') {
         if (statusRef.current === 'PLAYING') {
+          const eng = engineRef.current;
+          if (eng?.journalOpen) {
+            eng.toggleJournal();
+            return;
+          }
           setStatus('PAUSED');
           return;
         }
@@ -413,7 +484,9 @@ export default function App() {
       engine.keys.add(e.code);
 
       if (!e.repeat) {
-        if (e.code === 'KeyF') {
+        if (e.code === 'KeyJ') {
+          engine.toggleJournal();
+        } else if (e.code === 'KeyF') {
           engine.toggleFlashlight();
         } else if (e.code === 'KeyC' || e.code === 'ControlLeft' || e.code === 'ControlRight') {
           engine.toggleCrouch();
@@ -421,7 +494,7 @@ export default function App() {
           engine.holdingInteract = true;
           engine.tryInteract();
         } else if (e.code === 'KeyG') {
-          engine.useSelectedItem();
+          engine.dropSelectedItem();
         } else if (e.code === 'Digit1') {
           engine.selectSlot(0);
         } else if (e.code === 'Digit2') {
@@ -432,6 +505,8 @@ export default function App() {
           engine.selectSlot(3);
         } else if (e.code === 'Digit5') {
           engine.selectSlot(4);
+        } else if (e.code === 'Digit6') {
+          engine.selectSlot(5);
         }
       }
     };
@@ -523,9 +598,22 @@ export default function App() {
           debugOpen={debugOpen}
           onToggleMute={toggleMute}
           onToggleDebug={() => setDebugOpen((prev) => !prev)}
+          onToggleJournal={() => engineRef.current?.toggleJournal()}
           onPause={() => setStatus('PAUSED')}
           onSelectSlot={(idx) => engineRef.current?.selectSlot(idx)}
           onUseSelected={() => engineRef.current?.useSelectedItem()}
+          onDropSelected={() => engineRef.current?.dropSelectedItem()}
+        />
+      )}
+
+      {hud && status === 'PLAYING' && hud.journalOpen && (
+        <EscapeJournalModal
+          hud={hud}
+          onClose={() => {
+            if (engineRef.current?.journalOpen) {
+              engineRef.current.toggleJournal();
+            }
+          }}
         />
       )}
 
@@ -549,6 +637,14 @@ export default function App() {
           onResume={() => setStatus('PLAYING')}
           onRestart={() => startNewRun(true)}
           onMainMenu={returnToTitle}
+        />
+      )}
+
+      {status === 'VICTORY_CUTSCENE' && runStats && (
+        <EscapeCutsceneModal
+          stats={runStats}
+          onAdvanceFrame={() => getAudio().playCutsceneProjectorClick(true)}
+          onComplete={() => setStatus('VICTORY')}
         />
       )}
 

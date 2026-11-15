@@ -28,6 +28,7 @@ import {
   ShipMap,
   SoundRipple,
   Stairwell,
+  WorldPickup,
 } from './types';
 import {
   canBruteSeePlayer,
@@ -52,6 +53,7 @@ export class MonstrumGameEngine {
   public escape: EscapeProgress;
   public ripples: SoundRipple[] = [];
   public droppedLights: DroppedLight[] = [];
+  public worldPickups: WorldPickup[] = [];
   public particles: Particle[] = [];
   public doorsByTile: Map<number, Door> = new Map();
   public stairByTile: Map<number, Stairwell> = new Map();
@@ -65,6 +67,7 @@ export class MonstrumGameEngine {
   public screenShake = 0;
   public spotFlashAlpha = 0;
   public elapsedSeconds = 0;
+  public journalOpen = false;
 
   public brain: BruteBrain;
   private audio: HorrorAudioEngine;
@@ -82,6 +85,11 @@ export class MonstrumGameEngine {
   private checkHidingStallTimer = 0;
   private lastCheckHidingSpotId: string | null = null;
   private lastCheckHidingDist = Infinity;
+  private repairTickTimer = 0;
+  private heliPulseTimer = 0;
+  private lifeboatPulseTimer = 0;
+  private activeRepairLabel: string | null = null;
+  private activeRepairProgress = 0;
 
   public debugConfig: DebugOverlayConfig = {
     enabled: false,
@@ -136,7 +144,9 @@ export class MonstrumGameEngine {
       preHidePos: null,
       climbingStairId: null,
       climbProgress: 0,
-      inventory: ['GLOWSTICK'], // Start with 1 glowstick for emergency darkness
+      inventory: ['GLOWSTICK'], // Start with 1 glowstick; 4 slots by default (+2 via Backpack)
+      maxInventorySlots: 4,
+      hasBackpack: false,
       selectedSlot: 0,
       stepTimer: 0,
       walkPhase: 0,
@@ -183,8 +193,14 @@ export class MonstrumGameEngine {
     this.escape = {
       lifeboatParts: [],
       heliParts: [],
-      lifeboatLaunchProgress: 0,
-      heliLaunchProgress: 0,
+      lifeboatPartProgress: 0,
+      heliPartProgress: 0,
+      lifeboatActivatingHold: 0,
+      heliActivatingHold: 0,
+      lifeboatState: 'IDLE',
+      heliState: 'IDLE',
+      lifeboatActivationProgress: 0,
+      heliActivationProgress: 0,
     };
 
     this.cameraX = this.player.x;
@@ -282,6 +298,7 @@ export class MonstrumGameEngine {
     this.updateSteamVents(clampedDt);
     this.updateDroppedLights(clampedDt);
     this.updatePlayer(clampedDt, canvasWidth, canvasHeight);
+    this.updateEscapeActivations(clampedDt);
     if (!this.debugConfig.freezeAi) {
       this.updateBrute(clampedDt);
     }
@@ -498,8 +515,10 @@ export class MonstrumGameEngine {
         }
 
         p.stamina = Math.min(p.maxStamina, p.stamina + dt * 5);
-        this.escape.lifeboatLaunchProgress = 0;
-        this.escape.heliLaunchProgress = 0;
+        this.escape.lifeboatActivatingHold = 0;
+        this.escape.heliActivatingHold = 0;
+        this.activeRepairLabel = null;
+        this.activeRepairProgress = 0;
         return;
       }
     }
@@ -565,8 +584,10 @@ export class MonstrumGameEngine {
 
       p.stamina = Math.min(p.maxStamina, p.stamina + dt * 22);
       if (p.stamina >= 25) p.exhausted = false;
-      this.escape.lifeboatLaunchProgress = 0;
-      this.escape.heliLaunchProgress = 0;
+      this.escape.lifeboatActivatingHold = 0;
+      this.escape.heliActivatingHold = 0;
+      this.activeRepairLabel = null;
+      this.activeRepairProgress = 0;
       return;
     }
 
@@ -654,38 +675,267 @@ export class MonstrumGameEngine {
       p.noiseLevel = 0;
     }
 
-    // Hold E to launch escape if all 3 parts are installed!
-    this.updateEscapeLaunch(dt);
+    // Hold E to perform slow partial part repairs OR pull the escape activation lever
+    this.updateEscapeInteractHold(dt);
   }
 
-  private updateEscapeLaunch(dt: number): void {
+  public getHeldPartForRoute(route: 'LIFEBOAT' | 'HELI'): ItemId | null {
+    const targetCategory = route === 'LIFEBOAT' ? 'LIFEBOAT_PART' : 'HELI_PART';
+    const installed = route === 'LIFEBOAT' ? this.escape.lifeboatParts : this.escape.heliParts;
+    for (const itemId of this.player.inventory) {
+      const meta = ITEM_CATALOG[itemId];
+      if (meta.category === targetCategory && !installed.includes(itemId)) {
+        return itemId;
+      }
+    }
+    return null;
+  }
+
+  private updateEscapeInteractHold(dt: number): void {
     const p = this.player;
     const distLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
     const distHeli = Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y);
 
-    if (this.holdingInteract && this.escape.lifeboatParts.length === 3 && distLife < 68) {
-      this.escape.lifeboatLaunchProgress += dt / 2.6;
-      // Launching makes loud winch noise!
-      if (Math.random() < 0.08) {
-        this.emitNoise(this.map.lifeboatPos.x, this.map.lifeboatPos.y, 780, 'rgba(56, 189, 248, 0.55)', true, 1.0);
-      }
-      if (this.escape.lifeboatLaunchProgress >= 1) {
-        this.triggerVictory('LIFEBOAT');
+    let label: string | null = null;
+    let progress = 0;
+
+    // 1. Lifeboat Davit partial repair or crank/crane release lever
+    const heldLifePart = this.getHeldPartForRoute('LIFEBOAT');
+    if (this.holdingInteract && distLife < 72 && this.escape.lifeboatState === 'IDLE') {
+      if (this.escape.lifeboatParts.length < 3 && heldLifePart) {
+        this.escape.lifeboatPartProgress = Math.min(1, this.escape.lifeboatPartProgress + dt / 5.0);
+        label = `Installing ${ITEM_CATALOG[heldLifePart].name}...`;
+        progress = this.escape.lifeboatPartProgress;
+
+        this.repairTickTimer -= dt;
+        if (this.repairTickTimer <= 0) {
+          this.repairTickTimer = 0.78;
+          this.audio.playRepairTick('LIFEBOAT', heldLifePart);
+          this.emitNoise(
+            this.map.lifeboatPos.x,
+            this.map.lifeboatPos.y,
+            610,
+            'rgba(56, 189, 248, 0.45)',
+            true,
+            0.72
+          );
+          for (let i = 0; i < 4; i++) {
+            this.particles.push({
+              x: this.map.lifeboatPos.x + (Math.random() - 0.5) * 20,
+              y: this.map.lifeboatPos.y + (Math.random() - 0.5) * 20,
+              vx: (Math.random() - 0.5) * 65,
+              vy: (Math.random() - 0.5) * 65,
+              life: 0.35,
+              maxLife: 0.35,
+              size: 2.5,
+              color: heldLifePart === 'MARINE_BATTERY' ? '#38bdf8' : '#fed7aa',
+            });
+          }
+        }
+
+        if (this.escape.lifeboatPartProgress >= 1) {
+          this.escape.lifeboatPartProgress = 0;
+          const idx = p.inventory.indexOf(heldLifePart);
+          if (idx !== -1) p.inventory.splice(idx, 1);
+          if (p.selectedSlot >= p.inventory.length) {
+            p.selectedSlot = Math.max(0, p.inventory.length - 1);
+          }
+          this.escape.lifeboatParts.push(heldLifePart);
+          this.audio.playRepairComplete();
+          this.emitNoise(
+            this.map.lifeboatPos.x,
+            this.map.lifeboatPos.y,
+            660,
+            'rgba(56, 189, 248, 0.55)',
+            true,
+            0.78
+          );
+          this.showToast(
+            `${ITEM_CATALOG[heldLifePart].name} installed on Lifeboat (${this.escape.lifeboatParts.length}/3)!`
+          );
+          this.emitHud();
+        }
+      } else if (this.escape.lifeboatParts.length === 3) {
+        this.escape.lifeboatActivatingHold = Math.min(1, this.escape.lifeboatActivatingHold + dt / 1.4);
+        label = 'Engaging Hydraulic Davit Crane...';
+        progress = this.escape.lifeboatActivatingHold;
+        if (this.escape.lifeboatActivatingHold >= 1) {
+          this.escape.lifeboatActivatingHold = 0;
+          this.escape.lifeboatState = 'ACTIVATING';
+          this.escape.lifeboatActivationProgress = 0;
+          this.lifeboatPulseTimer = 0.25;
+          this.audio.playEscapeActivationStart('LIFEBOAT');
+          this.emitNoise(
+            this.map.lifeboatPos.x,
+            this.map.lifeboatPos.y,
+            920,
+            'rgba(56, 189, 248, 0.72)',
+            true,
+            0.98
+          );
+          this.showToast('Hydraulic crane engaged — survive until lifeboat swings clear!');
+          this.emitHud();
+        }
       }
     } else {
-      this.escape.lifeboatLaunchProgress = Math.max(0, this.escape.lifeboatLaunchProgress - dt * 0.8);
+      this.escape.lifeboatPartProgress = Math.max(0, this.escape.lifeboatPartProgress - dt * 0.14);
+      this.escape.lifeboatActivatingHold = Math.max(0, this.escape.lifeboatActivatingHold - dt * 1.4);
     }
 
-    if (this.holdingInteract && this.escape.heliParts.length === 3 && distHeli < 74) {
-      this.escape.heliLaunchProgress += dt / 2.6;
-      if (Math.random() < 0.08) {
-        this.emitNoise(this.map.heliPos.x, this.map.heliPos.y, 880, 'rgba(251, 191, 36, 0.55)', true, 1.0);
-      }
-      if (this.escape.heliLaunchProgress >= 1) {
-        this.triggerVictory('HELICOPTER');
+    // 2. Helicopter partial repair or turbine starter hold
+    const heldHeliPart = this.getHeldPartForRoute('HELI');
+    if (this.holdingInteract && distHeli < 78 && this.escape.heliState === 'IDLE') {
+      if (this.escape.heliParts.length < 3 && heldHeliPart) {
+        this.escape.heliPartProgress = Math.min(1, this.escape.heliPartProgress + dt / 5.0);
+        label = `Installing ${ITEM_CATALOG[heldHeliPart].name}...`;
+        progress = this.escape.heliPartProgress;
+
+        this.repairTickTimer -= dt;
+        if (this.repairTickTimer <= 0) {
+          this.repairTickTimer = 0.78;
+          this.audio.playRepairTick('HELI', heldHeliPart);
+          this.emitNoise(
+            this.map.heliPos.x,
+            this.map.heliPos.y,
+            630,
+            'rgba(251, 191, 36, 0.45)',
+            true,
+            0.72
+          );
+          for (let i = 0; i < 4; i++) {
+            this.particles.push({
+              x: this.map.heliPos.x + (Math.random() - 0.5) * 24,
+              y: this.map.heliPos.y + (Math.random() - 0.5) * 24,
+              vx: (Math.random() - 0.5) * 70,
+              vy: (Math.random() - 0.5) * 70,
+              life: 0.35,
+              maxLife: 0.35,
+              size: 2.5,
+              color: heldHeliPart === 'ROTOR_FUSE' ? '#34d399' : '#fbbf24',
+            });
+          }
+        }
+
+        if (this.escape.heliPartProgress >= 1) {
+          this.escape.heliPartProgress = 0;
+          const idx = p.inventory.indexOf(heldHeliPart);
+          if (idx !== -1) p.inventory.splice(idx, 1);
+          if (p.selectedSlot >= p.inventory.length) {
+            p.selectedSlot = Math.max(0, p.inventory.length - 1);
+          }
+          this.escape.heliParts.push(heldHeliPart);
+          this.audio.playRepairComplete();
+          this.emitNoise(
+            this.map.heliPos.x,
+            this.map.heliPos.y,
+            670,
+            'rgba(251, 191, 36, 0.55)',
+            true,
+            0.78
+          );
+          this.showToast(
+            `${ITEM_CATALOG[heldHeliPart].name} installed on Helicopter (${this.escape.heliParts.length}/3)!`
+          );
+          this.emitHud();
+        }
+      } else if (this.escape.heliParts.length === 3) {
+        this.escape.heliActivatingHold = Math.min(1, this.escape.heliActivatingHold + dt / 1.4);
+        label = 'Starting Helicopter Turbine...';
+        progress = this.escape.heliActivatingHold;
+        if (this.escape.heliActivatingHold >= 1) {
+          this.escape.heliActivatingHold = 0;
+          this.escape.heliState = 'ACTIVATING';
+          this.escape.heliActivationProgress = 0;
+          this.heliPulseTimer = 0.25;
+          this.audio.playEscapeActivationStart('HELI');
+          this.emitNoise(
+            this.map.heliPos.x,
+            this.map.heliPos.y,
+            960,
+            'rgba(251, 191, 36, 0.72)',
+            true,
+            0.98
+          );
+          this.showToast('Turbine spinning up — survive until rotors reach flight RPM!');
+          this.emitHud();
+        }
       }
     } else {
-      this.escape.heliLaunchProgress = Math.max(0, this.escape.heliLaunchProgress - dt * 0.8);
+      this.escape.heliPartProgress = Math.max(0, this.escape.heliPartProgress - dt * 0.14);
+      this.escape.heliActivatingHold = Math.max(0, this.escape.heliActivatingHold - dt * 1.4);
+    }
+
+    this.activeRepairLabel = label;
+    this.activeRepairProgress = progress;
+  }
+
+  private updateEscapeActivations(dt: number): void {
+    const p = this.player;
+
+    if (this.escape.lifeboatState === 'ACTIVATING') {
+      this.escape.lifeboatActivationProgress = Math.min(
+        1,
+        this.escape.lifeboatActivationProgress + dt / 9.0
+      );
+      this.lifeboatPulseTimer -= dt;
+      if (this.lifeboatPulseTimer <= 0) {
+        this.lifeboatPulseTimer = 1.2;
+        const occ = this.computeAcousticOcclusion(
+          this.map.lifeboatPos.x,
+          this.map.lifeboatPos.y,
+          p.x,
+          p.y
+        );
+        this.audio.playEscapeActivationPulse(
+          'LIFEBOAT',
+          this.escape.lifeboatActivationProgress,
+          this.map.lifeboatPos.x - p.x,
+          occ
+        );
+        this.emitNoise(
+          this.map.lifeboatPos.x,
+          this.map.lifeboatPos.y,
+          900,
+          'rgba(56, 189, 248, 0.58)',
+          true,
+          0.95
+        );
+      }
+      if (this.escape.lifeboatActivationProgress >= 1) {
+        this.escape.lifeboatState = 'READY';
+        this.audio.playEscapeReadyChime('LIFEBOAT');
+        this.showToast('LIFEBOAT SWUNG CLEAR — Press E at the bow davit to escape!');
+        this.emitHud();
+      }
+    }
+
+    if (this.escape.heliState === 'ACTIVATING') {
+      this.escape.heliActivationProgress = Math.min(1, this.escape.heliActivationProgress + dt / 9.0);
+      this.heliPulseTimer -= dt;
+      if (this.heliPulseTimer <= 0) {
+        this.heliPulseTimer = 1.05;
+        const occ = this.computeAcousticOcclusion(this.map.heliPos.x, this.map.heliPos.y, p.x, p.y);
+        this.audio.playEscapeActivationPulse(
+          'HELI',
+          this.escape.heliActivationProgress,
+          this.map.heliPos.x - p.x,
+          occ
+        );
+        this.emitNoise(
+          this.map.heliPos.x,
+          this.map.heliPos.y,
+          960,
+          'rgba(251, 191, 36, 0.62)',
+          true,
+          0.96
+        );
+      }
+      if (this.escape.heliActivationProgress >= 1) {
+        this.escape.heliState = 'READY';
+        this.audio.playEscapeReadyChime('HELI');
+        this.showToast('HELICOPTER AT FLIGHT RPM — Press E on the helideck to escape!');
+        this.emitHud();
+      }
     }
   }
 
@@ -1328,7 +1578,10 @@ export class MonstrumGameEngine {
   }
 
   private pickRandomRoamTarget(): void {
-    this.brute.roamTarget = this.brain.pickRecencyWeightedRoamTarget(this.elapsedSeconds);
+    this.brute.roamTarget = this.brain.pickRecencyWeightedRoamTarget(
+      this.elapsedSeconds,
+      this.escape
+    );
     this.brute.path = [];
     this.brute.pathRecalcTimer = 0;
   }
@@ -1907,9 +2160,39 @@ export class MonstrumGameEngine {
     this.emitHud();
   }
 
+  public toggleJournal(): void {
+    if (this.ended) return;
+    this.journalOpen = !this.journalOpen;
+    this.audio.playJournalToggle(this.journalOpen);
+    this.emitHud();
+  }
+
   public selectSlot(idx: number): void {
-    if (idx < 0 || idx >= 5) return;
+    if (idx < 0 || idx >= this.player.maxInventorySlots) return;
     this.player.selectedSlot = idx;
+    this.emitHud();
+  }
+
+  public dropSelectedItem(): void {
+    if (this.ended || this.player.hidingSpotId !== null || this.player.climbingStairId !== null) return;
+    const p = this.player;
+    const slot = p.selectedSlot;
+    const itemId = p.inventory[slot];
+    if (!itemId) return;
+
+    p.inventory.splice(slot, 1);
+    this.worldPickups.push({
+      id: this.nextId++,
+      x: p.x + Math.cos(p.angle) * 14,
+      y: p.y + Math.sin(p.angle) * 14,
+      deck: this.getCurrentDeck(),
+      item: itemId,
+    });
+    if (p.selectedSlot >= p.inventory.length) {
+      p.selectedSlot = Math.max(0, p.inventory.length - 1);
+    }
+    this.audio.playItemDrop();
+    this.showToast(`Dropped ${ITEM_CATALOG[itemId].name}.`);
     this.emitHud();
   }
 
@@ -1920,6 +2203,12 @@ export class MonstrumGameEngine {
     if (!itemId) return;
 
     const p = this.player;
+    const meta = ITEM_CATALOG[itemId];
+    if (meta.category === 'LIFEBOAT_PART' || meta.category === 'HELI_PART') {
+      this.showToast(`Take ${meta.name} to the ${meta.category === 'HELI_PART' ? 'Stern Helideck' : 'Bow Lifeboat Davit'} and Hold E.`);
+      return;
+    }
+
     if (itemId === 'BATTERY_PACK') {
       p.battery = Math.min(p.maxBattery, p.battery + 55);
       p.inventory.splice(slot, 1);
@@ -1937,7 +2226,7 @@ export class MonstrumGameEngine {
       });
       p.inventory.splice(slot, 1);
       this.audio.playFlashlightClick();
-      this.showToast('Dropped chemical glowstick.');
+      this.showToast('Cracked & dropped chemical glowstick.');
     } else if (itemId === 'FLARE') {
       const throwDist = 110;
       let fx = p.x + Math.cos(p.angle) * throwDist;
@@ -1988,7 +2277,11 @@ export class MonstrumGameEngine {
       const dy = this.brute.y - p.y;
       const dist = Math.hypot(dx, dy);
       const angleDiff = Math.abs(normalizeAngle(Math.atan2(dy, dx) - p.angle));
-      if (dist <= 215 && angleDiff <= 0.65 && hasLineOfSight(this.map, this.doorsByTile, p.x, p.y, this.brute.x, this.brute.y)) {
+      if (
+        dist <= 215 &&
+        angleDiff <= 0.65 &&
+        hasLineOfSight(this.map, this.doorsByTile, p.x, p.y, this.brute.x, this.brute.y)
+      ) {
         this.brute.state = 'STUNNED';
         this.brute.stunTimer = 4.2;
         this.brute.watchedPlayerHideSpotId = null;
@@ -2029,6 +2322,43 @@ export class MonstrumGameEngine {
 
     const nearest = this.findNearestInteractable();
     if (!nearest) return;
+
+    if (nearest.kind === 'ESCAPE_LIFEBOAT' && !cuttersOnly) {
+      if (this.escape.lifeboatState === 'READY') {
+        this.triggerVictory('LIFEBOAT');
+      }
+      return;
+    }
+
+    if (nearest.kind === 'ESCAPE_HELI' && !cuttersOnly) {
+      if (this.escape.heliState === 'READY') {
+        this.triggerVictory('HELICOPTER');
+      }
+      return;
+    }
+
+    if (nearest.kind === 'PICKUP' && !cuttersOnly) {
+      const pickup = nearest.pickup;
+      const meta = ITEM_CATALOG[pickup.item];
+      if (pickup.item === 'BACKPACK') {
+        p.hasBackpack = true;
+        p.maxInventorySlots = 6;
+        const idx = this.worldPickups.findIndex((w) => w.id === pickup.id);
+        if (idx !== -1) this.worldPickups.splice(idx, 1);
+        this.audio.playBackpackEquip();
+        this.showToast('Equipped Crew Backpack (+2 inventory slots, 6 total)!');
+      } else if (p.inventory.length < p.maxInventorySlots) {
+        p.inventory.push(pickup.item);
+        const idx = this.worldPickups.findIndex((w) => w.id === pickup.id);
+        if (idx !== -1) this.worldPickups.splice(idx, 1);
+        this.audio.playItemPickup();
+        this.showToast(`Picked up ${meta.name}.`);
+      } else {
+        this.showToast(`Pack full (${p.inventory.length}/${p.maxInventorySlots}) — drop [G] or use an item first.`);
+      }
+      this.emitHud();
+      return;
+    }
 
     if (nearest.kind === 'STAIRWELL' && !cuttersOnly) {
       const dest = this.map.stairwells.find((s) => s.id === nearest.stairwell.targetStairId);
@@ -2102,25 +2432,26 @@ export class MonstrumGameEngine {
       this.containersSearched += 1;
       if (c.item) {
         const meta = ITEM_CATALOG[c.item];
-        if (meta.category === 'LIFEBOAT_PART') {
-          this.escape.lifeboatParts.push(c.item);
+        if (c.item === 'BACKPACK') {
+          p.hasBackpack = true;
+          p.maxInventorySlots = 6;
+          this.audio.playBackpackEquip();
+          this.showToast('Found Crew Backpack (+2 inventory slots — 6 total)!');
+        } else if (p.inventory.length < p.maxInventorySlots) {
+          p.inventory.push(c.item);
           this.audio.playContainerSearch(true);
-          this.showToast(`Found Lifeboat Part: ${meta.name} (${this.escape.lifeboatParts.length}/3)`);
-        } else if (meta.category === 'HELI_PART') {
-          this.escape.heliParts.push(c.item);
-          this.audio.playContainerSearch(true);
-          this.showToast(`Found Helicopter Part: ${meta.name} (${this.escape.heliParts.length}/3)`);
+          this.showToast(
+            meta.category === 'LIFEBOAT_PART' || meta.category === 'HELI_PART'
+              ? `Picked up ${meta.name} (check [J] Journal).`
+              : `Picked up ${meta.name}.`
+          );
         } else {
-          if (p.inventory.length < 5) {
-            p.inventory.push(c.item);
-            this.audio.playContainerSearch(true);
-            this.showToast(`Picked up ${meta.name}.`);
-          } else {
-            // Undo searched so player can swap later if inventory full
-            c.searched = false;
-            this.containersSearched -= 1;
-            this.showToast('Tool belt full (5/5) — use an item first.');
-          }
+          // Undo searched so player can swap/drop later if inventory full
+          c.searched = false;
+          this.containersSearched -= 1;
+          this.showToast(
+            `Pack full (${p.inventory.length}/${p.maxInventorySlots}) — drop [G] or use an item first.`
+          );
         }
       } else {
         this.audio.playContainerSearch(false);
@@ -2167,6 +2498,7 @@ export class MonstrumGameEngine {
     | { kind: 'STAIRWELL'; stairwell: Stairwell; dist: number; prompt: string; sub: string }
     | { kind: 'LIGHT_SWITCH'; lightSwitch: RoomLightSwitch; dist: number; prompt: string; sub: string }
     | { kind: 'CONTAINER'; container: Container; dist: number; prompt: string; sub: string }
+    | { kind: 'PICKUP'; pickup: WorldPickup; dist: number; prompt: string; sub: string }
     | { kind: 'HIDING'; spot: HidingSpot; dist: number; prompt: string; sub: string }
     | { kind: 'ESCAPE_LIFEBOAT'; dist: number; prompt: string; sub: string }
     | { kind: 'ESCAPE_HELI'; dist: number; prompt: string; sub: string }
@@ -2181,31 +2513,80 @@ export class MonstrumGameEngine {
 
     // Escape zones
     const dLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
-    if (dLife < 68) {
-      const ready = this.escape.lifeboatParts.length === 3;
+    if (dLife < 72) {
+      const heldLife = this.getHeldPartForRoute('LIFEBOAT');
+      let prompt = `Bow Lifeboat Davit (${this.escape.lifeboatParts.length}/3)`;
+      let sub = 'Press J to view required Lifeboat parts in your Field Journal.';
+      if (this.escape.lifeboatState === 'READY') {
+        prompt = 'Press E to Board Lifeboat & Escape!';
+        sub = 'Davit crane has lowered the boat clear of the hull — go!';
+      } else if (this.escape.lifeboatState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.lifeboatActivationProgress * 100);
+        prompt = `Lowering Lifeboat Over Railing (${pct}%)`;
+        sub = 'Hydraulic winch is screaming — survive until 100%, then Press E!';
+      } else if (this.escape.lifeboatParts.length === 3) {
+        prompt = 'Hold E to Engage Hydraulic Davit Crane';
+        sub = 'All 3 parts installed — swinging boat over the rail draws the Brute!';
+      } else if (heldLife) {
+        prompt = `Hold E to Install ${ITEM_CATALOG[heldLife].name} (${this.escape.lifeboatParts.length}/3)`;
+        sub = 'Slow mechanical repair (~5s) — loud clanks will draw the Brute.';
+      }
       best = {
         kind: 'ESCAPE_LIFEBOAT',
         dist: dLife,
-        prompt: ready ? 'Hold E to Lower Lifeboat & Escape' : 'Lifeboat Davit',
-        sub: ready
-          ? 'All 3 parts ready — loud winch will alert the Brute!'
-          : `${this.escape.lifeboatParts.length}/3 parts collected (Winch, Battery, Patch)`,
+        prompt,
+        sub,
       };
       bestDist = dLife;
     }
 
     const dHeli = Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y);
-    if (dHeli < 74 && dHeli < bestDist) {
-      const ready = this.escape.heliParts.length === 3;
+    if (dHeli < 78 && dHeli < bestDist) {
+      const heldHeli = this.getHeldPartForRoute('HELI');
+      let prompt = `Stern Helideck (${this.escape.heliParts.length}/3)`;
+      let sub = 'Press J to view required Helicopter parts in your Field Journal.';
+      if (this.escape.heliState === 'READY') {
+        prompt = 'Press E to Board Helicopter & Escape!';
+        sub = 'Rotors at full flight RPM — press E now to lift off!';
+      } else if (this.escape.heliState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.heliActivationProgress * 100);
+        prompt = `Helicopter Turbine Spinning Up (${pct}%)`;
+        sub = 'Deafening engine spool — survive until 100%, then Press E!';
+      } else if (this.escape.heliParts.length === 3) {
+        prompt = 'Hold E to Start Helicopter Turbine';
+        sub = 'All 3 parts installed — loud spin-up alerts the Brute!';
+      } else if (heldHeli) {
+        prompt = `Hold E to Install ${ITEM_CATALOG[heldHeli].name} (${this.escape.heliParts.length}/3)`;
+        sub = 'Slow mechanical repair (~5s) — noise attracts the Brute.';
+      }
       best = {
         kind: 'ESCAPE_HELI',
         dist: dHeli,
-        prompt: ready ? 'Hold E to Start Helicopter & Escape' : 'Stern Helideck',
-        sub: ready
-          ? 'All 3 parts ready — rotor spool will draw the Brute!'
-          : `${this.escape.heliParts.length}/3 parts collected (Fuel, Key, Fuse)`,
+        prompt,
+        sub,
       };
       bestDist = dHeli;
+    }
+
+    const pDeck = this.getCurrentDeck();
+    for (const wp of this.worldPickups) {
+      if (wp.deck !== pDeck) continue;
+      const dist = Math.hypot(wp.x - p.x, wp.y - p.y);
+      if (
+        dist < 46 &&
+        dist < bestDist &&
+        hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, wp.x, wp.y)
+      ) {
+        bestDist = dist;
+        const meta = ITEM_CATALOG[wp.item];
+        best = {
+          kind: 'PICKUP',
+          pickup: wp,
+          dist,
+          prompt: `Press E to Pick up ${meta.name}`,
+          sub: meta.description,
+        };
+      }
     }
 
     for (const c of this.map.containers) {
@@ -2406,16 +2787,8 @@ export class MonstrumGameEngine {
       }
     }
 
-    const launchProgress = Math.max(
-      this.escape.lifeboatLaunchProgress,
-      this.escape.heliLaunchProgress
-    );
-    const launchLabel =
-      this.escape.lifeboatLaunchProgress > 0
-        ? 'Lowering Lifeboat...'
-        : this.escape.heliLaunchProgress > 0
-          ? 'Spooling Helicopter...'
-          : null;
+    const actionProgress = this.activeRepairProgress;
+    const actionLabel = this.activeRepairLabel;
 
     const climbingStair = this.player.climbingStairId
       ? this.map.stairwells.find((s) => s.id === this.player.climbingStairId)
@@ -2437,17 +2810,24 @@ export class MonstrumGameEngine {
       currentRoom: this.getCurrentRoom(),
       shipArchetype: this.map.archetype,
       inventory: [...this.player.inventory],
+      maxInventorySlots: this.player.maxInventorySlots,
+      hasBackpack: this.player.hasBackpack,
       selectedSlot: this.player.selectedSlot,
+      journalOpen: this.journalOpen,
       lifeboatParts: [...this.escape.lifeboatParts],
       heliParts: [...this.escape.heliParts],
+      lifeboatState: this.escape.lifeboatState,
+      heliState: this.escape.heliState,
+      lifeboatActivationProgress: this.escape.lifeboatActivationProgress,
+      heliActivationProgress: this.escape.heliActivationProgress,
       promptText,
       promptSubtext,
       bruteState: this.brute.state,
       bruteDistance: this.getEffectiveBruteDistance(),
       elapsedSeconds: this.elapsedSeconds,
       toastMessage: this.toastMessage,
-      launchProgress,
-      launchLabel,
+      actionProgress,
+      actionLabel,
       climbProgress,
       climbLabel,
       zoom: this.zoom,

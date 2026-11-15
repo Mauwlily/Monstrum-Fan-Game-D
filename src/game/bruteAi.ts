@@ -4,6 +4,7 @@ import {
   DifficultyConfig,
   DifficultyLevel,
   Door,
+  EscapeProgress,
   PlayerState,
   RoomLightSwitch,
   RoomName,
@@ -692,10 +693,14 @@ export class BruteBrain {
   }
 
   /**
-   * Recency-weighted UN-LEASHED random patrol picker.
-   * Zero reference to player position — only avoids oscillating into rooms just cleared!
+   * Recency-weighted UN-LEASHED random patrol picker with escape-route patrol bias.
+   * Zero reference to player position — only avoids oscillating into rooms just cleared
+   * while progressively checking Helideck & Lifeboat Davit more often as repairs advance!
    */
-  public pickRecencyWeightedRoamTarget(nowSec: number): {
+  public pickRecencyWeightedRoamTarget(
+    nowSec: number,
+    escape?: EscapeProgress
+  ): {
     tx: number;
     ty: number;
     room: RoomName;
@@ -705,6 +710,13 @@ export class BruteBrain {
       return { tx: 10, ty: 16, room: 'Corridor' };
     }
 
+    const heliRepairs = escape?.heliParts.length ?? 0;
+    const heliActive =
+      escape?.heliState === 'ACTIVATING' || escape?.heliState === 'READY' ? 1.1 : 0;
+    const lifeRepairs = escape?.lifeboatParts.length ?? 0;
+    const lifeActive =
+      escape?.lifeboatState === 'ACTIVATING' || escape?.lifeboatState === 'READY' ? 1.1 : 0;
+
     let totalWeight = 0;
     const weights = rooms.map((m) => {
       const age = Math.max(0, nowSec - m.lastClearedAt);
@@ -713,7 +725,16 @@ export class BruteBrain {
       const recencyFactor = Math.min(2.6, Math.max(0.15, age / 38));
       const roomBias = m.room === 'Corridor' || m.room === 'Catwalk' ? 0.55 : 1.15;
       const suspicionBoost = 1 + m.suspicion * 1.4;
-      const w = recencyFactor * roomBias * suspicionBoost;
+
+      // Subtle baseline escape-route interest that scales noticeably as each route is repaired/activated
+      let escapeBias = 1.0;
+      if (m.room === 'Helideck') {
+        escapeBias = 1.25 + heliRepairs * 0.5 + heliActive;
+      } else if (m.room === 'Lifeboat Davit') {
+        escapeBias = 1.25 + lifeRepairs * 0.5 + lifeActive;
+      }
+
+      const w = recencyFactor * roomBias * suspicionBoost * escapeBias;
       totalWeight += w;
       return w;
     });

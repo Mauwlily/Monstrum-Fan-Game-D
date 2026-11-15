@@ -101,10 +101,11 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
           </h1>
           <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-300">
             Trapped aboard a pitch-black procedural cargo vessel spanning an open Main Weather Deck
-            and a cramped Lower Hull linked by stairwells. Scavenge 3 parts for the{' '}
-            <span className="font-medium text-sky-300">Lifeboat</span> or{' '}
-            <span className="font-medium text-amber-300">Helicopter</span> while only the Brute
-            hunts these decks.
+            and a cramped Lower Hull linked by stairwells. Hauling parts inside a tight 4-slot pack
+            (expandable via the Crew Backpack), repair the{' '}
+            <span className="font-medium text-sky-300">Bow Lifeboat</span> or{' '}
+            <span className="font-medium text-amber-300">Stern Helicopter</span> while the Brute
+            patrols both routes.
           </p>
         </div>
 
@@ -125,12 +126,12 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                   <Footprints className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
                   <div>
                     <p className="text-sm font-semibold text-slate-200">
-                      Cross-Deck Pursuit &amp; Grate Acoustics
+                      Cross-Deck Pursuit &amp; Escape Patrol Bias
                     </p>
                     <p className="mt-0.5 text-xs leading-relaxed text-slate-400">
-                      Explores every deck freely, follows straight through stairwells if you slip
-                      away near a hatch (~0.9s climb), and hears sprints or slammed doors bleeding
-                      through engine grates.
+                      Explores every deck freely, increasingly favors checking repaired escape
+                      craft, follows through stairwells (~0.9s climb), and hears noisy repairs or
+                      crane/turbine spin-ups.
                     </p>
                   </div>
                 </div>
@@ -165,9 +166,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
 
             <div className="mt-6 border-t border-slate-800/80 pt-4 text-xs text-slate-400 leading-relaxed">
               <span className="font-semibold text-slate-300">Controls:</span> WASD Move · Shift
-              Sprint · C Toggle Sneak · Scroll Zoom · Hold Q Peek Doors &amp; Vents · E Interact
-              (Sneak/Stop+E Silent · Walk/Run+E Slam) · F / Right-Click Flashlight · G / Click
-              Tool · 1–5 Slots
+              Sprint · C Sneak · Hold Q Peek Doors &amp; Vents · E / Hold E Interact &amp; Repair ·
+              F / Right-Click Flashlight · Left-Click / Click Slot Use Tool · G Drop Item · J
+              Escape Journal · 1–6 Slots
             </div>
           </div>
 

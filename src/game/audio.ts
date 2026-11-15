@@ -1195,6 +1195,192 @@ export class HorrorAudioEngine {
     });
   }
 
+  public playItemDrop(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(210, now);
+    osc.frequency.exponentialRampToValueAtTime(78, now + 0.08);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.095);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  }
+
+  public playBackpackEquip(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    [330, 440, 587].forEach((freq, i) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + i * 0.05);
+      gain.gain.setValueAtTime(0.09, now + i * 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + i * 0.05 + 0.16);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + i * 0.05);
+      osc.stop(now + i * 0.05 + 0.17);
+    });
+  }
+
+  public playJournalToggle(opening: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted || !this.shortWhiteNoise) return;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.shortWhiteNoise;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(opening ? 1350 : 950, now);
+    filter.Q.value = 1.4;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.06, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.09);
+  }
+
+  public playRepairTick(route: 'LIFEBOAT' | 'HELI', partId: string): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    if (partId === 'AVIATION_FUEL') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(190 + Math.random() * 55, now);
+      osc.frequency.linearRampToValueAtTime(310, now + 0.08);
+    } else if (partId === 'ROTOR_FUSE' || partId === 'MARINE_BATTERY') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(620 + Math.random() * 140, now);
+      osc.frequency.exponentialRampToValueAtTime(280, now + 0.06);
+    } else {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(route === 'HELI' ? 320 : 240, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.09);
+    }
+    gain.gain.setValueAtTime(0.11, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.11);
+  }
+
+  public playRepairComplete(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    [293.7, 440.0].forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+      gain.gain.setValueAtTime(0.14, now + idx * 0.07);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.07 + 0.22);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + idx * 0.07);
+      osc.stop(now + idx * 0.07 + 0.24);
+    });
+  }
+
+  public playEscapeActivationStart(route: 'LIFEBOAT' | 'HELI'): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    if (route === 'HELI') {
+      osc.frequency.setValueAtTime(75, now);
+      osc.frequency.exponentialRampToValueAtTime(340, now + 0.75);
+    } else {
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.linearRampToValueAtTime(145, now + 0.35);
+      osc.frequency.linearRampToValueAtTime(215, now + 0.75);
+    }
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.22, now + 0.06);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.88);
+  }
+
+  public playEscapeActivationPulse(route: 'LIFEBOAT' | 'HELI', progress: number, dx = 0, occ = 0): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const occParams = this.computeOcclusionParams(occ, false);
+    if (route === 'HELI') {
+      osc.type = 'sawtooth';
+      const pitch = safeFreq(68 + progress * 195, 140);
+      osc.frequency.setValueAtTime(pitch, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(safeGain(0.14 * occParams.gainMult), now + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+    } else {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(148 + progress * 48, now);
+      osc.frequency.exponentialRampToValueAtTime(64, now + 0.22);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(safeGain(0.16 * occParams.gainMult), now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.26);
+    }
+    osc.connect(gain);
+    this.routeSpatialNode(gain, dx, occ, false);
+    osc.start(now);
+    osc.stop(now + 0.34);
+  }
+
+  public playEscapeReadyChime(route: 'LIFEBOAT' | 'HELI'): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const notes = route === 'HELI' ? [523.25, 659.25, 783.99] : [440, 554.37, 659.25];
+    notes.forEach((f, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(f, now + idx * 0.09);
+      gain.gain.setValueAtTime(0.16, now + idx * 0.09);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.09 + 0.34);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now + idx * 0.09);
+      osc.stop(now + idx * 0.09 + 0.36);
+    });
+  }
+
+  public playCutsceneProjectorClick(funny = false): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = funny ? 'square' : 'triangle';
+    osc.frequency.setValueAtTime(funny ? 310 : 720, now);
+    osc.frequency.exponentialRampToValueAtTime(funny ? 520 : 180, now + 0.08);
+    gain.gain.setValueAtTime(0.08, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  }
+
   public dispose(): void {
     const stopNode = (node: { stop: () => void } | null) => {
       if (!node) return;
