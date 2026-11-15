@@ -1,0 +1,8 @@
+{
+  "name": "Monstrum Fan Game :D [2.0]",
+  "description": "A 2D top-down survival horror game aboard a derelict cargo ship hunted by an unleashed, intelligent monster.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
