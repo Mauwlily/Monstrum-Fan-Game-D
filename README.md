@@ -30,7 +30,9 @@ roadmap
 -> Redoing the graphics of all the objects (Ship done, brute done, escape routes done, player done - In prior updates. But objects not yet)
 
 0.3.0
--> Optional first-person 3D mode (with internal game logic being in 2D still)
+-> Unified Three.js + WebGPU rendering (TSL + Node-based materials/post-processing)
+-> Two modes: Top-down 2.5D, First-Person 3D, not allowed to switch mid-game
+-> HDR support
 
 0.3.1
 -> To fix whatever 0.3.0 will cause
