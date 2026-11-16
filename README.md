@@ -35,8 +35,9 @@ Next versions:
 -> Increase monster senses slightly for all difficulty levels to compensate
 
 0.2.1
--> Master switch on a per-deck basis. Enable it, and any room switches cannot be enabled or disabled, lights are permanently on.
--> Redoing the graphics of all the objects (Ship done, brute done, escape routes done, player done - In prior updates. But objects not yet)
+-> Slightly larger radius when peeking into stairs
+-> Peeking outside a hiding spot when room light is on does not drain flashlight battery, nor does it alert the monster
+-> New main menu, meant to look visually closer to Monstrum
 
 0.3.0
 -> Unified Three.js + WebGPU rendering (TSL + Node-based materials/post-processing)
