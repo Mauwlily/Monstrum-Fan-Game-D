@@ -16,6 +16,9 @@ roadmap
 -> The monster only updates its escape route bias when it actually spots it
 -> You can now peek through stairs, allowing for a limited view of the deck it leads to
 -> F11 support (directly in typescript)
+-> A new Extreme difficulty. You can enable it per individual setting (by clicking High three times. Reverts when you click high again or a different difficulty), or for all three at once by clicking the Nightmare preset thrice.
+-> Reduce chance of Brute getting stuck
+-> Scale smoothly with window resolution
 
 0.2.0
 -> 4.5x larger ship (1.5x more floors, 2x longer, 1.5x wider)
@@ -41,4 +44,3 @@ roadmap
 
 0.4.0
 -> Another major upgrade to Brute's AI. With functionality that is enabled for higher intelligence settings
--> A new Extreme difficulty. You can enable it per individual setting (by clicking High three times. Reverts when you click high again or a different difficulty), or for all three at once by clicking the Nightmare preset thrice.
