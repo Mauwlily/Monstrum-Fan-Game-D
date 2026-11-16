@@ -1,4 +1,5 @@
 import {
+  BloodStreak,
   Container,
   ContainerType,
   Door,
@@ -1026,6 +1027,156 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     item: assignedItems[idx],
   }));
 
+  // --- 8. Deterministic Crew Blood Streaks (Drag Smears, Bootprints & Splatter) ---
+  const bloodStreaks: BloodStreak[] = [];
+  let bloodSeq = 0;
+  const isPointOnWalkable = (wx: number, wy: number): boolean => {
+    const tx = Math.floor(wx / tileSize);
+    const ty = Math.floor(wy / tileSize);
+    if (tx < 0 || tx >= width || ty < 0 || ty >= height) return false;
+    return isTileWalkable(tiles[ty][tx]);
+  };
+  const tryPushBlood = (
+    kind: BloodStreak['kind'],
+    x: number,
+    y: number,
+    angle: number,
+    length: number,
+    widthPx: number,
+    intensity: number,
+    room: RoomName
+  ) => {
+    const midX = x + Math.cos(angle) * (length * 0.5);
+    const midY = y + Math.sin(angle) * (length * 0.5);
+    const endX = x + Math.cos(angle) * length;
+    const endY = y + Math.sin(angle) * length;
+    if (!isPointOnWalkable(x, y) || !isPointOnWalkable(midX, midY) || !isPointOnWalkable(endX, endY)) {
+      return;
+    }
+    bloodStreaks.push({
+      id: `blood_${bloodSeq++}`,
+      kind,
+      x,
+      y,
+      angle,
+      length,
+      width: widthPx,
+      intensity,
+      seed: Math.floor(rng() * 100000),
+      room,
+    });
+  };
+
+  // A. Drag smears & splatter right outside selected hiding spots (last stands / dragged out crew)
+  for (const spot of reachableSpots) {
+    if (rng() > 0.44) continue;
+    const offsets = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    for (const [ox, oy] of offsets) {
+      const ntx = spot.tx + ox;
+      const nty = spot.ty + oy;
+      if (isTileWalkable(tiles[nty]?.[ntx] ?? 'VOID')) {
+        const ang = Math.atan2(oy, ox) + (rng() - 0.5) * 0.55;
+        const kind = rng() < 0.62 ? 'DRAG_SMEAR' : 'BOOTPRINTS';
+        tryPushBlood(
+          kind,
+          spot.x + ox * 10,
+          spot.y + oy * 10,
+          ang,
+          28 + rng() * 24,
+          10 + rng() * 5,
+          0.62 + rng() * 0.25,
+          spot.room
+        );
+        if (rng() < 0.55) {
+          tryPushBlood(
+            'SPLATTER',
+            spot.x + ox * 6 + (rng() - 0.5) * 10,
+            spot.y + oy * 6 + (rng() - 0.5) * 10,
+            ang,
+            16 + rng() * 10,
+            14 + rng() * 6,
+            0.58 + rng() * 0.24,
+            spot.room
+          );
+        }
+        break;
+      }
+    }
+  }
+
+  // B. Room ambush splatter & drag trails inside crew/machinery compartments
+  const bloodRooms = new Set<RoomName>([
+    'Infirmary',
+    'Crew Quarters',
+    'Galley & Mess',
+    'Officers Mess',
+    'Engine Room',
+    'Boiler Room',
+    'Workshop',
+    'Lower Cargo Hold',
+    'Bridge',
+    'Chart Room',
+    'Pump Room',
+    'Container Bay',
+  ]);
+  for (const rb of rooms) {
+    if (!bloodRooms.has(rb.name)) continue;
+    if (rng() > 0.58) continue;
+    const candidates: Array<{ tx: number; ty: number }> = [];
+    for (let y = rb.y1; y <= rb.y2; y++) {
+      for (let x = rb.x1; x <= rb.x2; x++) {
+        if (
+          isTileWalkable(tiles[y]?.[x] ?? 'VOID') &&
+          roomGrid[y]?.[x] === rb.name &&
+          !doorByTile.has(key(x, y)) &&
+          !stairByTile.has(key(x, y))
+        ) {
+          candidates.push({ tx: x, ty: y });
+        }
+      }
+    }
+    if (candidates.length === 0) continue;
+    const pick = candidates[Math.floor(rng() * candidates.length)];
+    const px = (pick.tx + 0.5) * tileSize + (rng() - 0.5) * 8;
+    const py = (pick.ty + 0.5) * tileSize + (rng() - 0.5) * 8;
+    const ang = rng() * Math.PI * 2;
+    const roll = rng();
+    if (roll < 0.45) {
+      tryPushBlood('DRAG_SMEAR', px, py, ang, 34 + rng() * 28, 12 + rng() * 5, 0.65 + rng() * 0.25, rb.name);
+      tryPushBlood('SPLATTER', px - Math.cos(ang) * 4, py - Math.sin(ang) * 4, ang, 18, 16, 0.72, rb.name);
+    } else if (roll < 0.78) {
+      tryPushBlood('SPLATTER', px, py, ang, 20 + rng() * 10, 16 + rng() * 6, 0.68 + rng() * 0.22, rb.name);
+    } else {
+      tryPushBlood('BOOTPRINTS', px, py, ang, 40 + rng() * 24, 12, 0.56 + rng() * 0.22, rb.name);
+    }
+  }
+
+  // C. Bloody bootprints & corridor drag trails across selected doorways
+  for (const d of doors) {
+    if (rng() > 0.24) continue;
+    const cx = (d.tx + 0.5) * tileSize;
+    const cy = (d.ty + 0.5) * tileSize;
+    const dir = rng() > 0.5 ? 1 : -1;
+    const ang = d.orientation === 'H' ? (dir > 0 ? Math.PI * 0.5 : -Math.PI * 0.5) : dir > 0 ? 0 : Math.PI;
+    const jitter = (rng() - 0.5) * 0.35;
+    const kind = rng() < 0.55 ? 'BOOTPRINTS' : 'DRAG_SMEAR';
+    tryPushBlood(
+      kind,
+      cx - Math.cos(ang + jitter) * 14,
+      cy - Math.sin(ang + jitter) * 14,
+      ang + jitter,
+      36 + rng() * 22,
+      11,
+      0.52 + rng() * 0.24,
+      roomGrid[d.ty][d.tx]
+    );
+  }
+
   return {
     width,
     height,
@@ -1043,6 +1194,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     containers: reachableContainers,
     steamVents,
     lightSwitches: reachableSwitches,
+    bloodStreaks,
     playerSpawn: { x: (pStart.tx + 0.5) * tileSize, y: (pStart.ty + 0.5) * tileSize },
     bruteSpawn: { x: (bStart.tx + 0.5) * tileSize, y: (bStart.ty + 0.5) * tileSize },
     lifeboatPos: {

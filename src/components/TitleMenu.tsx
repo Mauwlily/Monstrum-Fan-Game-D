@@ -1,10 +1,12 @@
-import React from 'react';
-import { Eye, Footprints, Lock, Volume2, VolumeX } from 'lucide-react';
+import React, { useState } from 'react';
+import { Eye, Footprints, Lock, RotateCcw, Sliders, Volume2, VolumeX } from 'lucide-react';
 import {
+  BruteTuningNumbers,
   detectDifficultyPreset,
   DIFFICULTY_PRESETS,
   DifficultyConfig,
   DifficultyLevel,
+  GAME_VERSION,
 } from '../game/types';
 
 interface TitleMenuProps {
@@ -14,6 +16,12 @@ interface TitleMenuProps {
   onSeedInputChange: (val: string) => void;
   muted: boolean;
   onToggleMute: () => void;
+  devModeUnlocked: boolean;
+  onToggleDevMode: () => void;
+  bruteTuning: BruteTuningNumbers;
+  customTuningActive: boolean;
+  onChangeBruteTuning: (next: BruteTuningNumbers) => void;
+  onResetBruteTuning: () => void;
   onStartGame: () => void;
 }
 
@@ -45,6 +53,41 @@ const AXES: Array<{
   },
 ];
 
+interface TuningField {
+  key: keyof BruteTuningNumbers;
+  label: string;
+  min: number;
+  max: number;
+  step: number;
+}
+
+const SPEED_FIELDS: TuningField[] = [
+  { key: 'roamSpeed', label: 'Roam Speed (px/s)', min: 40, max: 350, step: 2 },
+  { key: 'investigateSpeed', label: 'Investigate Speed (px/s)', min: 50, max: 380, step: 2 },
+  { key: 'stalkSpeed', label: 'Stalk Speed (px/s)', min: 50, max: 380, step: 2 },
+  { key: 'chaseSpeed', label: 'Chase Speed (px/s)', min: 80, max: 460, step: 2 },
+  { key: 'smashChaseDelay', label: 'Door Smash (Chase s)', min: 0.08, max: 2.5, step: 0.02 },
+  { key: 'smashPatrolDelay', label: 'Door Smash (Patrol s)', min: 0.1, max: 3.0, step: 0.02 },
+  { key: 'stairClimbChase', label: 'Stair Climb (Chase s)', min: 0.1, max: 2.5, step: 0.02 },
+  { key: 'stairClimbPatrol', label: 'Stair Climb (Patrol s)', min: 0.1, max: 3.0, step: 0.02 },
+];
+
+const SENSES_FIELDS: TuningField[] = [
+  { key: 'sightMult', label: 'Sight Range Mult', min: 0.3, max: 2.5, step: 0.02 },
+  { key: 'halfFovDeg', label: 'Half-FOV (deg)', min: 20, max: 140, step: 1 },
+  { key: 'peripheralBase', label: 'Peripheral Base (px)', min: 15, max: 260, step: 2 },
+  { key: 'peripheralCrouch', label: 'Peripheral Crouch (px)', min: 10, max: 200, step: 2 },
+  { key: 'hearingMult', label: 'Hearing Range Mult', min: 0.2, max: 2.5, step: 0.05 },
+];
+
+const INTEL_FIELDS: TuningField[] = [
+  { key: 'sweepCoverage', label: 'Locker Sweep (0–1)', min: 0.1, max: 1.0, step: 0.05 },
+  { key: 'overshootDist', label: 'Chase Overshoot (px)', min: 40, max: 450, step: 10 },
+  { key: 'clueRoomDepth', label: 'Clue Room Depth', min: 1, max: 8, step: 1 },
+  { key: 'clueScanInterval', label: 'Clue Scan Interval (s)', min: 0.02, max: 1.0, step: 0.02 },
+  { key: 'stairPursuitRange', label: 'Stair Pursuit Snap (px)', min: 20, max: 260, step: 5 },
+];
+
 export const TitleMenu: React.FC<TitleMenuProps> = ({
   difficulty,
   onSelectDifficulty,
@@ -52,16 +95,68 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
   onSeedInputChange,
   muted,
   onToggleMute,
+  devModeUnlocked,
+  onToggleDevMode,
+  bruteTuning,
+  customTuningActive,
+  onChangeBruteTuning,
+  onResetBruteTuning,
   onStartGame,
 }) => {
+  const [consecutiveSmileyClicks, setConsecutiveSmileyClicks] = useState(0);
   const activePreset = detectDifficultyPreset(difficulty);
 
   const updateAxis = (axis: keyof DifficultyConfig, val: DifficultyLevel) => {
     onSelectDifficulty({ ...difficulty, [axis]: val });
   };
 
+  const handleTuningChange = (field: TuningField, raw: string) => {
+    const parsed = Number.parseFloat(raw);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.max(field.min, Math.min(field.max, parsed));
+    onChangeBruteTuning({
+      ...bruteTuning,
+      [field.key]: clamped,
+    });
+  };
+
+  const renderFieldGroup = (title: string, fields: TuningField[]) => (
+    <div className="rounded-md border border-slate-800/80 bg-slate-950/70 p-3.5">
+      <div className="mb-2.5 text-xs font-semibold uppercase tracking-wider text-slate-300">
+        {title}
+      </div>
+      <div className="space-y-2">
+        {fields.map((field) => (
+          <div key={field.key} className="flex items-center justify-between gap-3">
+            <label
+              htmlFor={`dev-${field.key}`}
+              className="text-[11px] text-slate-400 truncate"
+            >
+              {field.label}
+            </label>
+            <input
+              id={`dev-${field.key}`}
+              type="number"
+              min={field.min}
+              max={field.max}
+              step={field.step}
+              value={bruteTuning[field.key]}
+              onChange={(e) => handleTuningChange(field, e.target.value)}
+              className="w-20 shrink-0 rounded border border-slate-800 bg-[#070a0f] px-2 py-1 text-right text-xs text-orange-200 font-mono-num focus:border-orange-500 focus:outline-none"
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
-    <div className="relative flex min-h-screen w-full items-center justify-center bg-[#07090c] px-6 py-8 text-slate-100 overflow-y-auto">
+    <div
+      onClick={() => {
+        if (consecutiveSmileyClicks > 0) setConsecutiveSmileyClicks(0);
+      }}
+      className="relative flex min-h-screen w-full items-center justify-center bg-[#07090c] px-6 py-8 text-slate-100 overflow-y-auto"
+    >
       {/* Subtle atmospheric radial depth */}
       <div
         className="pointer-events-none fixed inset-0"
@@ -74,12 +169,20 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
       <div className="relative z-10 w-full max-w-4xl">
         {/* Top bar */}
         <div className="mb-8 flex items-center justify-between border-b border-slate-800/80 pb-4">
-          <div className="flex items-center gap-3 text-xs text-slate-400">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+            <span className="font-mono-num font-semibold text-slate-200">v{GAME_VERSION}</span>
+            <span aria-hidden="true">·</span>
             <span>Multi-Deck Cargo Vessel</span>
             <span aria-hidden="true">·</span>
             <span>Brute-Only Edition</span>
             <span aria-hidden="true">·</span>
             <span>2D Top-Down</span>
+            {devModeUnlocked && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-medium text-orange-400">Dev Mode Active</span>
+              </>
+            )}
           </div>
           <button
             type="button"
@@ -95,7 +198,20 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
         <div className="mb-8">
           <h1 className="font-display text-5xl font-bold tracking-tight text-slate-50 sm:text-6xl text-balance">
             Monstrum Fan Game{' '}
-            <span className="text-orange-400" aria-label="happy face">
+            <span
+              onClick={(e) => {
+                e.stopPropagation();
+                const next = consecutiveSmileyClicks + 1;
+                if (next >= 3) {
+                  setConsecutiveSmileyClicks(0);
+                  onToggleDevMode();
+                } else {
+                  setConsecutiveSmileyClicks(next);
+                }
+              }}
+              className="text-orange-400 select-none cursor-default"
+              aria-label="happy face"
+            >
               :D
             </span>
           </h1>
@@ -179,13 +295,15 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-medium text-slate-300">Brute Presets</span>
                   <span className="text-xs text-slate-400">
-                    {activePreset === 'CUSTOM'
-                      ? 'Custom Profile'
-                      : activePreset === 'MERCY'
-                        ? 'Mercy Preset'
-                        : activePreset === 'NIGHTMARE'
-                          ? 'Nightmare Preset'
-                          : 'Standard Preset'}
+                    {customTuningActive
+                      ? 'Dev Custom Numbers'
+                      : activePreset === 'CUSTOM'
+                        ? 'Custom Profile'
+                        : activePreset === 'MERCY'
+                          ? 'Mercy Preset'
+                          : activePreset === 'NIGHTMARE'
+                            ? 'Nightmare Preset'
+                            : 'Standard Preset'}
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-1.5 rounded-md bg-slate-950 p-1 border border-slate-800">
@@ -201,7 +319,7 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                       type="button"
                       onClick={() => onSelectDifficulty({ ...DIFFICULTY_PRESETS[preset.key] })}
                       className={`rounded px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        activePreset === preset.key
+                        !customTuningActive && activePreset === preset.key
                           ? preset.key === 'NIGHTMARE'
                             ? 'bg-orange-950/90 text-orange-200 border border-orange-700/50'
                             : 'bg-slate-800 text-white'
@@ -279,6 +397,40 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Secret Dev Mode Panel: Internal Brute Numbers */}
+        {devModeUnlocked && (
+          <div className="mt-6 rounded-lg border border-orange-500/40 bg-[#0d1118] p-5">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Sliders className="h-4 w-4 text-orange-400" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    Dev Mode: Internal Brute Numbers
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Direct simulation parameters for Speed, Senses, and Intelligence. In-game Debug
+                    panel is also unlocked.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onResetBruteTuning}
+                className="flex items-center gap-1.5 rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <RotateCcw className="h-3 w-3" />
+                <span>Reset to Preset</span>
+              </button>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-3">
+              {renderFieldGroup('Speed', SPEED_FIELDS)}
+              {renderFieldGroup('Senses', SENSES_FIELDS)}
+              {renderFieldGroup('Intelligence', INTEL_FIELDS)}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

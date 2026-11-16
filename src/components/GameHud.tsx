@@ -6,6 +6,7 @@ import { HudSnapshot, ITEM_CATALOG } from '../game/types';
 interface GameHudProps {
   hud: HudSnapshot;
   muted: boolean;
+  showDebugButton: boolean;
   debugOpen: boolean;
   onToggleMute: () => void;
   onToggleDebug: () => void;
@@ -25,6 +26,7 @@ function formatTime(totalSec: number): string {
 export const GameHud: React.FC<GameHudProps> = ({
   hud,
   muted,
+  showDebugButton,
   debugOpen,
   onToggleMute,
   onToggleDebug,
@@ -127,21 +129,23 @@ export const GameHud: React.FC<GameHudProps> = ({
           </div>
         </div>
 
-        {/* Top-Right: Debug, Audio & Pause */}
+        {/* Top-Right: Debug (when unlocked), Audio & Pause */}
         <div className="pointer-events-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onToggleDebug}
-            aria-label="Toggle debug panel"
-            className={`flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              debugOpen
-                ? 'border-orange-500/80 bg-orange-500/15 text-orange-200'
-                : 'border-slate-800 bg-[#090d14]/88 text-slate-300 hover:border-slate-700 hover:text-white'
-            }`}
-          >
-            <Bug className="h-3.5 w-3.5" />
-            <span>Debug</span>
-          </button>
+          {showDebugButton && (
+            <button
+              type="button"
+              onClick={onToggleDebug}
+              aria-label="Toggle debug panel"
+              className={`flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                debugOpen
+                  ? 'border-orange-500/80 bg-orange-500/15 text-orange-200'
+                  : 'border-slate-800 bg-[#090d14]/88 text-slate-300 hover:border-slate-700 hover:text-white'
+              }`}
+            >
+              <Bug className="h-3.5 w-3.5" />
+              <span>Debug</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onToggleMute}

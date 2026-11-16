@@ -7,6 +7,7 @@ import { findPath } from './pathfinding';
 import {
   AcousticContext,
   BruteState,
+  BruteTuningNumbers,
   Container,
   DebugOverlayConfig,
   DebugScenarioId,
@@ -48,6 +49,8 @@ export interface GameEngineCallbacks {
 export class MonstrumGameEngine {
   public map: ShipMap;
   public difficulty: DifficultyConfig;
+  public bruteTuning?: BruteTuningNumbers;
+  public customBruteTuning = false;
   public player: PlayerState;
   public brute: BruteState;
   public escape: EscapeProgress;
@@ -115,9 +118,13 @@ export class MonstrumGameEngine {
     difficulty: DifficultyConfig,
     audio: HorrorAudioEngine,
     callbacks: GameEngineCallbacks,
-    seed?: number
+    seed?: number,
+    bruteTuning?: BruteTuningNumbers,
+    customBruteTuning = false
   ) {
     this.difficulty = { ...difficulty };
+    this.bruteTuning = bruteTuning ? { ...bruteTuning } : undefined;
+    this.customBruteTuning = customBruteTuning;
     this.audio = audio;
     this.callbacks = callbacks;
     this.map = generateCargoShip(seed);
@@ -365,6 +372,11 @@ export class MonstrumGameEngine {
         d.openProgress = Math.max(target, d.openProgress - d.swingSpeed * dt);
       }
     }
+
+    // Smooth non-stick directional push-through if player overlaps a closing/closed door
+    if (this.player.hidingSpotId === null && this.player.climbingStairId === null) {
+      this.resolveEntityDoorPush(this.player, dt, false);
+    }
   }
 
   private updateSteamVents(dt: number): void {
@@ -472,14 +484,14 @@ export class MonstrumGameEngine {
           this.emitNoise(st.x, st.y, 240, 'rgba(148, 163, 184, 0.3)', true, 0.65);
         }
 
-        if (canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty)) {
+        if (canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning)) {
           this.brute.pursuitStairId = dest.id;
           this.brute.lastKnownPlayerPos = { x: st.x, y: st.y };
           this.brute.chaseAggroTimer = Math.max(this.brute.chaseAggroTimer, 5.8);
         }
 
         if (p.climbProgress >= 1) {
-          const hearingMult = getSensesProfile(this.difficulty).hearingMult;
+          const hearingMult = getSensesProfile(this.difficulty, this.bruteTuning).hearingMult;
           const bruteSawOrHeardNearHatch =
             (this.brute.state === 'CHASE' || this.brute.state === 'SMASH_DOOR') &&
             (this.brute.pursuitStairId === dest.id ||
@@ -541,7 +553,7 @@ export class MonstrumGameEngine {
           this.peekNoBatteryToasted = false;
 
           // If Brute is looking toward the hiding spot, he spots the flashlight gleaming out of the slats!
-          const senses = getSensesProfile(this.difficulty);
+          const senses = getSensesProfile(this.difficulty, this.bruteTuning);
           if (
             !this.debugConfig.freezeAi &&
             this.brute.state !== 'STUNNED' &&
@@ -947,6 +959,16 @@ export class MonstrumGameEngine {
     smashChase: number;
     smashPatrol: number;
   } {
+    if (this.bruteTuning) {
+      return {
+        roam: this.bruteTuning.roamSpeed,
+        investigate: this.bruteTuning.investigateSpeed,
+        stalk: this.bruteTuning.stalkSpeed,
+        chase: this.bruteTuning.chaseSpeed,
+        smashChase: this.bruteTuning.smashChaseDelay,
+        smashPatrol: this.bruteTuning.smashPatrolDelay,
+      };
+    }
     switch (this.difficulty.speed) {
       case 'LOW':
         return {
@@ -1086,7 +1108,7 @@ export class MonstrumGameEngine {
     this.updateBruteDoorClosing();
 
     // 2. Check wide non-gamey FoV vision for Player!
-    const seesPlayer = canBruteSeePlayer(b, p, this.map, this.doorsByTile, this.difficulty);
+    const seesPlayer = canBruteSeePlayer(b, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning);
     if (seesPlayer) {
       const wasChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
       if (this.lastObservedPlayerPos && dt > 0.001) {
@@ -1224,7 +1246,8 @@ export class MonstrumGameEngine {
       this.elapsedSeconds,
       b,
       this.doorsByTile,
-      this.difficulty
+      this.difficulty,
+      this.bruteTuning
     );
     if (clueEvents.length > 0) {
       b.cluesSpottedTotal += clueEvents.length;
@@ -1248,7 +1271,8 @@ export class MonstrumGameEngine {
       b,
       p,
       this.doorsByTile,
-      this.difficulty
+      this.difficulty,
+      this.bruteTuning
     );
 
     // Goal: PURSUIT (Active chase to last known spot + stair follow-through + momentum overshoot!)
@@ -1262,11 +1286,12 @@ export class MonstrumGameEngine {
           const distToLast = Math.hypot(target.x - b.x, target.y - b.y);
           if (distToLast < 32) {
             const overshootDist =
-              this.difficulty.intelligence === 'HIGH'
+              this.bruteTuning?.overshootDist ??
+              (this.difficulty.intelligence === 'HIGH'
                 ? 250
                 : this.difficulty.intelligence === 'MEDIUM'
                   ? 190
-                  : 120;
+                  : 120);
 
             const bDeck = this.map.deckGrid[bTy]?.[bTx] ?? 'MAIN';
             const arrivedLanding = b.pursuitStairId
@@ -1526,7 +1551,8 @@ export class MonstrumGameEngine {
       b.y,
       currRoom,
       this.elapsedSeconds,
-      this.difficulty.intelligence
+      this.difficulty.intelligence,
+      this.bruteTuning
     );
     if (b.searchSpotsQueue.length > 0) {
       b.currentInspectSpotId = b.searchSpotsQueue.shift()!;
@@ -1551,7 +1577,8 @@ export class MonstrumGameEngine {
       cx,
       cy,
       this.elapsedSeconds,
-      this.difficulty.intelligence
+      this.difficulty.intelligence,
+      this.bruteTuning
     );
     if (capOverride !== undefined) {
       spots = spots.slice(0, capOverride);
@@ -1614,8 +1641,11 @@ export class MonstrumGameEngine {
         b.y = fromStair.y;
       }
       b.stairDestId = dest.id;
-      b.stairClimbTimer =
-        this.difficulty.speed === 'HIGH'
+      b.stairClimbTimer = this.bruteTuning
+        ? aggressiveChase
+          ? this.bruteTuning.stairClimbChase
+          : this.bruteTuning.stairClimbPatrol
+        : this.difficulty.speed === 'HIGH'
           ? aggressiveChase
             ? 0.42
             : 0.62
@@ -1726,9 +1756,11 @@ export class MonstrumGameEngine {
           );
         }
         if (aggressiveChase && !eff.muffled) {
-          if (eff.dist < 420) {
-            this.screenShake = Math.max(this.screenShake, (1 - eff.dist / 420) * 3.2);
+          if (eff.dist < 480) {
+            this.screenShake = Math.max(this.screenShake, (1 - eff.dist / 480) * 4.2);
           }
+        } else if (!eff.muffled && eff.dist < 220) {
+          this.screenShake = Math.max(this.screenShake, (1 - eff.dist / 220) * 1.4);
         }
       }
     }
@@ -1739,6 +1771,106 @@ export class MonstrumGameEngine {
     this.brute.angle = normalizeAngle(this.brute.angle + diff * Math.min(1, dt * turnRate));
   }
 
+  private resolveSingleDoorPush(
+    ent: { x: number; y: number; radius: number; angle?: number },
+    door: Door,
+    dt: number,
+    isBrute: boolean,
+    immediateNudge = false
+  ): void {
+    if (door.isBroken || door.isOpen) return;
+    if (isBrute && !door.isLocked) return;
+
+    const ts = this.map.tileSize;
+    const cx = (door.tx + 0.5) * ts;
+    const cy = (door.ty + 0.5) * ts;
+    const minClear = ent.radius + 5.5;
+
+    const inAlongSpan =
+      door.orientation === 'H'
+        ? Math.abs(ent.x - cx) < ts * 0.58
+        : Math.abs(ent.y - cy) < ts * 0.58;
+    if (!inAlongSpan) return;
+
+    const delta = door.orientation === 'H' ? ent.y - cy : ent.x - cx;
+    const absDelta = Math.abs(delta);
+    if (absDelta >= minClear) return;
+
+    let pushSign = 1;
+    if (absDelta > 1.5) {
+      pushSign = delta >= 0 ? 1 : -1;
+    } else if (!isBrute) {
+      const moveAxis =
+        door.orientation === 'H'
+          ? (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0) -
+            (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0)
+          : (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) -
+            (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0);
+      if (moveAxis !== 0) {
+        pushSign = moveAxis > 0 ? 1 : -1;
+      } else {
+        const ang = ent.angle ?? 0;
+        const proj = door.orientation === 'H' ? Math.sin(ang) : Math.cos(ang);
+        pushSign = proj >= 0 ? 1 : -1;
+      }
+    }
+
+    const needed = minClear - absDelta + 0.75;
+    const step = immediateNudge ? Math.min(needed, 5.5) : Math.min(needed, Math.max(2.5, dt * 360));
+
+    const tryPush = (sign: number): boolean => {
+      const candX = door.orientation === 'V' ? ent.x + sign * step : ent.x;
+      const candY = door.orientation === 'H' ? ent.y + sign * step : ent.y;
+      if (!this.collidesAtWallsOnly(candX, candY, ent.radius)) {
+        ent.x = candX;
+        ent.y = candY;
+        return true;
+      }
+      return false;
+    };
+
+    if (!tryPush(pushSign)) {
+      tryPush(-pushSign);
+    }
+  }
+
+  private resolveEntityDoorPush(
+    ent: { x: number; y: number; radius: number; angle?: number },
+    dt: number,
+    isBrute: boolean
+  ): void {
+    const ts = this.map.tileSize;
+    const minTx = Math.floor((ent.x - ent.radius - 6) / ts);
+    const maxTx = Math.floor((ent.x + ent.radius + 6) / ts);
+    const minTy = Math.floor((ent.y - ent.radius - 6) / ts);
+    const maxTy = Math.floor((ent.y + ent.radius + 6) / ts);
+
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        const door = this.doorsByTile.get(ty * this.map.width + tx);
+        if (door && !door.isOpen && !door.isBroken) {
+          this.resolveSingleDoorPush(ent, door, dt, isBrute, false);
+        }
+      }
+    }
+  }
+
+  private collidesAtWallsOnly(wx: number, wy: number, radius: number): boolean {
+    const ts = this.map.tileSize;
+    const minTx = Math.floor((wx - radius) / ts);
+    const maxTx = Math.floor((wx + radius) / ts);
+    const minTy = Math.floor((wy - radius) / ts);
+    const maxTy = Math.floor((wy + radius) / ts);
+
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        if (tx < 0 || tx >= this.map.width || ty < 0 || ty >= this.map.height) return true;
+        if (!isTileWalkable(this.map.tiles[ty][tx])) return true;
+      }
+    }
+    return false;
+  }
+
   private moveEntityWithCollision(
     ent: { x: number; y: number; radius: number },
     dx: number,
@@ -1746,16 +1878,23 @@ export class MonstrumGameEngine {
     isBrute: boolean
   ): void {
     const nx = ent.x + dx;
-    if (!this.collidesAt(nx, ent.y, ent.radius, isBrute)) {
+    if (!this.collidesAt(nx, ent.y, ent.radius, isBrute, ent.x, ent.y)) {
       ent.x = nx;
     }
     const ny = ent.y + dy;
-    if (!this.collidesAt(ent.x, ny, ent.radius, isBrute)) {
+    if (!this.collidesAt(ent.x, ny, ent.radius, isBrute, ent.x, ent.y)) {
       ent.y = ny;
     }
   }
 
-  private collidesAt(wx: number, wy: number, radius: number, isBrute: boolean): boolean {
+  private collidesAt(
+    wx: number,
+    wy: number,
+    radius: number,
+    isBrute: boolean,
+    fromX?: number,
+    fromY?: number
+  ): boolean {
     const ts = this.map.tileSize;
     const minTx = Math.floor((wx - radius) / ts);
     const maxTx = Math.floor((wx + radius) / ts);
@@ -1773,8 +1912,19 @@ export class MonstrumGameEngine {
           if (!isBrute || door.isLocked) {
             const cx = (tx + 0.5) * ts;
             const cy = (ty + 0.5) * ts;
-            if (door.orientation === 'H' && Math.abs(wy - cy) < radius + 5) return true;
-            if (door.orientation === 'V' && Math.abs(wx - cx) < radius + 5) return true;
+            if (door.orientation === 'H' && Math.abs(wy - cy) < radius + 5) {
+              // If already overlapping the closing door leaf, never block movement that pushes farther clear
+              if (fromY !== undefined && Math.abs(fromY - cy) < radius + 5) {
+                if (Math.abs(wy - cy) > Math.abs(fromY - cy)) continue;
+              }
+              return true;
+            }
+            if (door.orientation === 'V' && Math.abs(wx - cx) < radius + 5) {
+              if (fromX !== undefined && Math.abs(fromX - cx) < radius + 5) {
+                if (Math.abs(wx - cx) > Math.abs(fromX - cx)) continue;
+              }
+              return true;
+            }
           }
         }
       }
@@ -1812,7 +1962,7 @@ export class MonstrumGameEngine {
       return;
     }
 
-    const hearingMultiplier = getSensesProfile(this.difficulty).hearingMult;
+    const hearingMultiplier = getSensesProfile(this.difficulty, this.bruteTuning).hearingMult;
     const dist = this.getEffectiveNoiseDistance(x, y, b.x, b.y);
     if (dist <= maxRadius * hearingMultiplier) {
       if (!b.investigateTarget || urgency >= b.investigateTarget.urgency) {
@@ -1833,16 +1983,16 @@ export class MonstrumGameEngine {
     const ty = Math.max(0, Math.min(this.map.height - 1, Math.floor(wy / ts)));
     const deck = this.map.deckGrid[ty][tx];
 
+    const pursuitCap =
+      this.bruteTuning?.stairPursuitRange ??
+      (this.difficulty.intelligence === 'LOW' ? 56 : 110);
     let best: Stairwell | null = null;
-    let bestDist = 110;
+    let bestDist = pursuitCap;
     for (const s of this.map.stairwells) {
       if (s.deck !== deck) continue;
       const d = Math.hypot(s.x - wx, s.y - wy);
       if (d > bestDist) continue;
       if (!hasLineOfSight(this.map, this.doorsByTile, wx, wy, s.x, s.y)) continue;
-
-      // On LOW intelligence, only follow into stairs if player vanished practically on top of the hatch
-      if (this.difficulty.intelligence === 'LOW' && d > 56) continue;
 
       if (vel && d > 48) {
         const spd = Math.hypot(vel.vx, vel.vy);
@@ -2416,6 +2566,9 @@ export class MonstrumGameEngine {
         const silent = !slam;
         d.isOpen = !d.isOpen;
         d.swingSpeed = silent ? 1.55 : 8.5;
+        if (!d.isOpen) {
+          this.resolveSingleDoorPush(p, d, 0.016, false, true);
+        }
         this.audio.playDoorToggle(d.isOpen, silent);
         const dx = (d.tx + 0.5) * this.map.tileSize;
         const dy = (d.ty + 0.5) * this.map.tileSize;
@@ -2461,7 +2614,7 @@ export class MonstrumGameEngine {
       const spot = nearest.spot;
       // Check if Brute currently sees player or is actively chasing nearby with clear LoS
       const bruteSawHide =
-        canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty) ||
+        canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning) ||
         ((this.brute.state === 'CHASE' || this.brute.state === 'SMASH_DOOR') &&
           Math.hypot(this.brute.x - p.x, this.brute.y - p.y) <= 320 &&
           hasLineOfSight(this.map, this.doorsByTile, this.brute.x, this.brute.y, p.x, p.y));
@@ -2509,7 +2662,7 @@ export class MonstrumGameEngine {
     }
 
     let best: ReturnType<MonstrumGameEngine['findNearestInteractable']> = null;
-    let bestDist = 56;
+    let bestDist = 72;
 
     // Escape zones
     const dLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
@@ -2674,12 +2827,14 @@ export class MonstrumGameEngine {
       const cx = (d.tx + 0.5) * this.map.tileSize;
       const cy = (d.ty + 0.5) * this.map.tileSize;
       const dist = Math.hypot(cx - p.x, cy - p.y);
+      // Slightly larger door interaction reach (70px vs 54px) and chase slam bias
+      const effectiveScore = d.isOpen && p.isMoving && !p.crouching ? Math.max(0, dist - 10) : dist;
       if (
-        dist < 54 &&
-        dist < bestDist &&
+        dist < 70 &&
+        effectiveScore < bestDist &&
         hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, cx, cy)
       ) {
-        bestDist = dist;
+        bestDist = effectiveScore;
         const slam = p.isMoving && !p.crouching;
         best = {
           kind: 'DOOR',
@@ -2737,6 +2892,7 @@ export class MonstrumGameEngine {
       deathReason: reason,
       seed: this.map.seed,
       difficulty: { ...this.difficulty },
+      customBruteTuning: this.customBruteTuning,
     });
   }
 
@@ -2757,6 +2913,7 @@ export class MonstrumGameEngine {
       deathReason: null,
       seed: this.map.seed,
       difficulty: { ...this.difficulty },
+      customBruteTuning: this.customBruteTuning,
     });
   }
 

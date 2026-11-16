@@ -109,6 +109,7 @@ export class GameRenderer {
     this.drawOceanWaves(ctx, engine, width, height, timeSec);
     this.drawTiles(ctx, engine, width, height, timeSec);
     this.drawRoomStencils(ctx, engine);
+    this.drawBloodStreaks(ctx, engine, width, height);
     this.drawStairwells(ctx, engine, incomingStairId, timeSec);
     this.drawBulkheads(ctx, engine, width, height);
     this.drawEscapeZones(ctx, engine, timeSec);
@@ -558,6 +559,112 @@ export class GameRenderer {
       ctx.fillText(r.name.toUpperCase(), cx, cy);
     }
     ctx.restore();
+  }
+
+  private drawBloodStreaks(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number
+  ): void {
+    const streaks = engine.map.bloodStreaks;
+    if (!streaks || streaks.length === 0) return;
+
+    const halfW = width / (2 * engine.zoom) + 90;
+    const halfH = height / (2 * engine.zoom) + 90;
+
+    for (const bs of streaks) {
+      if (
+        Math.abs(bs.x - engine.cameraX) > halfW ||
+        Math.abs(bs.y - engine.cameraY) > halfH
+      ) {
+        continue;
+      }
+
+      ctx.save();
+      ctx.translate(bs.x, bs.y);
+      ctx.rotate(bs.angle);
+
+      const alpha = bs.intensity;
+      if (bs.kind === 'DRAG_SMEAR') {
+        // Dark dried pool at origin
+        ctx.fillStyle = `rgba(62, 10, 12, ${alpha * 0.72})`;
+        ctx.beginPath();
+        ctx.ellipse(2, 0, bs.width * 0.65, bs.width * 0.45, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Tapered body/finger drag streaks
+        const ribs = [-0.34, -0.08, 0.16, 0.38];
+        for (let r = 0; r < ribs.length; r++) {
+          const offsetY = ribs[r] * bs.width;
+          const segLen = bs.length * (0.72 + ((bs.seed + r * 17) % 28) / 100);
+          const grad = ctx.createLinearGradient(0, offsetY, segLen, offsetY);
+          grad.addColorStop(0, `rgba(112, 16, 20, ${alpha * 0.78})`);
+          grad.addColorStop(0.55, `rgba(88, 12, 15, ${alpha * 0.48})`);
+          grad.addColorStop(1, 'rgba(62, 8, 10, 0)');
+          ctx.strokeStyle = grad;
+          ctx.lineCap = 'round';
+          ctx.lineWidth = r === 1 || r === 2 ? 3.2 : 1.9;
+          ctx.beginPath();
+          ctx.moveTo(0, offsetY);
+          ctx.quadraticCurveTo(
+            segLen * 0.5,
+            offsetY + (((bs.seed + r) % 3) - 1) * 1.4,
+            segLen,
+            offsetY * 0.85
+          );
+          ctx.stroke();
+        }
+      } else if (bs.kind === 'BOOTPRINTS') {
+        const steps = Math.max(4, Math.floor(bs.length / 10));
+        for (let i = 0; i < steps; i++) {
+          const stepAlpha = alpha * Math.max(0.18, 0.85 - (i / steps) * 0.62);
+          const sx = i * 9.5;
+          const sy = i % 2 === 0 ? -3.4 : 3.4;
+          ctx.fillStyle = `rgba(98, 14, 18, ${stepAlpha})`;
+          // Heel
+          ctx.beginPath();
+          ctx.ellipse(sx - 1.5, sy, 2.0, 1.5, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Forefoot sole
+          ctx.beginPath();
+          ctx.ellipse(sx + 2.4, sy, 3.0, 1.85, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // SPLATTER: coagulated core + directional cast-off droplets
+        ctx.fillStyle = `rgba(76, 11, 14, ${alpha * 0.76})`;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, bs.width * 0.42, bs.width * 0.3, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+
+        let s = bs.seed + 11;
+        for (let d = 0; d < 9; d++) {
+          s = (s * 1664525 + 1013904223) >>> 0;
+          const a = ((s % 1000) / 1000 - 0.5) * 1.3;
+          s = (s * 1664525 + 1013904223) >>> 0;
+          const dist = 4 + ((s % 1000) / 1000) * bs.length;
+          const rad = Math.max(0.8, 1.0 + ((s >>> 8) % 24) / 10);
+          ctx.fillStyle =
+            d % 3 === 0
+              ? `rgba(127, 29, 29, ${alpha * 0.68})`
+              : `rgba(88, 13, 16, ${alpha * 0.58})`;
+          ctx.beginPath();
+          ctx.ellipse(
+            Math.cos(a) * dist,
+            Math.sin(a) * dist,
+            rad * 1.35,
+            rad * 0.85,
+            a,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+        }
+      }
+
+      ctx.restore();
+    }
   }
 
   private drawShipProps(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {

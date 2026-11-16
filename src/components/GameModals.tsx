@@ -1,5 +1,5 @@
 import React from 'react';
-import { detectDifficultyPreset, RunStats } from '../game/types';
+import { detectDifficultyPreset, GAME_VERSION, RunStats } from '../game/types';
 
 interface PauseModalProps {
   seed: number;
@@ -62,6 +62,7 @@ function formatDuration(sec: number): string {
 }
 
 function formatDifficultyLabel(stats: RunStats): string {
+  if (stats.customBruteTuning) return 'Dev Custom';
   const preset = detectDifficultyPreset(stats.difficulty);
   if (preset === 'MERCY') return 'Mercy';
   if (preset === 'STANDARD') return 'Standard';
@@ -83,6 +84,8 @@ export const EndModal: React.FC<EndModalProps> = ({
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/82 px-4 backdrop-blur-sm">
       <div className="w-full max-w-md rounded-lg border border-slate-800 bg-[#0d1118] p-7 shadow-2xl">
         <div className="text-xs font-medium text-slate-400">
+          <span className="font-mono-num text-slate-300">v{GAME_VERSION}</span>
+          <span aria-hidden="true"> · </span>
           {isVictory ? 'Vessel Escaped' : 'Killed Aboard Ship'}
           <span aria-hidden="true"> · </span>
           <span>{formatDifficultyLabel(stats)}</span>

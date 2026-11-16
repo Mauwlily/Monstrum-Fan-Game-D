@@ -766,48 +766,92 @@ export class HorrorAudioEngine {
   ): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const dist = Math.hypot(dx, dy);
-    const maxHear = muffled ? 740 : 1220;
+    const maxHear = muffled ? 920 : 1480;
     if (dist > maxHear) return;
 
     const now = this.ctx.currentTime;
-    const atten = Math.pow(1 - dist / maxHear, 1.5);
+    const atten = Math.pow(1 - dist / maxHear, 1.28);
     const occ = this.computeOcclusionParams(occlusion, muffled);
-    const vol = clamp((isChasing ? 0.58 : 0.36) * atten * occ.gainMult, 0.001, 0.72);
+    const vol = clamp((isChasing ? 0.78 : 0.52) * atten * occ.gainMult, 0.001, 0.92);
 
-    // 1. Sub-bass deck stomp
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(isChasing ? 112 : 84, now);
-    osc.frequency.exponentialRampToValueAtTime(26, now + 0.21);
+    // 1. Deep sub-hull seismic thump (cuts through steel bulkheads even when occluded)
+    const subOsc = this.ctx.createOscillator();
+    const subGain = this.ctx.createGain();
+    subOsc.type = 'sine';
+    subOsc.frequency.setValueAtTime(isChasing ? 74 : 58, now);
+    subOsc.frequency.exponentialRampToValueAtTime(20, now + 0.3);
 
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.linearRampToValueAtTime(safeGain(vol), now + 0.012);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.23);
+    subGain.gain.setValueAtTime(0.0001, now);
+    subGain.gain.linearRampToValueAtTime(safeGain(vol * 1.05), now + 0.01);
+    subGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
 
-    osc.connect(gain);
-    this.routeSpatialNode(gain, dx, occlusion, muffled);
-    osc.start(now);
-    osc.stop(now + 0.25);
+    subOsc.connect(subGain);
+    this.routeSpatialNode(subGain, dx, occlusion * 0.65, muffled);
+    subOsc.start(now);
+    subOsc.stop(now + 0.34);
 
-    // 2. Heavy steel/grating armor clank transient (attenuated sharply by wall occlusion)
-    if (this.shortWhiteNoise && occ.gainMult > 0.32) {
-      const src = this.ctx.createBufferSource();
-      src.buffer = this.shortWhiteNoise;
+    // 2. Heavy punchy body stomp (saturated triangle drop)
+    const bodyOsc = this.ctx.createOscillator();
+    const bodyFilter = this.ctx.createBiquadFilter();
+    const bodyGain = this.ctx.createGain();
+    bodyOsc.type = 'triangle';
+    bodyOsc.frequency.setValueAtTime(isChasing ? 136 : 104, now);
+    bodyOsc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
+
+    bodyFilter.type = 'lowpass';
+    bodyFilter.frequency.value = safeFreq(Math.min(occ.lowpassHz, isChasing ? 460 : 320), 280);
+
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.linearRampToValueAtTime(safeGain(vol * 0.85), now + 0.008);
+    bodyGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+
+    bodyOsc.connect(bodyFilter);
+    bodyFilter.connect(bodyGain);
+    this.routeSpatialNode(bodyGain, dx, occlusion, muffled);
+    bodyOsc.start(now);
+    bodyOsc.stop(now + 0.27);
+
+    // 3. Visceral meat-and-bulk crunch impact (low-mid weight transient)
+    const crunchBuffer = this.longBrownNoise ?? this.shortWhiteNoise;
+    if (crunchBuffer) {
+      const crunchSrc = this.ctx.createBufferSource();
+      crunchSrc.buffer = crunchBuffer;
+      const crunchBand = this.ctx.createBiquadFilter();
+      crunchBand.type = 'bandpass';
+      crunchBand.frequency.value = isChasing ? 270 : 210;
+      crunchBand.Q.value = 1.05;
+
+      const crunchGain = this.ctx.createGain();
+      crunchGain.gain.setValueAtTime(0.0001, now);
+      crunchGain.gain.linearRampToValueAtTime(safeGain(vol * 0.64), now + 0.012);
+      crunchGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+      crunchSrc.connect(crunchBand);
+      crunchBand.connect(crunchGain);
+      this.routeSpatialNode(crunchGain, dx, occlusion, muffled);
+      crunchSrc.start(now, Math.random() * 0.4, 0.18);
+      crunchSrc.stop(now + 0.18);
+    }
+
+    // 4. Heavy steel/grating armor clatter & deck ring (attenuated by wall occlusion)
+    if (this.shortWhiteNoise && occ.gainMult > 0.24) {
+      const clankSrc = this.ctx.createBufferSource();
+      clankSrc.buffer = this.shortWhiteNoise;
       const clankBand = this.ctx.createBiquadFilter();
       clankBand.type = 'bandpass';
-      clankBand.frequency.value = material === 'GRATING' ? 1450 : 620;
-      clankBand.Q.value = 1.8;
+      clankBand.frequency.value =
+        material === 'GRATING' ? 1420 : material === 'CABIN' || material === 'BRIDGE' ? 360 : 580;
+      clankBand.Q.value = material === 'GRATING' ? 2.4 : 1.7;
 
       const clankGain = this.ctx.createGain();
-      clankGain.gain.setValueAtTime(safeGain(vol * 0.42), now);
-      clankGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+      clankGain.gain.setValueAtTime(safeGain(vol * (isChasing ? 0.56 : 0.42)), now);
+      clankGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.125);
 
-      src.connect(clankBand);
+      clankSrc.connect(clankBand);
       clankBand.connect(clankGain);
       this.routeSpatialNode(clankGain, dx, occlusion, muffled);
-      src.start(now);
-      src.stop(now + 0.1);
+      clankSrc.start(now);
+      clankSrc.stop(now + 0.135);
     }
   }
 

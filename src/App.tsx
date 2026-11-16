@@ -9,6 +9,8 @@ import { HorrorAudioEngine } from './game/audio';
 import { MonstrumGameEngine } from './game/engine';
 import { GameRenderer } from './game/renderer';
 import {
+  BruteTuningNumbers,
+  buildBruteTuningFromDifficulty,
   DIFFICULTY_PRESETS,
   DebugOverlayConfig,
   DebugScenarioId,
@@ -45,6 +47,29 @@ declare global {
         heliState: string;
         lifeboatState: string;
       } | null;
+      getRuntimeDetails: () => {
+        bruteTuning: BruteTuningNumbers;
+        customBruteTuning: boolean;
+        bloodStreakCount: number;
+        playerX: number;
+        playerY: number;
+        nearestDoor: {
+          id: string;
+          x: number;
+          y: number;
+          orientation: 'H' | 'V';
+          isOpen: boolean;
+          openProgress: number;
+        } | null;
+      } | null;
+      testPositionInNearestDoor: (offsetFromCenterPx?: number) => {
+        doorId: string;
+        orientation: 'H' | 'V';
+        doorCenterX: number;
+        doorCenterY: number;
+        playerX: number;
+        playerY: number;
+      } | null;
       getTelemetry: () => DebugTelemetry | null;
       getStatus: () => GameStatus;
       probePixels: () => ProbeReading[];
@@ -56,6 +81,13 @@ declare global {
 export default function App() {
   const [status, setStatus] = useState<GameStatus>('TITLE_MENU');
   const [difficulty, setDifficulty] = useState<DifficultyConfig>({ ...DIFFICULTY_PRESETS.STANDARD });
+  const [devModeUnlocked, setDevModeUnlocked] = useState<boolean>(
+    () => new URLSearchParams(window.location.search).get('debug') === '1'
+  );
+  const [bruteTuning, setBruteTuning] = useState<BruteTuningNumbers>(() =>
+    buildBruteTuningFromDifficulty(DIFFICULTY_PRESETS.STANDARD)
+  );
+  const [customTuningActive, setCustomTuningActive] = useState(false);
   const [seedInput, setSeedInput] = useState('');
   const [muted, setMuted] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
@@ -70,10 +102,15 @@ export default function App() {
   const audioRef = useRef<HorrorAudioEngine | null>(null);
   const statusRef = useRef<GameStatus>('TITLE_MENU');
   const debugOpenRef = useRef(false);
+  const devModeUnlockedRef = useRef(devModeUnlocked);
 
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    devModeUnlockedRef.current = devModeUnlocked;
+  }, [devModeUnlocked]);
 
   useEffect(() => {
     debugOpenRef.current = debugOpen;
@@ -95,6 +132,34 @@ export default function App() {
     audio.setMuted(next);
     setMuted(next);
   }, [getAudio]);
+
+  const handleSelectDifficulty = useCallback((nextCfg: DifficultyConfig) => {
+    setDifficulty(nextCfg);
+    setBruteTuning(buildBruteTuningFromDifficulty(nextCfg));
+    setCustomTuningActive(false);
+  }, []);
+
+  const handleChangeBruteTuning = useCallback((next: BruteTuningNumbers) => {
+    setBruteTuning(next);
+    setCustomTuningActive(true);
+  }, []);
+
+  const handleResetBruteTuning = useCallback(() => {
+    setBruteTuning(buildBruteTuningFromDifficulty(difficulty));
+    setCustomTuningActive(false);
+  }, [difficulty]);
+
+  const handleToggleDevMode = useCallback(() => {
+    setDevModeUnlocked((prev) => {
+      const next = !prev;
+      if (!next) {
+        setDebugOpen(false);
+        setBruteTuning(buildBruteTuningFromDifficulty(difficulty));
+        setCustomTuningActive(false);
+      }
+      return next;
+    });
+  }, [difficulty]);
 
   const startNewRun = useCallback(
     (overrideRandomSeed = false, forcedSeed?: number, openDebugAfter = false) => {
@@ -127,7 +192,9 @@ export default function App() {
             setStatus('VICTORY_CUTSCENE');
           },
         },
-        Number.isFinite(parsedSeed) ? parsedSeed : undefined
+        Number.isFinite(parsedSeed) ? parsedSeed : undefined,
+        bruteTuning,
+        customTuningActive
       );
 
       engine.debugConfig.enabled = openDebugAfter || debugOpenRef.current;
@@ -138,7 +205,7 @@ export default function App() {
       }
       setStatus('PLAYING');
     },
-    [difficulty, getAudio, muted, seedInput]
+    [bruteTuning, customTuningActive, difficulty, getAudio, muted, seedInput]
   );
 
   const probeBehindWallPixels = useCallback((): ProbeReading[] => {
@@ -420,6 +487,86 @@ export default function App() {
           lifeboatState: engine.escape.lifeboatState,
         };
       },
+      getRuntimeDetails: () => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        const ts = engine.map.tileSize;
+        let nearestDoor: {
+          id: string;
+          x: number;
+          y: number;
+          orientation: 'H' | 'V';
+          isOpen: boolean;
+          openProgress: number;
+        } | null = null;
+        let bestD = Infinity;
+        for (const door of engine.map.doors) {
+          if (door.isBroken || door.isLocked) continue;
+          const dx = (door.tx + 0.5) * ts;
+          const dy = (door.ty + 0.5) * ts;
+          const dist = Math.hypot(dx - engine.player.x, dy - engine.player.y);
+          if (dist < bestD) {
+            bestD = dist;
+            nearestDoor = {
+              id: door.id,
+              x: dx,
+              y: dy,
+              orientation: door.orientation,
+              isOpen: door.isOpen,
+              openProgress: door.openProgress,
+            };
+          }
+        }
+        return {
+          bruteTuning: {
+            ...(engine.bruteTuning ?? buildBruteTuningFromDifficulty(engine.difficulty)),
+          },
+          customBruteTuning: engine.customBruteTuning,
+          bloodStreakCount: engine.map.bloodStreaks.length,
+          playerX: engine.player.x,
+          playerY: engine.player.y,
+          nearestDoor,
+        };
+      },
+      testPositionInNearestDoor: (offsetFromCenterPx = 6) => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        const ts = engine.map.tileSize;
+        let bestDoor = null;
+        let bestD = Infinity;
+        for (const door of engine.map.doors) {
+          if (door.isBroken || door.isLocked) continue;
+          const dx = (door.tx + 0.5) * ts;
+          const dy = (door.ty + 0.5) * ts;
+          const dist = Math.hypot(dx - engine.player.x, dy - engine.player.y);
+          if (dist < bestD) {
+            bestD = dist;
+            bestDoor = door;
+          }
+        }
+        if (!bestDoor) return null;
+        const cx = (bestDoor.tx + 0.5) * ts;
+        const cy = (bestDoor.ty + 0.5) * ts;
+        bestDoor.isOpen = true;
+        bestDoor.openProgress = 1;
+        if (bestDoor.orientation === 'H') {
+          engine.player.x = cx;
+          engine.player.y = cy + offsetFromCenterPx;
+        } else {
+          engine.player.x = cx + offsetFromCenterPx;
+          engine.player.y = cy;
+        }
+        engine.player.hidingSpotId = null;
+        renderImmediateFrame();
+        return {
+          doorId: bestDoor.id,
+          orientation: bestDoor.orientation,
+          doorCenterX: cx,
+          doorCenterY: cy,
+          playerX: engine.player.x,
+          playerY: engine.player.y,
+        };
+      },
       getTelemetry: () => syncDebugTelemetry(),
       getStatus: () => statusRef.current,
       probePixels: () => {
@@ -462,8 +609,10 @@ export default function App() {
       }
 
       if ((e.code === 'F9' || e.code === 'Backquote') && statusRef.current === 'PLAYING') {
-        e.preventDefault();
-        setDebugOpen((prev) => !prev);
+        if (devModeUnlockedRef.current) {
+          e.preventDefault();
+          setDebugOpen((prev) => !prev);
+        }
         return;
       }
 
@@ -557,11 +706,17 @@ export default function App() {
     return (
       <TitleMenu
         difficulty={difficulty}
-        onSelectDifficulty={setDifficulty}
+        onSelectDifficulty={handleSelectDifficulty}
         seedInput={seedInput}
         onSeedInputChange={setSeedInput}
         muted={muted}
         onToggleMute={toggleMute}
+        devModeUnlocked={devModeUnlocked}
+        onToggleDevMode={handleToggleDevMode}
+        bruteTuning={bruteTuning}
+        customTuningActive={customTuningActive}
+        onChangeBruteTuning={handleChangeBruteTuning}
+        onResetBruteTuning={handleResetBruteTuning}
         onStartGame={() => startNewRun(false)}
       />
     );
@@ -595,6 +750,7 @@ export default function App() {
         <GameHud
           hud={hud}
           muted={muted}
+          showDebugButton={devModeUnlocked}
           debugOpen={debugOpen}
           onToggleMute={toggleMute}
           onToggleDebug={() => setDebugOpen((prev) => !prev)}

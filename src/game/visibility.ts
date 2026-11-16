@@ -1,5 +1,12 @@
 import { isTileWalkable } from './mapGen';
-import { BruteState, DifficultyConfig, Door, PlayerState, ShipMap } from './types';
+import {
+  BruteState,
+  BruteTuningNumbers,
+  DifficultyConfig,
+  Door,
+  PlayerState,
+  ShipMap,
+} from './types';
 
 export interface OccluderSegment {
   x1: number;
@@ -376,13 +383,25 @@ export function computeVisibilityPolygon(
  * Wide, non-gamey Brute Field of View (~152 deg) + peripheral close awareness.
  * Flashlight beam makes the player visible from much farther away!
  */
-export function getSensesProfile(cfg: DifficultyConfig): {
+export function getSensesProfile(
+  cfg: DifficultyConfig,
+  tuning?: BruteTuningNumbers
+): {
   sightMult: number;
   halfFovDeg: number;
   peripheralBase: number;
   peripheralCrouch: number;
   hearingMult: number;
 } {
+  if (tuning) {
+    return {
+      sightMult: tuning.sightMult,
+      halfFovDeg: tuning.halfFovDeg,
+      peripheralBase: tuning.peripheralBase,
+      peripheralCrouch: tuning.peripheralCrouch,
+      hearingMult: tuning.hearingMult,
+    };
+  }
   switch (cfg.senses) {
     case 'LOW':
       return {
@@ -416,7 +435,8 @@ export function canBruteSeePlayer(
   player: PlayerState,
   map: ShipMap,
   doorsByTile: Map<number, Door>,
-  difficulty: DifficultyConfig
+  difficulty: DifficultyConfig,
+  tuning?: BruteTuningNumbers
 ): boolean {
   if (brute.state === 'STUNNED') return false;
   if (player.hidingSpotId !== null) return false;
@@ -430,7 +450,7 @@ export function canBruteSeePlayer(
   const playerRoom = map.roomGrid[pTy][pTx];
   const playerInLitRoom = map.lightSwitches.some((sw) => sw.room === playerRoom && sw.isOn);
 
-  const senses = getSensesProfile(difficulty);
+  const senses = getSensesProfile(difficulty, tuning);
   const baseRange =
     player.flashlightOn || playerInLitRoom ? 485 : player.crouching ? 215 : 345;
   const maxRange = baseRange * senses.sightMult;

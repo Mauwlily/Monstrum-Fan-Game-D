@@ -1,3 +1,5 @@
+export const GAME_VERSION = '0.1.1';
+
 export type GameStatus = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY_CUTSCENE' | 'VICTORY' | 'GAME_OVER';
 
 export type DifficultyLevel = 'LOW' | 'MEDIUM' | 'HIGH';
@@ -6,6 +8,122 @@ export interface DifficultyConfig {
   intelligence: DifficultyLevel;
   senses: DifficultyLevel;
   speed: DifficultyLevel;
+}
+
+export interface BruteTuningNumbers {
+  // Speed internals
+  roamSpeed: number;
+  investigateSpeed: number;
+  stalkSpeed: number;
+  chaseSpeed: number;
+  smashChaseDelay: number;
+  smashPatrolDelay: number;
+  stairClimbChase: number;
+  stairClimbPatrol: number;
+  // Senses internals
+  sightMult: number;
+  halfFovDeg: number;
+  peripheralBase: number;
+  peripheralCrouch: number;
+  hearingMult: number;
+  // Intelligence internals
+  sweepCoverage: number;
+  overshootDist: number;
+  clueRoomDepth: number;
+  clueScanInterval: number;
+  stairPursuitRange: number;
+}
+
+export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuningNumbers {
+  const speedPart =
+    cfg.speed === 'LOW'
+      ? {
+          roamSpeed: 102,
+          investigateSpeed: 132,
+          stalkSpeed: 140,
+          chaseSpeed: 196,
+          smashChaseDelay: 0.62,
+          smashPatrolDelay: 0.85,
+          stairClimbChase: 0.68,
+          stairClimbPatrol: 0.88,
+        }
+      : cfg.speed === 'HIGH'
+        ? {
+            roamSpeed: 136,
+            investigateSpeed: 174,
+            stalkSpeed: 186,
+            chaseSpeed: 264,
+            smashChaseDelay: 0.3,
+            smashPatrolDelay: 0.54,
+            stairClimbChase: 0.42,
+            stairClimbPatrol: 0.62,
+          }
+        : {
+            roamSpeed: 118,
+            investigateSpeed: 152,
+            stalkSpeed: 164,
+            chaseSpeed: 238,
+            smashChaseDelay: 0.42,
+            smashPatrolDelay: 0.7,
+            stairClimbChase: 0.54,
+            stairClimbPatrol: 0.74,
+          };
+
+  const sensesPart =
+    cfg.senses === 'LOW'
+      ? {
+          sightMult: 0.82,
+          halfFovDeg: 66,
+          peripheralBase: 76,
+          peripheralCrouch: 50,
+          hearingMult: 0.8,
+        }
+      : cfg.senses === 'HIGH'
+        ? {
+            sightMult: 1.18,
+            halfFovDeg: 84,
+            peripheralBase: 112,
+            peripheralCrouch: 74,
+            hearingMult: 1.25,
+          }
+        : {
+            sightMult: 1.0,
+            halfFovDeg: 76,
+            peripheralBase: 95,
+            peripheralCrouch: 62,
+            hearingMult: 1.0,
+          };
+
+  const intelPart =
+    cfg.intelligence === 'LOW'
+      ? {
+          sweepCoverage: 0.4,
+          overshootDist: 120,
+          clueRoomDepth: 1,
+          clueScanInterval: 0.22,
+          stairPursuitRange: 56,
+        }
+      : cfg.intelligence === 'HIGH'
+        ? {
+            sweepCoverage: 1.0,
+            overshootDist: 250,
+            clueRoomDepth: 4,
+            clueScanInterval: 0.06,
+            stairPursuitRange: 125,
+          }
+        : {
+            sweepCoverage: 0.75,
+            overshootDist: 190,
+            clueRoomDepth: 3,
+            clueScanInterval: 0.12,
+            stairPursuitRange: 110,
+          };
+
+  return {
+    ...speedPart,
+    ...sensesPart,
+    ...intelPart,
+  };
 }
 
 export type DifficultyPreset = 'MERCY' | 'STANDARD' | 'NIGHTMARE' | 'CUSTOM';
@@ -300,6 +418,21 @@ export interface RoomBounds {
   y2: number;
 }
 
+export type BloodStreakKind = 'DRAG_SMEAR' | 'BOOTPRINTS' | 'SPLATTER';
+
+export interface BloodStreak {
+  id: string;
+  kind: BloodStreakKind;
+  x: number;
+  y: number;
+  angle: number;
+  length: number;
+  width: number;
+  intensity: number;
+  seed: number;
+  room: RoomName;
+}
+
 export interface ShipMap {
   width: number;
   height: number;
@@ -317,6 +450,7 @@ export interface ShipMap {
   containers: Container[];
   steamVents: SteamVent[];
   lightSwitches: RoomLightSwitch[];
+  bloodStreaks: BloodStreak[];
   playerSpawn: { x: number; y: number };
   bruteSpawn: { x: number; y: number };
   lifeboatPos: { x: number; y: number; tx: number; ty: number };
@@ -467,6 +601,7 @@ export interface RunStats {
   deathReason: string | null;
   seed: number;
   difficulty: DifficultyConfig;
+  customBruteTuning?: boolean;
 }
 
 export interface HudSnapshot {

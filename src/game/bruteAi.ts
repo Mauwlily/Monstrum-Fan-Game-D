@@ -1,6 +1,7 @@
 import { isTileWalkable } from './mapGen';
 import {
   BruteState,
+  BruteTuningNumbers,
   DifficultyConfig,
   DifficultyLevel,
   Door,
@@ -235,7 +236,8 @@ export class BruteBrain {
     refX: number,
     refY: number,
     nowSec: number,
-    intelligence: DifficultyLevel
+    intelligence: DifficultyLevel,
+    tuning?: BruteTuningNumbers
   ): string[] {
     const deckSplitY = 29 * this.map.tileSize;
     const onLower = refY > deckSplitY;
@@ -257,6 +259,11 @@ export class BruteBrain {
       (a, b) => Math.hypot(a.x - refX, a.y - refY) - Math.hypot(b.x - refX, b.y - refY)
     );
 
+    if (tuning) {
+      const cap = Math.max(1, Math.ceil(candidates.length * Math.max(0.1, Math.min(1, tuning.sweepCoverage))));
+      return candidates.slice(0, cap).map((s) => s.id);
+    }
+
     if (intelligence === 'LOW') {
       return candidates.slice(0, 2).map((s) => s.id);
     }
@@ -277,17 +284,19 @@ export class BruteBrain {
     nowSec: number,
     brute: BruteState,
     doorsByTile: Map<number, Door>,
-    difficulty: DifficultyConfig
+    difficulty: DifficultyConfig,
+    tuning?: BruteTuningNumbers
   ): ClueDetectionEvent[] {
     this.clueScanTimer -= dt;
     if (this.clueScanTimer > 0) return [];
     this.clueScanTimer =
-      difficulty.intelligence === 'HIGH' ? 0.06 : difficulty.intelligence === 'MEDIUM' ? 0.12 : 0.22;
+      tuning?.clueScanInterval ??
+      (difficulty.intelligence === 'HIGH' ? 0.06 : difficulty.intelligence === 'MEDIUM' ? 0.12 : 0.22);
 
     if (brute.state === 'STUNNED' || brute.state === 'SMASH_DOOR') return [];
 
     const events: ClueDetectionEvent[] = [];
-    const senses = getSensesProfile(difficulty);
+    const senses = getSensesProfile(difficulty, tuning);
     const doorSightRange = 415 * senses.sightMult;
     const containerSightRange = 345 * senses.sightMult;
     const silentSyncOnly = brute.state === 'CHASE';
@@ -333,7 +342,9 @@ export class BruteBrain {
             doorY,
             reason,
             nowSec,
-            difficulty.intelligence
+            difficulty.intelligence,
+            undefined,
+            tuning
           );
           events.push({ x: doorX, y: doorY, room: farRoom, reason });
         }
@@ -373,7 +384,9 @@ export class BruteBrain {
           cont.y,
           'LOOTED_CONTAINER',
           nowSec,
-          difficulty.intelligence
+          difficulty.intelligence,
+          undefined,
+          tuning
         );
         events.push({ x: cont.x, y: cont.y, room: cont.room, reason: 'LOOTED_CONTAINER' });
       }
@@ -426,7 +439,8 @@ export class BruteBrain {
           'LIGHT_LEFT_ON',
           nowSec,
           difficulty.intelligence,
-          sw
+          sw,
+          tuning
         );
         events.push({ x: sw.x, y: sw.y, room: sw.room, reason: 'LIGHT_LEFT_ON' });
       }
@@ -459,7 +473,8 @@ export class BruteBrain {
     reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON',
     nowSec: number,
     intelligence: DifficultyLevel,
-    lightSwitch?: RoomLightSwitch
+    lightSwitch?: RoomLightSwitch,
+    tuning?: BruteTuningNumbers
   ): void {
     const primaryMem = this.roomMemory.get(primaryRoom);
     if (primaryMem) {
@@ -470,7 +485,10 @@ export class BruteBrain {
       }
     }
 
-    const maxRooms = intelligence === 'HIGH' ? 4 : intelligence === 'MEDIUM' ? 3 : 1;
+    const maxRooms = Math.max(
+      1,
+      Math.round(tuning?.clueRoomDepth ?? (intelligence === 'HIGH' ? 4 : intelligence === 'MEDIUM' ? 3 : 1))
+    );
 
     // Build connected-room sweep trail: primary room first, then adjacent connected named rooms
     const nextRooms: RoomName[] = [];
@@ -517,8 +535,9 @@ export class BruteBrain {
       return;
     }
 
+    const stairScanRange = tuning?.stairPursuitRange ?? (intelligence === 'LOW' ? 56 : 110);
     const crossDeckEntries =
-      intelligence !== 'LOW' ? this.findCrossDeckStairEntries(clueX, clueY, 240) : [];
+      stairScanRange >= 75 ? this.findCrossDeckStairEntries(clueX, clueY, 240) : [];
 
     // Set immediate Stalker target & queue connected rooms
     if (primaryRoom === 'Corridor' || primaryRoom === 'Catwalk') {
@@ -560,15 +579,18 @@ export class BruteBrain {
     originY: number,
     originRoom: RoomName,
     _nowSec: number,
-    intelligence: DifficultyLevel
+    intelligence: DifficultyLevel,
+    tuning?: BruteTuningNumbers
   ): void {
-    const maxFollowups = intelligence === 'HIGH' ? 3 : intelligence === 'MEDIUM' ? 2 : 1;
+    const rawDepth = tuning?.clueRoomDepth ?? (intelligence === 'HIGH' ? 4 : intelligence === 'MEDIUM' ? 3 : 1);
+    const maxFollowups = Math.max(1, Math.round(rawDepth >= 4 ? 3 : rawDepth >= 2 ? 2 : 1));
     const primaryMem = this.roomMemory.get(originRoom);
     const queue: StalkQueueEntry[] = [];
     const seenRooms = new Set<RoomName>([originRoom]);
 
     // Check if sight broke near a companionway — queue the opposite-deck landing & adjacent room!
-    if (intelligence !== 'LOW') {
+    const stairScanRange = tuning?.stairPursuitRange ?? (intelligence === 'LOW' ? 56 : 110);
+    if (stairScanRange >= 75) {
       const crossEntries = this.findCrossDeckStairEntries(originX, originY, 260);
       for (const ce of crossEntries) {
         if (queue.length >= maxFollowups) break;
@@ -761,7 +783,8 @@ export class BruteBrain {
     brute: BruteState,
     player: PlayerState,
     doorsByTile: Map<number, Door>,
-    difficulty: DifficultyConfig
+    difficulty: DifficultyConfig,
+    tuning?: BruteTuningNumbers
   ): UtilityGoal {
     if (brute.state === 'STUNNED') {
       this.activeGoal = 'UNLEASHED_ROAM';
@@ -773,7 +796,7 @@ export class BruteBrain {
       return 'SMASH_DOOR';
     }
 
-    const seesPlayer = canBruteSeePlayer(brute, player, this.map, doorsByTile, difficulty);
+    const seesPlayer = canBruteSeePlayer(brute, player, this.map, doorsByTile, difficulty, tuning);
     if (seesPlayer) {
       this.activeGoal = 'PURSUIT';
       return 'PURSUIT';

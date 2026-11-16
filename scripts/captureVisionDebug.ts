@@ -104,6 +104,131 @@ async function main(): Promise<void> {
       }
     };
 
+    // 0. Check v0.1.1 Main Menu, secret 3-click :D Dev Mode, hidden Debug button, & custom Brute numbers
+    const normalPage = await context.newPage();
+    normalPage.on('console', (msg) => {
+      if (msg.type() === 'error') {
+        consoleErrors.push(`[normal] ${msg.text()}`);
+      }
+    });
+    normalPage.on('pageerror', (err) => {
+      pageErrors.push(`[normal] ${err.message}`);
+    });
+
+    await normalPage.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
+    await normalPage.waitForSelector('h1');
+    const menuTextLocked = await normalPage.evaluate(() => document.body.innerText);
+    check(menuTextLocked.includes('v0.1.1'), 'Expected Main Menu to display v0.1.1');
+    check(
+      !menuTextLocked.includes('Dev Mode: Internal Brute Numbers'),
+      'Expected Dev Mode panel hidden before 3-click :D unlock'
+    );
+
+    // Start Game without Dev Mode -> Debug button must be hidden in HUD
+    await normalPage.getByRole('button', { name: 'Start Game' }).click();
+    await normalPage.waitForFunction(() => Boolean(window.__monstrumDebug?.getRuntimeDetails()));
+    const debugBtnCountLocked = await normalPage.getByRole('button', { name: 'Toggle debug panel' }).count();
+    check(debugBtnCountLocked === 0, `Expected Debug HUD button hidden when locked, found ${debugBtnCountLocked}`);
+
+    // Reload clean menu & verify non-consecutive clicks do NOT unlock Dev Mode
+    await normalPage.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
+    await normalPage.waitForSelector('[aria-label="happy face"]');
+    const smiley = normalPage.getByLabel('happy face');
+    await smiley.click();
+    await normalPage.locator('h1').click({ position: { x: 10, y: 10 } }); // breaks streak
+    await smiley.click();
+    await smiley.click();
+    const menuTextBrokenStreak = await normalPage.evaluate(() => document.body.innerText);
+    check(
+      !menuTextBrokenStreak.includes('Dev Mode: Internal Brute Numbers'),
+      'Expected non-consecutive clicks on :D NOT to unlock Dev Mode'
+    );
+
+    // Click :D 3 times in a row -> unlocks Dev Mode panel
+    await smiley.click();
+    await smiley.click();
+    await smiley.click();
+    await normalPage.waitForSelector('#dev-chaseSpeed');
+    const menuTextUnlocked = await normalPage.evaluate(() => document.body.innerText);
+    check(
+      menuTextUnlocked.includes('Dev Mode: Internal Brute Numbers') &&
+        menuTextUnlocked.includes('Dev Mode Active'),
+      'Expected 3 consecutive clicks on :D to unlock Dev Mode panel'
+    );
+
+    // Modify Brute internal numbers (Speed & Senses) and capture screenshot
+    await normalPage.fill('#dev-chaseSpeed', '310');
+    await normalPage.fill('#dev-halfFovDeg', '96');
+    await normalPage.screenshot({ path: path.join(OUTPUT_DIR, '15_title_menu_dev_mode.png') });
+    console.log(`Saved ${path.join(OUTPUT_DIR, '15_title_menu_dev_mode.png')}`);
+
+    // Start Game with Dev Mode unlocked -> Debug HUD button visible + custom tuning active + blood streaks generated
+    await normalPage.getByRole('button', { name: 'Start Game' }).click();
+    await normalPage.waitForFunction(() => Boolean(window.__monstrumDebug?.getRuntimeDetails()));
+    const debugBtnCountUnlocked = await normalPage
+      .getByRole('button', { name: 'Toggle debug panel' })
+      .count();
+    check(
+      debugBtnCountUnlocked === 1,
+      `Expected Debug HUD button visible when Dev Mode unlocked, found ${debugBtnCountUnlocked}`
+    );
+
+    const runtimeDetails = await normalPage.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    console.log('0.1.1 runtime details:', runtimeDetails);
+    check(
+      runtimeDetails?.customBruteTuning === true &&
+        runtimeDetails.bruteTuning.chaseSpeed === 310 &&
+        runtimeDetails.bruteTuning.halfFovDeg === 96,
+      `Expected custom Brute numbers (chaseSpeed=310, halfFovDeg=96) in engine, got ${JSON.stringify(runtimeDetails?.bruteTuning)}`
+    );
+    check(
+      (runtimeDetails?.bloodStreakCount ?? 0) >= 8,
+      `Expected crew blood streaks spawned across ship (>=8), got ${runtimeDetails?.bloodStreakCount}`
+    );
+
+    // Verify Door anti-stick push-through (both forward +6px and backward -6px)
+    const fwdStart = await normalPage.evaluate(() =>
+      window.__monstrumDebug!.testPositionInNearestDoor(6)
+    );
+    check(fwdStart !== null, 'Expected a nearby unlocked door for forward push-through test');
+    if (fwdStart) {
+      await normalPage.evaluate(() => {
+        window.__monstrumDebug!.tryInteract(); // close door while overlapping +6px past center
+        for (let i = 0; i < 12; i++) window.__monstrumDebug!.step(0.05);
+      });
+      const fwdEnd = await normalPage.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+      const axisDeltaFwd =
+        fwdStart.orientation === 'H'
+          ? (fwdEnd?.playerY ?? 0) - fwdStart.doorCenterY
+          : (fwdEnd?.playerX ?? 0) - fwdStart.doorCenterX;
+      console.log('Door forward push-through delta:', axisDeltaFwd, 'door:', fwdEnd?.nearestDoor);
+      check(
+        axisDeltaFwd >= 18,
+        `Expected player pushed cleanly forward (>=18px past center) without sticking, got ${axisDeltaFwd.toFixed(1)}`
+      );
+    }
+
+    const bwdStart = await normalPage.evaluate(() =>
+      window.__monstrumDebug!.testPositionInNearestDoor(-6)
+    );
+    if (bwdStart) {
+      await normalPage.evaluate(() => {
+        window.__monstrumDebug!.tryInteract(); // close door while overlapping -6px before center
+        for (let i = 0; i < 12; i++) window.__monstrumDebug!.step(0.05);
+      });
+      const bwdEnd = await normalPage.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+      const axisDeltaBwd =
+        bwdStart.orientation === 'H'
+          ? (bwdEnd?.playerY ?? 0) - bwdStart.doorCenterY
+          : (bwdEnd?.playerX ?? 0) - bwdStart.doorCenterX;
+      console.log('Door backward push-through delta:', axisDeltaBwd);
+      check(
+        axisDeltaBwd <= -18,
+        `Expected player pushed cleanly backward (<=-18px past center) without sticking, got ${axisDeltaBwd.toFixed(1)}`
+      );
+    }
+    await normalPage.close();
+
     // Disable automatic RAF drift during deterministic scenario checks by keeping freezeAi true where needed
     const shot = async (filename: string) => {
       const target = path.join(OUTPUT_DIR, filename);
@@ -482,8 +607,10 @@ async function main(): Promise<void> {
     const finalText = await page.evaluate(() => document.body.innerText);
     console.log('After 3 cutscene frames status:', finalStatus);
     check(
-      finalStatus === 'VICTORY' && finalText.includes('You Escaped Alive :D'),
-      `Expected VICTORY EndModal after noir cutscene, got status=${finalStatus}`
+      finalStatus === 'VICTORY' &&
+        finalText.includes('You Escaped Alive :D') &&
+        finalText.includes('v0.1.1'),
+      `Expected VICTORY EndModal with v0.1.1 after noir cutscene, got status=${finalStatus}`
     );
 
     check(consoleErrors.length === 0, `Console errors detected: ${consoleErrors.join('; ')}`);
@@ -491,7 +618,7 @@ async function main(): Promise<void> {
 
     assert(failures.length === 0, `${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
 
-    console.log('ALL VISION, GRAPHICS, ESCAPE OVERHAUL, JOURNAL, BACKPACK & CUTSCENE ASSERTIONS PASSED.');
+    console.log('ALL 0.1.1 DEV MODE, BLOOD STREAKS, DOOR PUSH-THROUGH, VISION & ESCAPE ASSERTIONS PASSED.');
   } finally {
     await browser.close();
     if (proc) {
