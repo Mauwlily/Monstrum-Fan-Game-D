@@ -1,6 +1,8 @@
 roadmap
+
+Done:
 0.1.0.1
--> Security MD, License MD, signed commits. Mainly to make that Reddit github-repo security-check bot happy
+-> Security MD, License MD. Mainly to make that Reddit github-repo security-check bot happy
 -> Is not, and will not be its own release
 
 0.1.1
@@ -20,6 +22,8 @@ roadmap
 -> Reduce chance of Brute getting stuck
 -> Scale smoothly with window resolution
 
+
+Next versions:
 0.2.0
 -> 4.5x larger ship (1.5x more floors, 2x longer, 1.5x wider)
 -> More room types!
