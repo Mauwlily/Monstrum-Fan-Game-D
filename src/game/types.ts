@@ -1,8 +1,17 @@
-export const GAME_VERSION = '0.1.1';
+export const GAME_VERSION = '0.1.2';
+
+export const REFERENCE_VIEWPORT_WIDTH = 1440;
+export const REFERENCE_VIEWPORT_HEIGHT = 900;
+
+export function getViewportResolutionScale(width: number, height: number): number {
+  if (width <= 0 || height <= 0) return 1;
+  const areaRatio = (width * height) / (REFERENCE_VIEWPORT_WIDTH * REFERENCE_VIEWPORT_HEIGHT);
+  return Math.max(0.45, Math.min(3.0, Math.sqrt(areaRatio)));
+}
 
 export type GameStatus = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY_CUTSCENE' | 'VICTORY' | 'GAME_OVER';
 
-export type DifficultyLevel = 'LOW' | 'MEDIUM' | 'HIGH';
+export type DifficultyLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 
 export interface DifficultyConfig {
   intelligence: DifficultyLevel;
@@ -47,27 +56,38 @@ export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuni
           stairClimbChase: 0.68,
           stairClimbPatrol: 0.88,
         }
-      : cfg.speed === 'HIGH'
+      : cfg.speed === 'EXTREME'
         ? {
-            roamSpeed: 136,
-            investigateSpeed: 174,
-            stalkSpeed: 186,
-            chaseSpeed: 264,
-            smashChaseDelay: 0.3,
-            smashPatrolDelay: 0.54,
-            stairClimbChase: 0.42,
-            stairClimbPatrol: 0.62,
+            roamSpeed: 164,
+            investigateSpeed: 210,
+            stalkSpeed: 224,
+            chaseSpeed: 316,
+            smashChaseDelay: 0.22,
+            smashPatrolDelay: 0.4,
+            stairClimbChase: 0.32,
+            stairClimbPatrol: 0.48,
           }
-        : {
-            roamSpeed: 118,
-            investigateSpeed: 152,
-            stalkSpeed: 164,
-            chaseSpeed: 238,
-            smashChaseDelay: 0.42,
-            smashPatrolDelay: 0.7,
-            stairClimbChase: 0.54,
-            stairClimbPatrol: 0.74,
-          };
+        : cfg.speed === 'HIGH'
+          ? {
+              roamSpeed: 136,
+              investigateSpeed: 174,
+              stalkSpeed: 186,
+              chaseSpeed: 264,
+              smashChaseDelay: 0.3,
+              smashPatrolDelay: 0.54,
+              stairClimbChase: 0.42,
+              stairClimbPatrol: 0.62,
+            }
+          : {
+              roamSpeed: 118,
+              investigateSpeed: 152,
+              stalkSpeed: 164,
+              chaseSpeed: 238,
+              smashChaseDelay: 0.42,
+              smashPatrolDelay: 0.7,
+              stairClimbChase: 0.54,
+              stairClimbPatrol: 0.74,
+            };
 
   const sensesPart =
     cfg.senses === 'LOW'
@@ -78,22 +98,31 @@ export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuni
           peripheralCrouch: 50,
           hearingMult: 0.8,
         }
-      : cfg.senses === 'HIGH'
+      : cfg.senses === 'EXTREME'
         ? {
-            sightMult: 1.18,
-            halfFovDeg: 84,
-            peripheralBase: 112,
-            peripheralCrouch: 74,
-            hearingMult: 1.25,
+            sightMult: 1.42,
+            halfFovDeg: 100,
+            peripheralBase: 140,
+            peripheralCrouch: 94,
+            hearingMult: 1.52,
           }
-        : {
-            sightMult: 1.0,
-            halfFovDeg: 76,
-            peripheralBase: 95,
-            peripheralCrouch: 62,
-            hearingMult: 1.0,
-          };
+        : cfg.senses === 'HIGH'
+          ? {
+              sightMult: 1.18,
+              halfFovDeg: 84,
+              peripheralBase: 112,
+              peripheralCrouch: 74,
+              hearingMult: 1.25,
+            }
+          : {
+              sightMult: 1.0,
+              halfFovDeg: 76,
+              peripheralBase: 95,
+              peripheralCrouch: 62,
+              hearingMult: 1.0,
+            };
 
+  // Extreme intelligence intentionally matches High in 0.1.2
   const intelPart =
     cfg.intelligence === 'LOW'
       ? {
@@ -103,7 +132,7 @@ export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuni
           clueScanInterval: 0.22,
           stairPursuitRange: 56,
         }
-      : cfg.intelligence === 'HIGH'
+      : cfg.intelligence === 'HIGH' || cfg.intelligence === 'EXTREME'
         ? {
             sweepCoverage: 1.0,
             overshootDist: 250,
@@ -126,16 +155,17 @@ export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuni
   };
 }
 
-export type DifficultyPreset = 'MERCY' | 'STANDARD' | 'NIGHTMARE' | 'CUSTOM';
+export type DifficultyPreset = 'MERCY' | 'STANDARD' | 'NIGHTMARE' | 'EXTREME' | 'CUSTOM';
 
 export const DIFFICULTY_PRESETS: Record<Exclude<DifficultyPreset, 'CUSTOM'>, DifficultyConfig> = {
   MERCY: { intelligence: 'LOW', senses: 'LOW', speed: 'LOW' },
   STANDARD: { intelligence: 'MEDIUM', senses: 'MEDIUM', speed: 'MEDIUM' },
   NIGHTMARE: { intelligence: 'HIGH', senses: 'HIGH', speed: 'HIGH' },
+  EXTREME: { intelligence: 'EXTREME', senses: 'EXTREME', speed: 'EXTREME' },
 };
 
 export function detectDifficultyPreset(cfg: DifficultyConfig): DifficultyPreset {
-  for (const key of ['MERCY', 'STANDARD', 'NIGHTMARE'] as const) {
+  for (const key of ['MERCY', 'STANDARD', 'NIGHTMARE', 'EXTREME'] as const) {
     const p = DIFFICULTY_PRESETS[key];
     if (
       p.intelligence === cfg.intelligence &&
@@ -475,6 +505,7 @@ export interface PlayerState {
   hidingSpotId: string | null;
   peekingDoorId: string | null;
   peekingSpotId: string | null;
+  peekingStairId: string | null;
   preHidePos: { x: number; y: number } | null;
   climbingStairId: string | null;
   climbProgress: number; // 0..1 timed climb progress
@@ -646,6 +677,7 @@ export type DebugScenarioId =
   | 'DOOR_KEYHOLE_AND_FLARE'
   | 'BRUTE_BEAM_CORNER'
   | 'STAIR_BRUTE_GLOW'
+  | 'STAIR_PEEK'
   | 'FLICKER_AND_SURVIVOR'
   | 'ESCAPE_HELI_OVERHAUL'
   | 'ESCAPE_LIFEBOAT_CRANE';
@@ -677,5 +709,6 @@ export interface DebugOverlayConfig {
   showBlackProbes: boolean;
   forceVentPeek: boolean;
   forceDoorPeek: boolean;
+  forceStairPeek: boolean;
 }
 

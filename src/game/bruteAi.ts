@@ -79,6 +79,12 @@ export class BruteBrain {
   public stalkTarget: StalkTarget | null = null;
   public stalkRoomQueue: StalkQueueEntry[] = [];
 
+  // Sight-observed escape progress (Brute only biases patrol routes after visually seeing repairs/activation)
+  public observedHeliRepairs = 0;
+  public observedHeliActive = false;
+  public observedLifeboatRepairs = 0;
+  public observedLifeboatActive = false;
+
   private map: ShipMap;
   private recentlyCheckedSpots: Map<string, number> = new Map();
   private clueScanTimer = 0;
@@ -285,13 +291,15 @@ export class BruteBrain {
     brute: BruteState,
     doorsByTile: Map<number, Door>,
     difficulty: DifficultyConfig,
-    tuning?: BruteTuningNumbers
+    tuning?: BruteTuningNumbers,
+    escape?: EscapeProgress
   ): ClueDetectionEvent[] {
     this.clueScanTimer -= dt;
     if (this.clueScanTimer > 0) return [];
+    const highIntel = difficulty.intelligence === 'HIGH' || difficulty.intelligence === 'EXTREME';
     this.clueScanTimer =
       tuning?.clueScanInterval ??
-      (difficulty.intelligence === 'HIGH' ? 0.06 : difficulty.intelligence === 'MEDIUM' ? 0.12 : 0.22);
+      (highIntel ? 0.06 : difficulty.intelligence === 'MEDIUM' ? 0.12 : 0.22);
 
     if (brute.state === 'STUNNED' || brute.state === 'SMASH_DOOR') return [];
 
@@ -446,6 +454,58 @@ export class BruteBrain {
       }
     }
 
+    // 4. Sight-based Escape Craft inspection: only learn repairs/activation when in real LoS!
+    if (escape) {
+      const escapeSightRange = 500 * senses.sightMult;
+      const seesHeli =
+        bruteRoom === 'Helideck' ||
+        canBruteSeePoint(
+          brute,
+          this.map.heliPos.x,
+          this.map.heliPos.y,
+          escapeSightRange,
+          this.map,
+          doorsByTile,
+          senses.halfFovDeg
+        );
+      if (seesHeli) {
+        const nextHeliRepairs = escape.heliParts.length;
+        const nextHeliActive = escape.heliState === 'ACTIVATING' || escape.heliState === 'READY';
+        if (nextHeliRepairs > this.observedHeliRepairs || (nextHeliActive && !this.observedHeliActive)) {
+          const heliMem = this.roomMemory.get('Helideck');
+          if (heliMem) heliMem.suspicion = Math.min(1, heliMem.suspicion + 0.55);
+        }
+        this.observedHeliRepairs = nextHeliRepairs;
+        this.observedHeliActive = nextHeliActive;
+      }
+
+      const seesLifeboat =
+        bruteRoom === 'Lifeboat Davit' ||
+        canBruteSeePoint(
+          brute,
+          this.map.lifeboatPos.x,
+          this.map.lifeboatPos.y,
+          escapeSightRange,
+          this.map,
+          doorsByTile,
+          senses.halfFovDeg
+        );
+      if (seesLifeboat) {
+        const nextLifeRepairs = escape.lifeboatParts.length;
+        const nextLifeActive =
+          escape.lifeboatState === 'ACTIVATING' || escape.lifeboatState === 'READY';
+        if (
+          nextLifeRepairs > this.observedLifeboatRepairs ||
+          (nextLifeActive && !this.observedLifeboatActive)
+        ) {
+          const lifeMem = this.roomMemory.get('Lifeboat Davit');
+          if (lifeMem) lifeMem.suspicion = Math.min(1, lifeMem.suspicion + 0.55);
+        }
+        this.observedLifeboatRepairs = nextLifeRepairs;
+        this.observedLifeboatActive = nextLifeActive;
+      }
+    }
+
     return events;
   }
 
@@ -487,7 +547,10 @@ export class BruteBrain {
 
     const maxRooms = Math.max(
       1,
-      Math.round(tuning?.clueRoomDepth ?? (intelligence === 'HIGH' ? 4 : intelligence === 'MEDIUM' ? 3 : 1))
+      Math.round(
+        tuning?.clueRoomDepth ??
+          (intelligence === 'HIGH' || intelligence === 'EXTREME' ? 4 : intelligence === 'MEDIUM' ? 3 : 1)
+      )
     );
 
     // Build connected-room sweep trail: primary room first, then adjacent connected named rooms
@@ -582,7 +645,9 @@ export class BruteBrain {
     intelligence: DifficultyLevel,
     tuning?: BruteTuningNumbers
   ): void {
-    const rawDepth = tuning?.clueRoomDepth ?? (intelligence === 'HIGH' ? 4 : intelligence === 'MEDIUM' ? 3 : 1);
+    const rawDepth =
+      tuning?.clueRoomDepth ??
+      (intelligence === 'HIGH' || intelligence === 'EXTREME' ? 4 : intelligence === 'MEDIUM' ? 3 : 1);
     const maxFollowups = Math.max(1, Math.round(rawDepth >= 4 ? 3 : rawDepth >= 2 ? 2 : 1));
     const primaryMem = this.roomMemory.get(originRoom);
     const queue: StalkQueueEntry[] = [];
@@ -715,14 +780,11 @@ export class BruteBrain {
   }
 
   /**
-   * Recency-weighted UN-LEASHED random patrol picker with escape-route patrol bias.
-   * Zero reference to player position — only avoids oscillating into rooms just cleared
-   * while progressively checking Helideck & Lifeboat Davit more often as repairs advance!
+   * Recency-weighted UN-LEASHED random patrol picker with sight-based escape-route patrol bias.
+   * Zero reference to player position or unseen repairs — only biases toward Helideck & Lifeboat Davit
+   * based on progress the Brute has actually spotted in person.
    */
-  public pickRecencyWeightedRoamTarget(
-    nowSec: number,
-    escape?: EscapeProgress
-  ): {
+  public pickRecencyWeightedRoamTarget(nowSec: number): {
     tx: number;
     ty: number;
     room: RoomName;
@@ -732,12 +794,10 @@ export class BruteBrain {
       return { tx: 10, ty: 16, room: 'Corridor' };
     }
 
-    const heliRepairs = escape?.heliParts.length ?? 0;
-    const heliActive =
-      escape?.heliState === 'ACTIVATING' || escape?.heliState === 'READY' ? 1.1 : 0;
-    const lifeRepairs = escape?.lifeboatParts.length ?? 0;
-    const lifeActive =
-      escape?.lifeboatState === 'ACTIVATING' || escape?.lifeboatState === 'READY' ? 1.1 : 0;
+    const heliRepairs = this.observedHeliRepairs;
+    const heliActive = this.observedHeliActive ? 1.1 : 0;
+    const lifeRepairs = this.observedLifeboatRepairs;
+    const lifeActive = this.observedLifeboatActive ? 1.1 : 0;
 
     let totalWeight = 0;
     const weights = rooms.map((m) => {
@@ -748,7 +808,7 @@ export class BruteBrain {
       const roomBias = m.room === 'Corridor' || m.room === 'Catwalk' ? 0.55 : 1.15;
       const suspicionBoost = 1 + m.suspicion * 1.4;
 
-      // Subtle baseline escape-route interest that scales noticeably as each route is repaired/activated
+      // Subtle baseline escape-route interest that scales noticeably as each route is visually observed repaired/activated
       let escapeBias = 1.0;
       if (m.room === 'Helideck') {
         escapeBias = 1.25 + heliRepairs * 0.5 + heliActive;

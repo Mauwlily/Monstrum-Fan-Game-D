@@ -16,6 +16,7 @@ import {
   DroppedLight,
   EscapeProgress,
   FloorMaterial,
+  getViewportResolutionScale,
   HidingSpot,
   HudSnapshot,
   ITEM_CATALOG,
@@ -93,6 +94,8 @@ export class MonstrumGameEngine {
   private lifeboatPulseTimer = 0;
   private activeRepairLabel: string | null = null;
   private activeRepairProgress = 0;
+  public maxEmittedAcousticRadius = 0;
+  private bruteStuckTimer = 0;
 
   public debugConfig: DebugOverlayConfig = {
     enabled: false,
@@ -103,6 +106,7 @@ export class MonstrumGameEngine {
     showBlackProbes: true,
     forceVentPeek: false,
     forceDoorPeek: false,
+    forceStairPeek: false,
   };
   public debugScenario: DebugScenarioId | null = null;
   public debugProbePoints: Array<{ x: number; y: number; label: string }> = [];
@@ -148,6 +152,7 @@ export class MonstrumGameEngine {
       hidingSpotId: null,
       peekingDoorId: null,
       peekingSpotId: null,
+      peekingStairId: null,
       preHidePos: null,
       climbingStairId: null,
       climbProgress: 0,
@@ -212,6 +217,8 @@ export class MonstrumGameEngine {
 
     this.cameraX = this.player.x;
     this.cameraY = this.player.y;
+    this.maxEmittedAcousticRadius = 0;
+    this.bruteStuckTimer = 0;
     this.pickRandomRoamTarget();
     this.emitHud();
   }
@@ -232,6 +239,10 @@ export class MonstrumGameEngine {
     this.toastTimer = duration;
   }
 
+  public getEffectiveZoom(canvasWidth: number, canvasHeight: number): number {
+    return this.zoom * getViewportResolutionScale(canvasWidth, canvasHeight);
+  }
+
   public adjustZoom(deltaY: number): void {
     const step = deltaY > 0 ? -0.1 : 0.1;
     this.targetZoom = Math.max(0.9, Math.min(1.8, Math.round((this.targetZoom + step) * 100) / 100));
@@ -246,7 +257,10 @@ export class MonstrumGameEngine {
     this.checkHidingStallTimer = 0;
     this.lastCheckHidingSpotId = null;
     this.lastCheckHidingDist = Infinity;
-    return applyDebugScenarioToEngine(this, scenarioId);
+    this.bruteStuckTimer = 0;
+    this.maxEmittedAcousticRadius = 0;
+    const meta = applyDebugScenarioToEngine(this, scenarioId);
+    return meta;
   }
 
   public isEnded(): boolean {
@@ -312,6 +326,7 @@ export class MonstrumGameEngine {
     this.updateRipplesAndParticles(clampedDt);
 
     // Expressive camera look-ahead toward mouse aim & peek vectors
+    const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
     let desiredLookX = 0;
     let desiredLookY = 0;
     if (this.player.peekingDoorId) {
@@ -326,6 +341,16 @@ export class MonstrumGameEngine {
         desiredLookX = (dx / len) * peekBias;
         desiredLookY = (dy / len) * peekBias;
       }
+    } else if (this.player.peekingStairId) {
+      const st = this.map.stairwells.find((s) => s.id === this.player.peekingStairId);
+      if (st) {
+        const dx = st.x - this.player.x;
+        const dy = st.y - this.player.y;
+        const len = Math.max(1, Math.hypot(dx, dy));
+        const peekBias = 56 / Math.sqrt(this.zoom);
+        desiredLookX = (dx / len) * peekBias;
+        desiredLookY = (dy / len) * peekBias;
+      }
     } else if (this.player.peekingSpotId) {
       const peekBias = 112 / Math.sqrt(this.zoom);
       desiredLookX = Math.cos(this.player.angle) * peekBias;
@@ -333,7 +358,7 @@ export class MonstrumGameEngine {
     } else if (this.player.hidingSpotId !== null) {
       desiredLookX = 0;
       desiredLookY = 0;
-    } else if (this.mouseMoved && canvasWidth > 0 && canvasHeight > 0) {
+    } else if (this.mouseMoved && canvasWidth > 0 && canvasHeight > 0 && effZoom > 0) {
       const nx = Math.max(-1, Math.min(1, (this.mouseScreenX - canvasWidth / 2) / (canvasWidth * 0.42)));
       const ny = Math.max(-1, Math.min(1, (this.mouseScreenY - canvasHeight / 2) / (canvasHeight * 0.42)));
       const maxLook = 135 / Math.sqrt(this.zoom);
@@ -453,10 +478,11 @@ export class MonstrumGameEngine {
       }
     }
 
-    // Aim toward mouse cursor (unprojected with current zoom)
-    if (this.mouseMoved) {
-      const worldMouseX = this.cameraX + (this.mouseScreenX - canvasWidth / 2) / this.zoom;
-      const worldMouseY = this.cameraY + (this.mouseScreenY - canvasHeight / 2) / this.zoom;
+    // Aim toward mouse cursor (unprojected with resolution-invariant effective zoom)
+    const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
+    if (this.mouseMoved && effZoom > 0) {
+      const worldMouseX = this.cameraX + (this.mouseScreenX - canvasWidth / 2) / effZoom;
+      const worldMouseY = this.cameraY + (this.mouseScreenY - canvasHeight / 2) / effZoom;
       p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
     }
 
@@ -473,6 +499,7 @@ export class MonstrumGameEngine {
         p.isMoving = false;
         p.peekingDoorId = null;
         p.peekingSpotId = null;
+        p.peekingStairId = null;
         p.noiseLevel = 0.48;
         p.x += (st.x - p.x) * Math.min(1, dt * 16);
         p.y += (st.y - p.y) * Math.min(1, dt * 16);
@@ -541,6 +568,7 @@ export class MonstrumGameEngine {
       p.isMoving = false;
       p.noiseLevel = 0;
       p.peekingDoorId = null;
+      p.peekingStairId = null;
 
       const wantsVentPeek = this.keys.has('KeyQ') || this.debugConfig.forceVentPeek;
       if (wantsVentPeek) {
@@ -623,23 +651,49 @@ export class MonstrumGameEngine {
       }
     }
 
-    // Check closed door keyhole/crack peek when holding Q (or debug forceDoorPeek)
-    if (this.keys.has('KeyQ') || this.debugConfig.forceDoorPeek) {
+    // Check closed-door keyhole OR stairwell landing portal peek when holding Q (or debug force flags)
+    const wantsHoldQ = this.keys.has('KeyQ');
+    if (wantsHoldQ || this.debugConfig.forceDoorPeek || this.debugConfig.forceStairPeek) {
       let bestDoorId: string | null = null;
       let bestDoorDist = 56;
-      for (const d of this.map.doors) {
-        if (d.isOpen || d.isBroken) continue;
-        const cx = (d.tx + 0.5) * this.map.tileSize;
-        const cy = (d.ty + 0.5) * this.map.tileSize;
-        const dist = Math.hypot(cx - p.x, cy - p.y);
-        if (dist < bestDoorDist) {
-          bestDoorDist = dist;
-          bestDoorId = d.id;
+      if (wantsHoldQ || this.debugConfig.forceDoorPeek) {
+        for (const d of this.map.doors) {
+          if (d.isOpen || d.isBroken) continue;
+          const cx = (d.tx + 0.5) * this.map.tileSize;
+          const cy = (d.ty + 0.5) * this.map.tileSize;
+          const dist = Math.hypot(cx - p.x, cy - p.y);
+          if (dist < bestDoorDist) {
+            bestDoorDist = dist;
+            bestDoorId = d.id;
+          }
         }
       }
-      p.peekingDoorId = bestDoorId;
+
+      let bestStairId: string | null = null;
+      let bestStairDist = this.debugConfig.forceStairPeek ? 110 : 60;
+      if (wantsHoldQ || this.debugConfig.forceStairPeek) {
+        for (const st of this.map.stairwells) {
+          const dist = Math.hypot(st.x - p.x, st.y - p.y);
+          if (
+            dist < bestStairDist &&
+            hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, st.x, st.y)
+          ) {
+            bestStairDist = dist;
+            bestStairId = st.id;
+          }
+        }
+      }
+
+      if (bestStairId && (!bestDoorId || bestStairDist <= bestDoorDist || this.debugConfig.forceStairPeek)) {
+        p.peekingStairId = bestStairId;
+        p.peekingDoorId = null;
+      } else {
+        p.peekingDoorId = bestDoorId;
+        p.peekingStairId = null;
+      }
     } else {
       p.peekingDoorId = null;
+      p.peekingStairId = null;
     }
 
     const sprintKey = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
@@ -726,10 +780,10 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            610,
-            'rgba(56, 189, 248, 0.45)',
+            880,
+            'rgba(56, 189, 248, 0.52)',
             true,
-            0.72
+            0.88
           );
           for (let i = 0; i < 4; i++) {
             this.particles.push({
@@ -757,10 +811,10 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            660,
-            'rgba(56, 189, 248, 0.55)',
+            960,
+            'rgba(56, 189, 248, 0.65)',
             true,
-            0.78
+            0.94
           );
           this.showToast(
             `${ITEM_CATALOG[heldLifePart].name} installed on Lifeboat (${this.escape.lifeboatParts.length}/3)!`
@@ -780,7 +834,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            920,
+            960,
             'rgba(56, 189, 248, 0.72)',
             true,
             0.98
@@ -809,10 +863,10 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.heliPos.x,
             this.map.heliPos.y,
-            630,
-            'rgba(251, 191, 36, 0.45)',
+            900,
+            'rgba(251, 191, 36, 0.52)',
             true,
-            0.72
+            0.88
           );
           for (let i = 0; i < 4; i++) {
             this.particles.push({
@@ -840,10 +894,10 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.heliPos.x,
             this.map.heliPos.y,
-            670,
-            'rgba(251, 191, 36, 0.55)',
+            980,
+            'rgba(251, 191, 36, 0.65)',
             true,
-            0.78
+            0.94
           );
           this.showToast(
             `${ITEM_CATALOG[heldHeliPart].name} installed on Helicopter (${this.escape.heliParts.length}/3)!`
@@ -987,6 +1041,15 @@ export class MonstrumGameEngine {
           chase: 264,
           smashChase: 0.3,
           smashPatrol: 0.54,
+        };
+      case 'EXTREME':
+        return {
+          roam: 164,
+          investigate: 210,
+          stalk: 224,
+          chase: 316,
+          smashChase: 0.22,
+          smashPatrol: 0.4,
         };
       default:
         return {
@@ -1240,14 +1303,15 @@ export class MonstrumGameEngine {
       return;
     }
 
-    // 5. Perceive environmental discrepancies (opened/tampered doors & looted containers) inside FoV!
+    // 5. Perceive environmental discrepancies & escape repairs inside FoV!
     const clueEvents = this.brain.perceiveClues(
       dt,
       this.elapsedSeconds,
       b,
       this.doorsByTile,
       this.difficulty,
-      this.bruteTuning
+      this.bruteTuning,
+      this.escape
     );
     if (clueEvents.length > 0) {
       b.cluesSpottedTotal += clueEvents.length;
@@ -1287,7 +1351,7 @@ export class MonstrumGameEngine {
           if (distToLast < 32) {
             const overshootDist =
               this.bruteTuning?.overshootDist ??
-              (this.difficulty.intelligence === 'HIGH'
+              (this.difficulty.intelligence === 'HIGH' || this.difficulty.intelligence === 'EXTREME'
                 ? 250
                 : this.difficulty.intelligence === 'MEDIUM'
                   ? 190
@@ -1605,10 +1669,7 @@ export class MonstrumGameEngine {
   }
 
   private pickRandomRoamTarget(): void {
-    this.brute.roamTarget = this.brain.pickRecencyWeightedRoamTarget(
-      this.elapsedSeconds,
-      this.escape
-    );
+    this.brute.roamTarget = this.brain.pickRecencyWeightedRoamTarget(this.elapsedSeconds);
     this.brute.path = [];
     this.brute.pathRecalcTimer = 0;
   }
@@ -1621,15 +1682,30 @@ export class MonstrumGameEngine {
     dt: number,
     aggressiveChase: boolean
   ): void {
-    const bTx = Math.floor(b.x / this.map.tileSize);
-    const bTy = Math.floor(b.y / this.map.tileSize);
-    const goalTx = Math.floor(txWorld / this.map.tileSize);
-    const goalTy = Math.floor(tyWorld / this.map.tileSize);
+    const ts = this.map.tileSize;
+    const bTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(b.x / ts)));
+    const bTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(b.y / ts)));
+    const goalTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(txWorld / ts)));
+    const goalTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(tyWorld / ts)));
 
     b.pathRecalcTimer -= dt;
     if (b.pathRecalcTimer <= 0 || b.path.length === 0) {
       b.pathRecalcTimer = aggressiveChase ? 0.25 : 0.65;
       b.path = findPath(this.map, bTx, bTy, goalTx, goalTy, this.map.doors, aggressiveChase);
+
+      // Drop stale unreachable non-pursuit target rather than hugging a wall
+      if (b.path.length === 0 && (bTx !== goalTx || bTy !== goalTy)) {
+        if (!aggressiveChase) {
+          if (b.state === 'ROAM') {
+            this.pickRandomRoamTarget();
+          } else if (b.state === 'INVESTIGATE') {
+            b.investigateTarget = null;
+          } else if (b.state === 'STALK') {
+            this.brain.stalkTarget = null;
+            this.brain.advanceStalkQueue(this.elapsedSeconds);
+          }
+        }
+      }
     }
 
     let nextX = txWorld;
@@ -1645,18 +1721,23 @@ export class MonstrumGameEngine {
         ? aggressiveChase
           ? this.bruteTuning.stairClimbChase
           : this.bruteTuning.stairClimbPatrol
-        : this.difficulty.speed === 'HIGH'
+        : this.difficulty.speed === 'EXTREME'
           ? aggressiveChase
-            ? 0.42
-            : 0.62
-          : this.difficulty.speed === 'LOW'
+            ? 0.32
+            : 0.48
+          : this.difficulty.speed === 'HIGH'
             ? aggressiveChase
-              ? 0.68
-              : 0.88
-            : aggressiveChase
-              ? 0.54
-              : 0.74;
+              ? 0.42
+              : 0.62
+            : this.difficulty.speed === 'LOW'
+              ? aggressiveChase
+                ? 0.68
+                : 0.88
+              : aggressiveChase
+                ? 0.54
+                : 0.74;
       b.path.shift();
+      this.bruteStuckTimer = 0;
       const eff = this.getEffectiveBruteAudioDelta();
       const occ = this.computeAcousticOcclusion(b.x, b.y, this.player.x, this.player.y);
       this.audio.playStairTraversal(eff.dist, occ);
@@ -1674,8 +1755,8 @@ export class MonstrumGameEngine {
           return;
         }
       }
-      nextX = (wp.tx + 0.5) * this.map.tileSize;
-      nextY = (wp.ty + 0.5) * this.map.tileSize;
+      nextX = (wp.tx + 0.5) * ts;
+      nextY = (wp.ty + 0.5) * ts;
       if (Math.hypot(nextX - b.x, nextY - b.y) < 16) {
         b.path.shift();
         if (b.path.length > 0) {
@@ -1688,8 +1769,8 @@ export class MonstrumGameEngine {
               return;
             }
           }
-          nextX = (nextWp.tx + 0.5) * this.map.tileSize;
-          nextY = (nextWp.ty + 0.5) * this.map.tileSize;
+          nextX = (nextWp.tx + 0.5) * ts;
+          nextY = (nextWp.ty + 0.5) * ts;
         }
       }
     }
@@ -1700,19 +1781,20 @@ export class MonstrumGameEngine {
       this.brutePassThroughDoors.add(currDoor.id);
     }
 
-    const wpTx = Math.floor(nextX / this.map.tileSize);
-    const wpTy = Math.floor(nextY / this.map.tileSize);
+    const wpTx = Math.floor(nextX / ts);
+    const wpTy = Math.floor(nextY / ts);
     const door = this.doorsByTile.get(wpTy * this.map.width + wpTx);
     if (door && !door.isBroken) {
-      const dcx = (door.tx + 0.5) * this.map.tileSize;
-      const dcy = (door.ty + 0.5) * this.map.tileSize;
+      const dcx = (door.tx + 0.5) * ts;
+      const dcy = (door.ty + 0.5) * ts;
       const distToDoor = Math.hypot(dcx - b.x, dcy - b.y);
-      if (!door.isOpen && distToDoor < 36) {
+      if (!door.isOpen && distToDoor < 38) {
         if (aggressiveChase || door.isLocked) {
           const speeds = this.getSpeedProfile();
           b.state = 'SMASH_DOOR';
           b.smashDoorId = door.id;
           b.smashTimer = aggressiveChase ? speeds.smashChase : speeds.smashPatrol;
+          this.bruteStuckTimer = 0;
           return;
         } else {
           // Brute pushes unlocked door open during patrol/stalk & marks it to close behind him!
@@ -1729,16 +1811,70 @@ export class MonstrumGameEngine {
       }
     }
 
+    // Gentle doorway & narrow-passage centerline alignment so Brute slides cleanly through thresholds
+    if (b.path.length > 0) {
+      const wp = b.path[0];
+      const isNarrowX =
+        !isTileWalkable(this.map.tiles[wp.ty]?.[wp.tx - 1] ?? 'VOID') ||
+        !isTileWalkable(this.map.tiles[wp.ty]?.[wp.tx + 1] ?? 'VOID');
+      const isNarrowY =
+        !isTileWalkable(this.map.tiles[wp.ty - 1]?.[wp.tx] ?? 'VOID') ||
+        !isTileWalkable(this.map.tiles[wp.ty + 1]?.[wp.tx] ?? 'VOID');
+      if (isNarrowX) {
+        nextX = (wp.tx + 0.5) * ts;
+      }
+      if (isNarrowY) {
+        nextY = (wp.ty + 0.5) * ts;
+      }
+    }
+
     const dx = nextX - b.x;
     const dy = nextY - b.y;
     const dist = Math.hypot(dx, dy);
     if (dist > 1) {
+      const startX = b.x;
+      const startY = b.y;
       const vx = (dx / dist) * speed * dt;
       const vy = (dy / dist) * speed * dt;
       b.targetAngle = Math.atan2(dy, dx);
       this.turnBruteTowardTarget(dt, aggressiveChase ? 11 : 6);
       this.moveEntityWithCollision(b, vx, vy, true);
-      b.walkPhase += Math.hypot(vx, vy) * 0.13;
+      const actualMoved = Math.hypot(b.x - startX, b.y - startY);
+      b.walkPhase += actualMoved * 0.13;
+
+      // Stuck-detection failsafe: if Brute makes negligible progress against geometry, slide toward tile center or reroute
+      if (actualMoved < speed * dt * 0.14) {
+        this.bruteStuckTimer += dt;
+        if (this.bruteStuckTimer >= 0.42) {
+          b.pathRecalcTimer = 0;
+          const tileCx = (bTx + 0.5) * ts;
+          const tileCy = (bTy + 0.5) * ts;
+          const pullX = tileCx - b.x;
+          const pullY = tileCy - b.y;
+          const pullLen = Math.hypot(pullX, pullY);
+          if (pullLen > 1) {
+            const nudge = Math.min(pullLen, speed * dt * 0.9);
+            this.moveEntityWithCollision(b, (pullX / pullLen) * nudge, (pullY / pullLen) * nudge, true);
+          }
+        }
+        if (this.bruteStuckTimer >= 1.15) {
+          this.bruteStuckTimer = 0;
+          b.path = [];
+          b.pathRecalcTimer = 0;
+          if (!aggressiveChase) {
+            if (b.state === 'ROAM') {
+              this.pickRandomRoamTarget();
+            } else if (b.state === 'INVESTIGATE') {
+              b.investigateTarget = null;
+            } else if (b.state === 'STALK') {
+              this.brain.stalkTarget = null;
+              this.brain.advanceStalkQueue(this.elapsedSeconds);
+            }
+          }
+        }
+      } else {
+        this.bruteStuckTimer = Math.max(0, this.bruteStuckTimer - dt * 2);
+      }
 
       b.stepTimer -= dt;
       if (b.stepTimer <= 0) {
@@ -1880,10 +2016,30 @@ export class MonstrumGameEngine {
     const nx = ent.x + dx;
     if (!this.collidesAt(nx, ent.y, ent.radius, isBrute, ent.x, ent.y)) {
       ent.x = nx;
+    } else if (isBrute && Math.abs(dx) > 0.05) {
+      // Corner-sliding nudge along Y so Brute never snags on door jambs or corridor corners
+      const nudge = Math.min(Math.abs(dx) + 1.5, 4);
+      for (const sign of [-1, 1]) {
+        if (!this.collidesAt(nx, ent.y + sign * nudge, ent.radius, isBrute, ent.x, ent.y)) {
+          ent.x = nx;
+          ent.y += sign * nudge;
+          break;
+        }
+      }
     }
+
     const ny = ent.y + dy;
     if (!this.collidesAt(ent.x, ny, ent.radius, isBrute, ent.x, ent.y)) {
       ent.y = ny;
+    } else if (isBrute && Math.abs(dy) > 0.05) {
+      const nudge = Math.min(Math.abs(dy) + 1.5, 4);
+      for (const sign of [-1, 1]) {
+        if (!this.collidesAt(ent.x + sign * nudge, ny, ent.radius, isBrute, ent.x, ent.y)) {
+          ent.x += sign * nudge;
+          ent.y = ny;
+          break;
+        }
+      }
     }
   }
 
@@ -1940,6 +2096,7 @@ export class MonstrumGameEngine {
     alertsBrute: boolean,
     urgency = 0.6
   ): void {
+    this.maxEmittedAcousticRadius = Math.max(this.maxEmittedAcousticRadius, maxRadius);
     this.ripples.push({
       id: this.nextId++,
       x,
@@ -2817,7 +2974,7 @@ export class MonstrumGameEngine {
             st.direction === 'DOWN'
               ? 'Press E to Take Stairs Down (Lower Deck)'
               : 'Press E to Take Stairs Up (Main Deck)',
-          sub: `${st.label} → ${st.targetRoom}`,
+          sub: `Hold Q to Peek Landing · ${st.label} → ${st.targetRoom}`,
         };
       }
     }
@@ -2930,6 +3087,13 @@ export class MonstrumGameEngine {
             ? `Descending to ${st.targetRoom}...`
             : `Climbing Up to ${st.targetRoom}...`;
         promptSubtext = 'Exposed on companionway treads until climb completes.';
+      }
+    } else if (this.player.peekingStairId !== null) {
+      const st = this.map.stairwells.find((s) => s.id === this.player.peekingStairId);
+      const dest = st ? this.map.stairwells.find((s) => s.id === st.targetStairId) : undefined;
+      if (st && dest) {
+        promptText = `Peeking ${dest.deck === 'LOWER' ? 'Lower Deck' : 'Main Deck'} Landing — ${dest.room}`;
+        promptSubtext = 'Release Q to step back · Press E to climb companionway.';
       }
     } else if (this.player.hidingSpotId !== null) {
       if (this.player.battery <= 0) {

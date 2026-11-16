@@ -85,6 +85,42 @@ export function findPath(
     },
   ];
 
+  const pushNode = (node: PathNode) => {
+    open.push(node);
+    let idx = open.length - 1;
+    while (idx > 0) {
+      const parent = (idx - 1) >> 1;
+      if (open[parent].f <= open[idx].f) break;
+      const tmp = open[parent];
+      open[parent] = open[idx];
+      open[idx] = tmp;
+      idx = parent;
+    }
+  };
+
+  const popMinNode = (): PathNode => {
+    const top = open[0];
+    const last = open.pop()!;
+    if (open.length > 0) {
+      open[0] = last;
+      let idx = 0;
+      const len = open.length;
+      while (true) {
+        const left = idx * 2 + 1;
+        const right = left + 1;
+        let smallest = idx;
+        if (left < len && open[left].f < open[smallest].f) smallest = left;
+        if (right < len && open[right].f < open[smallest].f) smallest = right;
+        if (smallest === idx) break;
+        const tmp = open[idx];
+        open[idx] = open[smallest];
+        open[smallest] = tmp;
+        idx = smallest;
+      }
+    }
+    return top;
+  };
+
   const dirs = [
     [1, 0, 1],
     [-1, 0, 1],
@@ -97,11 +133,7 @@ export function findPath(
   ];
 
   while (open.length > 0) {
-    let bestIdx = 0;
-    for (let i = 1; i < open.length; i++) {
-      if (open[i].f < open[bestIdx].f) bestIdx = i;
-    }
-    const current = open.splice(bestIdx, 1)[0];
+    const current = popMinNode();
     const currKey = current.ty * width + current.tx;
 
     if (currKey === goalIdx) {
@@ -124,9 +156,17 @@ export function findPath(
       if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
       if (!isTileWalkable(tiles[ny][nx])) continue;
 
-      // Prevent diagonal corner-cutting through walls
+      // Prevent diagonal corner-cutting through walls OR closed/locked door frames
       if (dx !== 0 && dy !== 0) {
         if (!isTileWalkable(tiles[current.ty][nx]) || !isTileWalkable(tiles[ny][current.tx])) {
+          continue;
+        }
+        const adjDoorA = doorMap.get(current.ty * width + nx);
+        const adjDoorB = doorMap.get(ny * width + current.tx);
+        if (
+          (adjDoorA && !adjDoorA.isOpen && !adjDoorA.isBroken) ||
+          (adjDoorB && !adjDoorB.isOpen && !adjDoorB.isBroken)
+        ) {
           continue;
         }
       }
@@ -139,13 +179,22 @@ export function findPath(
       if (door && !door.isOpen && !door.isBroken) {
         if (door.isLocked && !canSmashLocked) continue;
         moveCost += door.isLocked ? 6 : 2.2;
+      } else if (!door && nKey !== goalIdx) {
+        // Gentle clearance penalty so wide 16px-radius Brute hugs hall centers instead of corner edges
+        let wallAdj = 0;
+        if (nx > 0 && !isTileWalkable(tiles[ny][nx - 1])) wallAdj++;
+        if (nx + 1 < width && !isTileWalkable(tiles[ny][nx + 1])) wallAdj++;
+        if (ny > 0 && !isTileWalkable(tiles[ny - 1][nx])) wallAdj++;
+        if (ny + 1 < height && !isTileWalkable(tiles[ny + 1][nx])) wallAdj++;
+        if (wallAdj >= 2) moveCost += 0.22;
+        else if (wallAdj === 1) moveCost += 0.08;
       }
 
       const tentativeG = gScore[currKey] + moveCost;
       if (tentativeG < gScore[nKey]) {
         cameFrom[nKey] = currKey;
         gScore[nKey] = tentativeG;
-        open.push({ tx: nx, ty: ny, g: tentativeG, f: tentativeG + calcHeuristic(nx, ny) });
+        pushNode({ tx: nx, ty: ny, g: tentativeG, f: tentativeG + calcHeuristic(nx, ny) });
       }
     }
 
@@ -160,7 +209,7 @@ export function findPath(
           if (tentativeG < gScore[tKey]) {
             cameFrom[tKey] = currKey;
             gScore[tKey] = tentativeG;
-            open.push({
+            pushNode({
               tx: target.tx,
               ty: target.ty,
               g: tentativeG,

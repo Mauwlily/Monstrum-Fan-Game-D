@@ -1296,43 +1296,75 @@ export class HorrorAudioEngine {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
+    const clang = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
+    const clangGain = this.ctx.createGain();
+
     if (partId === 'AVIATION_FUEL') {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(190 + Math.random() * 55, now);
-      osc.frequency.linearRampToValueAtTime(310, now + 0.08);
+      osc.frequency.linearRampToValueAtTime(340, now + 0.09);
+      clang.type = 'triangle';
+      clang.frequency.setValueAtTime(480, now);
+      clang.frequency.exponentialRampToValueAtTime(190, now + 0.07);
     } else if (partId === 'ROTOR_FUSE' || partId === 'MARINE_BATTERY') {
       osc.type = 'square';
-      osc.frequency.setValueAtTime(620 + Math.random() * 140, now);
-      osc.frequency.exponentialRampToValueAtTime(280, now + 0.06);
+      osc.frequency.setValueAtTime(640 + Math.random() * 140, now);
+      osc.frequency.exponentialRampToValueAtTime(260, now + 0.07);
+      clang.type = 'triangle';
+      clang.frequency.setValueAtTime(920, now);
+      clang.frequency.exponentialRampToValueAtTime(340, now + 0.08);
     } else {
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(route === 'HELI' ? 320 : 240, now);
-      osc.frequency.exponentialRampToValueAtTime(110, now + 0.09);
+      osc.frequency.setValueAtTime(route === 'HELI' ? 350 : 270, now);
+      osc.frequency.exponentialRampToValueAtTime(98, now + 0.11);
+      clang.type = 'sawtooth';
+      clang.frequency.setValueAtTime(route === 'HELI' ? 760 : 620, now);
+      clang.frequency.exponentialRampToValueAtTime(220, now + 0.09);
     }
-    gain.gain.setValueAtTime(0.11, now);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+
+    gain.gain.setValueAtTime(0.21, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+    clangGain.gain.setValueAtTime(0.095, now);
+    clangGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.1);
+
     osc.connect(gain);
+    clang.connect(clangGain);
     gain.connect(this.masterGain);
+    clangGain.connect(this.masterGain);
+    if (this.reverbSendGain) {
+      const send = this.ctx.createGain();
+      send.gain.value = 0.28;
+      gain.connect(send);
+      send.connect(this.reverbSendGain);
+    }
     osc.start(now);
-    osc.stop(now + 0.11);
+    clang.start(now);
+    osc.stop(now + 0.14);
+    clang.stop(now + 0.11);
   }
 
   public playRepairComplete(): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
-    [293.7, 440.0].forEach((freq, idx) => {
+    [293.7, 440.0, 587.3].forEach((freq, idx) => {
       if (!this.ctx || !this.masterGain) return;
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
       osc.type = 'triangle';
-      osc.frequency.setValueAtTime(freq, now + idx * 0.07);
-      gain.gain.setValueAtTime(0.14, now + idx * 0.07);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.07 + 0.22);
+      osc.frequency.setValueAtTime(freq, now + idx * 0.065);
+      gain.gain.setValueAtTime(0.24, now + idx * 0.065);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.065 + 0.26);
       osc.connect(gain);
       gain.connect(this.masterGain);
-      osc.start(now + idx * 0.07);
-      osc.stop(now + idx * 0.07 + 0.24);
+      if (this.reverbSendGain) {
+        const send = this.ctx.createGain();
+        send.gain.value = 0.3;
+        gain.connect(send);
+        send.connect(this.reverbSendGain);
+      }
+      osc.start(now + idx * 0.065);
+      osc.stop(now + idx * 0.065 + 0.28);
     });
   }
 

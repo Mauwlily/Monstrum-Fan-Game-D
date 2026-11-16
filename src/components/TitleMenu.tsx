@@ -104,10 +104,74 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
   onStartGame,
 }) => {
   const [consecutiveSmileyClicks, setConsecutiveSmileyClicks] = useState(0);
+  const [nightmareStreak, setNightmareStreak] = useState(0);
+  const [highStreaks, setHighStreaks] = useState<Record<keyof DifficultyConfig, number>>({
+    intelligence: 0,
+    senses: 0,
+    speed: 0,
+  });
   const activePreset = detectDifficultyPreset(difficulty);
+
+  const resetAllStreaks = () => {
+    setConsecutiveSmileyClicks(0);
+    setNightmareStreak(0);
+    setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
+  };
 
   const updateAxis = (axis: keyof DifficultyConfig, val: DifficultyLevel) => {
     onSelectDifficulty({ ...difficulty, [axis]: val });
+  };
+
+  const handlePresetClick = (presetKey: 'MERCY' | 'STANDARD' | 'NIGHTMARE') => {
+    setConsecutiveSmileyClicks(0);
+    setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
+
+    if (presetKey !== 'NIGHTMARE') {
+      setNightmareStreak(0);
+      onSelectDifficulty({ ...DIFFICULTY_PRESETS[presetKey] });
+      return;
+    }
+
+    if (activePreset === 'EXTREME') {
+      setNightmareStreak(0);
+      onSelectDifficulty({ ...DIFFICULTY_PRESETS.NIGHTMARE });
+      return;
+    }
+
+    const next = nightmareStreak + 1;
+    if (next >= 3) {
+      setNightmareStreak(0);
+      onSelectDifficulty({ ...DIFFICULTY_PRESETS.EXTREME });
+    } else {
+      setNightmareStreak(next);
+      onSelectDifficulty({ ...DIFFICULTY_PRESETS.NIGHTMARE });
+    }
+  };
+
+  const handleAxisLevelClick = (axis: keyof DifficultyConfig, lvl: DifficultyLevel) => {
+    setConsecutiveSmileyClicks(0);
+    setNightmareStreak(0);
+
+    if (lvl !== 'HIGH') {
+      setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
+      updateAxis(axis, lvl);
+      return;
+    }
+
+    if (difficulty[axis] === 'EXTREME') {
+      setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
+      updateAxis(axis, 'HIGH');
+      return;
+    }
+
+    const next = highStreaks[axis] + 1;
+    if (next >= 3) {
+      setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
+      updateAxis(axis, 'EXTREME');
+    } else {
+      setHighStreaks({ intelligence: 0, senses: 0, speed: 0, [axis]: next });
+      updateAxis(axis, 'HIGH');
+    }
   };
 
   const handleTuningChange = (field: TuningField, raw: string) => {
@@ -152,9 +216,7 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
 
   return (
     <div
-      onClick={() => {
-        if (consecutiveSmileyClicks > 0) setConsecutiveSmileyClicks(0);
-      }}
+      onClick={resetAllStreaks}
       className="relative flex min-h-screen w-full items-center justify-center bg-[#07090c] px-6 py-8 text-slate-100 overflow-y-auto"
     >
       {/* Subtle atmospheric radial depth */}
@@ -186,7 +248,10 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
           </div>
           <button
             type="button"
-            onClick={onToggleMute}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleMute();
+            }}
             className="flex items-center gap-2 rounded-md border border-slate-800 bg-slate-900/70 px-3 py-1.5 text-xs font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
           >
             {muted ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5" />}
@@ -201,6 +266,8 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
             <span
               onClick={(e) => {
                 e.stopPropagation();
+                setNightmareStreak(0);
+                setHighStreaks({ intelligence: 0, senses: 0, speed: 0 });
                 const next = consecutiveSmileyClicks + 1;
                 if (next >= 3) {
                   setConsecutiveSmileyClicks(0);
@@ -245,9 +312,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                       Cross-Deck Pursuit &amp; Escape Patrol Bias
                     </p>
                     <p className="mt-0.5 text-xs leading-relaxed text-slate-400">
-                      Explores every deck freely, increasingly favors checking repaired escape
-                      craft, follows through stairwells (~0.9s climb), and hears noisy repairs or
-                      crane/turbine spin-ups.
+                      Explores every deck freely, favors checking escape craft once he spots your
+                      repairs, follows through stairwells (~0.9s climb), and hears noisy installs
+                      or crane/turbine spin-ups.
                     </p>
                   </div>
                 </div>
@@ -282,9 +349,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
 
             <div className="mt-6 border-t border-slate-800/80 pt-4 text-xs text-slate-400 leading-relaxed">
               <span className="font-semibold text-slate-300">Controls:</span> WASD Move · Shift
-              Sprint · C Sneak · Hold Q Peek Doors &amp; Vents · E / Hold E Interact &amp; Repair ·
-              F / Right-Click Flashlight · Left-Click / Click Slot Use Tool · G Drop Item · J
-              Escape Journal · 1–6 Slots
+              Sprint · C Sneak · Hold Q Peek Doors, Stairs &amp; Vents · E / Hold E Interact &amp;
+              Repair · F / Right-Click Flashlight · Left-Click Use Tool · G Drop · J Journal · F11
+              Fullscreen
             </div>
           </div>
 
@@ -294,16 +361,24 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-medium text-slate-300">Brute Presets</span>
-                  <span className="text-xs text-slate-400">
+                  <span
+                    className={`text-xs ${
+                      !customTuningActive && activePreset === 'EXTREME'
+                        ? 'font-semibold text-red-400'
+                        : 'text-slate-400'
+                    }`}
+                  >
                     {customTuningActive
                       ? 'Dev Custom Numbers'
-                      : activePreset === 'CUSTOM'
-                        ? 'Custom Profile'
-                        : activePreset === 'MERCY'
-                          ? 'Mercy Preset'
-                          : activePreset === 'NIGHTMARE'
-                            ? 'Nightmare Preset'
-                            : 'Standard Preset'}
+                      : activePreset === 'EXTREME'
+                        ? 'Extreme Preset'
+                        : activePreset === 'CUSTOM'
+                          ? 'Custom Profile'
+                          : activePreset === 'MERCY'
+                            ? 'Mercy Preset'
+                            : activePreset === 'NIGHTMARE'
+                              ? 'Nightmare Preset'
+                              : 'Standard Preset'}
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-1.5 rounded-md bg-slate-950 p-1 border border-slate-800">
@@ -313,22 +388,36 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                       { key: 'STANDARD', label: 'Standard' },
                       { key: 'NIGHTMARE', label: 'Nightmare' },
                     ] as const
-                  ).map((preset) => (
-                    <button
-                      key={preset.key}
-                      type="button"
-                      onClick={() => onSelectDifficulty({ ...DIFFICULTY_PRESETS[preset.key] })}
-                      className={`rounded px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        !customTuningActive && activePreset === preset.key
-                          ? preset.key === 'NIGHTMARE'
-                            ? 'bg-orange-950/90 text-orange-200 border border-orange-700/50'
-                            : 'bg-slate-800 text-white'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
+                  ).map((preset) => {
+                    const isExtremePresetActive =
+                      preset.key === 'NIGHTMARE' && activePreset === 'EXTREME';
+                    const isSelected =
+                      !customTuningActive &&
+                      (activePreset === preset.key || isExtremePresetActive);
+
+                    return (
+                      <button
+                        key={preset.key}
+                        type="button"
+                        data-testid={`preset-${preset.key.toLowerCase()}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handlePresetClick(preset.key);
+                        }}
+                        className={`rounded px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          isSelected
+                            ? isExtremePresetActive
+                              ? 'bg-red-950/90 text-red-200 border border-red-700/60'
+                              : preset.key === 'NIGHTMARE'
+                                ? 'bg-orange-950/90 text-orange-200 border border-orange-700/50'
+                                : 'bg-slate-800 text-white'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {isExtremePresetActive ? 'Extreme' : preset.label}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -342,21 +431,29 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                       </span>
                       <div className="grid grid-cols-3 gap-1 rounded-md bg-slate-950 p-1 border border-slate-800 w-52 shrink-0">
                         {LEVELS.map((lvl) => {
-                          const selected = difficulty[axis.key] === lvl.value;
+                          const isExtremeAxis =
+                            lvl.value === 'HIGH' && difficulty[axis.key] === 'EXTREME';
+                          const selected = difficulty[axis.key] === lvl.value || isExtremeAxis;
                           return (
                             <button
                               key={lvl.value}
                               type="button"
-                              onClick={() => updateAxis(axis.key, lvl.value)}
+                              data-testid={`axis-${axis.key}-${lvl.value.toLowerCase()}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleAxisLevelClick(axis.key, lvl.value);
+                              }}
                               className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                                 selected
-                                  ? lvl.value === 'HIGH'
-                                    ? 'bg-orange-950/90 text-orange-200 border border-orange-700/50'
-                                    : 'bg-slate-800 text-white'
+                                  ? isExtremeAxis
+                                    ? 'bg-red-950/90 text-red-200 border border-red-700/60'
+                                    : lvl.value === 'HIGH'
+                                      ? 'bg-orange-950/90 text-orange-200 border border-orange-700/50'
+                                      : 'bg-slate-800 text-white'
                                   : 'text-slate-400 hover:text-slate-200'
                               }`}
                             >
-                              {lvl.label}
+                              {isExtremeAxis ? 'Extreme' : lvl.label}
                             </button>
                           );
                         })}

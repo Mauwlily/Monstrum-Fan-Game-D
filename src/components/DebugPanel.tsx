@@ -18,6 +18,7 @@ export interface DebugTelemetry {
   hidingSpotId: string | null;
   peekingSpotId: string | null;
   peekingDoorId: string | null;
+  peekingStairId: string | null;
   flashlightOn: boolean;
   battery: number;
   bruteState: string;
@@ -151,6 +152,17 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
             >
               {config.forceDoorPeek ? 'Door Peek: ON' : 'Door Peek: OFF'}
             </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ forceStairPeek: !config.forceStairPeek })}
+              className={`col-span-2 rounded border px-2.5 py-1.5 text-[11px] font-medium whitespace-nowrap shrink-0 cursor-pointer ${
+                config.forceStairPeek
+                  ? 'border-sky-500/70 bg-sky-500/15 text-sky-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              {config.forceStairPeek ? 'Stair Peek Portal: ON' : 'Stair Peek Portal: OFF'}
+            </button>
           </div>
         </section>
 
@@ -221,7 +233,14 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
             <div className="flex justify-between">
               <span className="text-slate-400">Hiding / Peek</span>
               <span>
-                {telemetry.hidingSpotId ?? 'None'} · {telemetry.peekingSpotId ? 'Vent' : telemetry.peekingDoorId ? 'Door' : 'None'}
+                {telemetry.hidingSpotId ?? 'None'} ·{' '}
+                {telemetry.peekingSpotId
+                  ? 'Vent'
+                  : telemetry.peekingStairId
+                    ? 'Stairs'
+                    : telemetry.peekingDoorId
+                      ? 'Door'
+                      : 'None'}
               </span>
             </div>
             <div className="flex justify-between">

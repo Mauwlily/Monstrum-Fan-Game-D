@@ -91,7 +91,7 @@ export class GameRenderer {
 
     const shakeX = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
     const shakeY = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
-    const zoom = engine.zoom;
+    const zoom = engine.getEffectiveZoom(width, height);
     const viewCenterX = width / 2 + shakeX;
     const viewCenterY = height / 2 + shakeY;
 
@@ -106,12 +106,12 @@ export class GameRenderer {
 
     const incomingStairId = engine.getBruteIncomingStairDestId();
 
-    this.drawOceanWaves(ctx, engine, width, height, timeSec);
-    this.drawTiles(ctx, engine, width, height, timeSec);
+    this.drawOceanWaves(ctx, engine, width, height, timeSec, zoom);
+    this.drawTiles(ctx, engine, width, height, timeSec, zoom);
     this.drawRoomStencils(ctx, engine);
-    this.drawBloodStreaks(ctx, engine, width, height);
+    this.drawBloodStreaks(ctx, engine, width, height, zoom);
     this.drawStairwells(ctx, engine, incomingStairId, timeSec);
-    this.drawBulkheads(ctx, engine, width, height);
+    this.drawBulkheads(ctx, engine, width, height, zoom);
     this.drawEscapeZones(ctx, engine, timeSec);
     this.drawShipProps(ctx, engine);
     this.drawContainers(ctx, engine);
@@ -167,8 +167,28 @@ export class GameRenderer {
     }
     ctx.restore();
 
+    // 3b. Circular Raycasted Stairwell Landing Peek Portal (Hold Q near stairwell)
+    if (
+      engine.player.peekingStairId !== null &&
+      engine.player.hidingSpotId === null &&
+      engine.player.climbingStairId === null
+    ) {
+      this.drawStairPeekPortal(
+        ctx,
+        engine,
+        viewCenterX,
+        viewCenterY,
+        zoom,
+        width,
+        height,
+        timeSec,
+        litRoomPolys,
+        bruteBeam
+      );
+    }
+
     // 4. Screen vignette & spot/chase danger pulse
-    this.drawVignetteAndDanger(ctx, engine, width, height, timeSec);
+    this.drawVignetteAndDanger(ctx, engine, width, height, zoom, timeSec);
   }
 
   private drawOceanWaves(
@@ -176,10 +196,11 @@ export class GameRenderer {
     engine: MonstrumGameEngine,
     width: number,
     height: number,
-    timeSec: number
+    timeSec: number,
+    zoom: number
   ): void {
-    const halfW = width / (2 * engine.zoom);
-    const halfH = height / (2 * engine.zoom);
+    const halfW = width / (2 * zoom);
+    const halfH = height / (2 * zoom);
     const startX = Math.floor((engine.cameraX - halfW) / 140) * 140 - 140;
     const endX = engine.cameraX + halfW + 140;
     const startY = Math.floor((engine.cameraY - halfH) / 76) * 76 - 76;
@@ -247,15 +268,18 @@ export class GameRenderer {
     engine: MonstrumGameEngine,
     width: number,
     height: number,
-    timeSec: number
+    timeSec: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
     const { tiles, floorMaterial, tileSize, width: mw, height: mh } = engine.map;
-    const halfW = width / (2 * engine.zoom);
-    const halfH = height / (2 * engine.zoom);
-    const minTx = Math.max(0, Math.floor((engine.cameraX - halfW) / tileSize) - 1);
-    const maxTx = Math.min(mw - 1, Math.ceil((engine.cameraX + halfW) / tileSize) + 1);
-    const minTy = Math.max(0, Math.floor((engine.cameraY - halfH) / tileSize) - 1);
-    const maxTy = Math.min(mh - 1, Math.ceil((engine.cameraY + halfH) / tileSize) + 1);
+    const halfW = width / (2 * zoom);
+    const halfH = height / (2 * zoom);
+    const minTx = Math.max(0, Math.floor((camX - halfW) / tileSize) - 1);
+    const maxTx = Math.min(mw - 1, Math.ceil((camX + halfW) / tileSize) + 1);
+    const minTy = Math.max(0, Math.floor((camY - halfH) / tileSize) - 1);
+    const maxTy = Math.min(mh - 1, Math.ceil((camY + halfH) / tileSize) + 1);
     const tex = this.textures;
 
     for (let ty = minTy; ty <= maxTy; ty++) {
@@ -455,15 +479,18 @@ export class GameRenderer {
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
     width: number,
-    height: number
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
     const { tiles, tileSize, width: mw, height: mh } = engine.map;
-    const halfW = width / (2 * engine.zoom);
-    const halfH = height / (2 * engine.zoom);
-    const minTx = Math.max(0, Math.floor((engine.cameraX - halfW) / tileSize) - 1);
-    const maxTx = Math.min(mw - 1, Math.ceil((engine.cameraX + halfW) / tileSize) + 1);
-    const minTy = Math.max(0, Math.floor((engine.cameraY - halfH) / tileSize) - 1);
-    const maxTy = Math.min(mh - 1, Math.ceil((engine.cameraY + halfH) / tileSize) + 1);
+    const halfW = width / (2 * zoom);
+    const halfH = height / (2 * zoom);
+    const minTx = Math.max(0, Math.floor((camX - halfW) / tileSize) - 1);
+    const maxTx = Math.min(mw - 1, Math.ceil((camX + halfW) / tileSize) + 1);
+    const minTy = Math.max(0, Math.floor((camY - halfH) / tileSize) - 1);
+    const maxTy = Math.min(mh - 1, Math.ceil((camY + halfH) / tileSize) + 1);
     const armorPattern = this.textures?.wallArmorPattern;
 
     for (let ty = minTy; ty <= maxTy; ty++) {
@@ -565,18 +592,21 @@ export class GameRenderer {
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
     width: number,
-    height: number
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
     const streaks = engine.map.bloodStreaks;
     if (!streaks || streaks.length === 0) return;
 
-    const halfW = width / (2 * engine.zoom) + 90;
-    const halfH = height / (2 * engine.zoom) + 90;
+    const halfW = width / (2 * zoom) + 90;
+    const halfH = height / (2 * zoom) + 90;
 
     for (const bs of streaks) {
       if (
-        Math.abs(bs.x - engine.cameraX) > halfW ||
-        Math.abs(bs.y - engine.cameraY) > halfH
+        Math.abs(bs.x - camX) > halfW ||
+        Math.abs(bs.y - camY) > halfH
       ) {
         continue;
       }
@@ -1571,9 +1601,10 @@ export class GameRenderer {
   private drawWorldPickups(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
-    timeSec: number
+    timeSec: number,
+    deckOverride?: 'MAIN' | 'LOWER'
   ): void {
-    const deck = engine.getCurrentDeck();
+    const deck = deckOverride ?? engine.getCurrentDeck();
     for (const wp of engine.worldPickups) {
       if (wp.deck !== deck) continue;
       const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
@@ -3217,7 +3248,7 @@ export class GameRenderer {
 
     if (cfg.showBruteFov) {
       const b = engine.brute;
-      const senses = getSensesProfile(engine.difficulty);
+      const senses = getSensesProfile(engine.difficulty, engine.bruteTuning);
       const halfFovRad = (senses.halfFovDeg * Math.PI) / 180;
       const fovRange = 345 * senses.sightMult;
       ctx.save();
@@ -3282,11 +3313,226 @@ export class GameRenderer {
     }
   }
 
+  private drawStairPeekPortal(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    viewCenterX: number,
+    viewCenterY: number,
+    zoom: number,
+    width: number,
+    height: number,
+    timeSec: number,
+    litRoomPolys: RayLightPoly[],
+    bruteBeam: BruteBeamData | null
+  ): void {
+    const st = engine.map.stairwells.find((s) => s.id === engine.player.peekingStairId);
+    const dest = st ? engine.map.stairwells.find((s) => s.id === st.targetStairId) : undefined;
+    if (!st || !dest) return;
+
+    const rawPortalX = viewCenterX + (st.x - engine.cameraX) * zoom;
+    const rawPortalY = viewCenterY + (st.y - engine.cameraY) * zoom;
+    const portalRadius = Math.max(96, Math.min(185, Math.round(142 * zoom)));
+    const margin = portalRadius + 16;
+    const portalX = Math.max(margin, Math.min(width - margin, rawPortalX));
+    const portalY = Math.max(margin, Math.min(height - margin, rawPortalY));
+    const viewWorldRadius = portalRadius / zoom + 28;
+    const peekRange = Math.min(280, viewWorldRadius);
+
+    // Raycasted Line-of-Sight polygon from the destination landing (walls & closed doors strictly clip to #000000!)
+    const destSightPoly = computeVisibilityPolygon(
+      engine.map,
+      engine.doorsByTile,
+      dest.x,
+      dest.y,
+      0,
+      Math.PI * 2,
+      peekRange,
+      96
+    );
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
+    ctx.clip();
+
+    // Pure #000000 abyss behind destination-deck walls
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(
+      portalX - portalRadius,
+      portalY - portalRadius,
+      portalRadius * 2,
+      portalRadius * 2
+    );
+
+    if (destSightPoly.length >= 3) {
+      ctx.save();
+      ctx.translate(portalX, portalY);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-dest.x, -dest.y);
+
+      // Strict LoS clip on destination deck
+      ctx.beginPath();
+      ctx.moveTo(destSightPoly[0].x, destSightPoly[0].y);
+      for (let i = 1; i < destSightPoly.length; i++) {
+        ctx.lineTo(destSightPoly[i].x, destSightPoly[i].y);
+      }
+      ctx.closePath();
+      ctx.clip();
+
+      const worldSpan = viewWorldRadius * 2.2;
+      this.drawTiles(ctx, engine, worldSpan, worldSpan, timeSec, 1, dest.x, dest.y);
+      this.drawRoomStencils(ctx, engine);
+      this.drawBloodStreaks(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawStairwells(ctx, engine, null, timeSec);
+      this.drawBulkheads(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawShipProps(ctx, engine);
+      this.drawContainers(ctx, engine);
+      this.drawHidingSpots(ctx, engine);
+      this.drawLightSwitches(ctx, engine, timeSec);
+      this.drawDoors(ctx, engine);
+      this.drawDroppedLights(ctx, engine, timeSec);
+      this.drawWorldPickups(ctx, engine, timeSec, dest.deck);
+      this.drawParticles(ctx, engine);
+
+      // Render Brute inside landing portal if on destination deck and inside LoS
+      const b = engine.brute;
+      const bDist = Math.hypot(b.x - dest.x, b.y - dest.y);
+      const bInView =
+        b.stairClimbTimer <= 0 &&
+        bDist <= peekRange + 28 &&
+        hasLineOfSight(engine.map, engine.doorsByTile, dest.x, dest.y, b.x, b.y);
+      if (bInView) {
+        this.drawBrute(ctx, engine, timeSec);
+      }
+
+      // Apply warm tints if lit rooms / Brute searchlight intersect the destination landing
+      const destLitPolys = litRoomPolys.filter(
+        (lp) => Math.hypot(lp.x - dest.x, lp.y - dest.y) < lp.range + peekRange
+      );
+      const destBeam =
+        bruteBeam && Math.hypot(bruteBeam.ox - dest.x, bruteBeam.oy - dest.y) < bruteBeam.range + peekRange
+          ? bruteBeam
+          : null;
+      this.drawWarmLightingTints(ctx, engine, destLitPolys, destBeam, null, timeSec);
+
+      // Shadowed landing visibility falloff (brighter when flashlight ON or destination room lit)
+      const hasTorch = engine.player.flashlightOn && engine.player.battery > 0;
+      const roomLitNearDest = destLitPolys.some(
+        (lp) => Math.hypot(lp.x - dest.x, lp.y - dest.y) < lp.range * 0.9
+      );
+      const centerShadowAlpha = roomLitNearDest ? 0.05 : hasTorch ? 0.14 : 0.48;
+      const midShadowAlpha = roomLitNearDest ? 0.25 : hasTorch ? 0.56 : 0.8;
+      const dimGrad = ctx.createRadialGradient(
+        dest.x,
+        dest.y,
+        14,
+        dest.x,
+        dest.y,
+        peekRange
+      );
+      dimGrad.addColorStop(0, `rgba(0, 0, 0, ${centerShadowAlpha})`);
+      dimGrad.addColorStop(0.58, `rgba(0, 0, 0, ${midShadowAlpha})`);
+      dimGrad.addColorStop(1, 'rgba(0, 0, 0, 0.96)');
+      ctx.fillStyle = dimGrad;
+      ctx.fillRect(dest.x - peekRange, dest.y - peekRange, peekRange * 2, peekRange * 2);
+
+      // Re-emphasize glowing Brute eyes & light switch LEDs piercing darkness in destination LoS
+      for (const sw of engine.map.lightSwitches) {
+        if (Math.hypot(sw.x - dest.x, sw.y - dest.y) <= peekRange) {
+          if (hasLineOfSightToEntity(engine.map, engine.doorsByTile, dest.x, dest.y, sw.x, sw.y)) {
+            ctx.fillStyle = sw.isOn ? 'rgba(52, 211, 153, 0.9)' : 'rgba(245, 158, 11, 0.85)';
+            ctx.beginPath();
+            ctx.arc(sw.x, sw.y, 2.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      if (bInView && b.state !== 'STUNNED') {
+        const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(b.angle);
+        const eyeGlow = ctx.createRadialGradient(12, 0, 1, 12, 0, isChasing ? 32 : 22);
+        eyeGlow.addColorStop(0, isChasing ? 'rgba(255, 85, 0, 0.72)' : 'rgba(249, 115, 22, 0.45)');
+        eyeGlow.addColorStop(1, 'rgba(249, 115, 22, 0)');
+        ctx.fillStyle = eyeGlow;
+        ctx.beginPath();
+        ctx.arc(12, 0, isChasing ? 32 : 22, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = isChasing ? '#ffedd5' : '#fdba74';
+        ctx.beginPath();
+        ctx.arc(12.5, -3.5, 2.4, 0, Math.PI * 2);
+        ctx.arc(12.5, 3.5, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      ctx.restore(); // pop world transform & LoS clip
+    }
+
+    // Soft circular tunnel vignette inside portal
+    const portalVignette = ctx.createRadialGradient(
+      portalX,
+      portalY,
+      portalRadius * 0.62,
+      portalX,
+      portalY,
+      portalRadius
+    );
+    portalVignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    portalVignette.addColorStop(1, 'rgba(0, 0, 0, 0.88)');
+    ctx.fillStyle = portalVignette;
+    ctx.beginPath();
+    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore(); // pop circular clip
+
+    // Crisp outer companionway peephole ring & destination badge
+    const accent = st.direction === 'DOWN' ? '#38bdf8' : '#fbbf24';
+    ctx.save();
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.92)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Subtle rectangular deck header bar just above portal rim
+    const badgeText = `${dest.deck === 'LOWER' ? 'LOWER DECK' : 'MAIN DECK'} · ${dest.room.toUpperCase()}`;
+    ctx.font = '600 11px "JetBrains Mono", monospace';
+    const textW = ctx.measureText(badgeText).width;
+    const boxW = textW + 18;
+    const boxH = 22;
+    const boxX = portalX - boxW / 2;
+    const boxY = Math.max(8, portalY - portalRadius - 14);
+    ctx.fillStyle = 'rgba(7, 10, 15, 0.94)';
+    traceRoundedRect(ctx, boxX, boxY, boxW, boxH, 3);
+    ctx.fill();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(badgeText, portalX, boxY + boxH / 2 + 0.5);
+    ctx.restore();
+  }
+
   private drawVignetteAndDanger(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
     width: number,
     height: number,
+    zoom: number,
     timeSec: number
   ): void {
     const bruteDist = engine.getEffectiveBruteDistance();
@@ -3317,7 +3563,7 @@ export class GameRenderer {
     if ((redBoost > 0 || engine.spotFlashAlpha > 0) && this.lastPlayerSightPolys.length > 0) {
       ctx.save();
       ctx.translate(width / 2, height / 2);
-      ctx.scale(engine.zoom, engine.zoom);
+      ctx.scale(zoom, zoom);
       ctx.translate(-engine.cameraX, -engine.cameraY);
       ctx.beginPath();
       for (const poly of this.lastPlayerSightPolys) {

@@ -52,6 +52,11 @@ export const DEBUG_SCENARIOS: Array<{ id: DebugScenarioId; label: string; summar
     summary: 'Brute climbs toward enlarged companionway hatch; stairwell pulses bright orange.',
   },
   {
+    id: 'STAIR_PEEK',
+    label: 'Stair Peek',
+    summary: 'Hold Q near companionway to render circular raycasted landing portal with Brute on target deck.',
+  },
+  {
     id: 'FLICKER_AND_SURVIVOR',
     label: 'Survivor & Flicker',
     summary: 'Remade maritime crew survivor mid-stride inside a flickering lit compartment.',
@@ -481,6 +486,7 @@ export function applyDebugScenarioToEngine(
   p.hidingSpotId = null;
   p.peekingDoorId = null;
   p.peekingSpotId = null;
+  p.peekingStairId = null;
   p.preHidePos = null;
   p.climbingStairId = null;
   p.climbProgress = 0;
@@ -511,6 +517,7 @@ export function applyDebugScenarioToEngine(
   engine.debugConfig.enabled = true;
   engine.debugConfig.forceVentPeek = false;
   engine.debugConfig.forceDoorPeek = false;
+  engine.debugConfig.forceStairPeek = false;
 
   b.state = 'ROAM';
   b.path = [];
@@ -697,6 +704,52 @@ export function applyDebugScenarioToEngine(
       b.state = 'CHASE';
       b.stairDestId = setup.stair.id;
       b.stairClimbTimer = 0.65;
+      probePoints = [];
+    }
+    engine.debugConfig.freezeAi = true;
+  } else if (scenarioId === 'STAIR_PEEK') {
+    const setup = findStairwellViewSetup(engine);
+    if (setup) {
+      const dx = Math.sign(setup.playerPos.x - setup.stair.x);
+      const dy = Math.sign(setup.playerPos.y - setup.stair.y);
+      p.x = setup.stair.x + dx * ts * 1.1;
+      p.y = setup.stair.y + dy * ts * 1.1;
+      p.angle = Math.atan2(setup.stair.y - p.y, setup.stair.x - p.x);
+      p.flashlightOn = true;
+      p.peekingStairId = setup.stair.id;
+      engine.debugConfig.forceStairPeek = true;
+
+      // Place Brute on the destination deck within landing LoS
+      let placedBrute = false;
+      for (const radiusTiles of [2, 3, 1]) {
+        for (const [ox, oy] of [
+          [radiusTiles, 0],
+          [-radiusTiles, 0],
+          [0, radiusTiles],
+          [0, -radiusTiles],
+        ]) {
+          const btx = setup.partner.tx + ox;
+          const bty = setup.partner.ty + oy;
+          if (!isTileWalkable(engine.map.tiles[bty]?.[btx] ?? 'VOID')) continue;
+          const bx = (btx + 0.5) * ts;
+          const by = (bty + 0.5) * ts;
+          if (hasLineOfSight(engine.map, engine.doorsByTile, setup.partner.x, setup.partner.y, bx, by)) {
+            b.x = bx;
+            b.y = by;
+            b.angle = Math.atan2(setup.partner.y - by, setup.partner.x - bx);
+            b.state = 'STALK';
+            placedBrute = true;
+            break;
+          }
+        }
+        if (placedBrute) break;
+      }
+      if (!placedBrute) {
+        b.x = setup.partner.x + 28;
+        b.y = setup.partner.y;
+        b.angle = Math.PI;
+        b.state = 'STALK';
+      }
       probePoints = [];
     }
     engine.debugConfig.freezeAi = true;

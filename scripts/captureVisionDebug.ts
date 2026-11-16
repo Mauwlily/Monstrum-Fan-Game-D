@@ -104,7 +104,7 @@ async function main(): Promise<void> {
       }
     };
 
-    // 0. Check v0.1.1 Main Menu, secret 3-click :D Dev Mode, hidden Debug button, & custom Brute numbers
+    // 0. Check v0.1.2 Main Menu, F11 Fullscreen, Triple-Click Extreme, secret 3-click :D Dev Mode, & custom Brute numbers
     const normalPage = await context.newPage();
     normalPage.on('console', (msg) => {
       if (msg.type() === 'error') {
@@ -118,15 +118,104 @@ async function main(): Promise<void> {
     await normalPage.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
     await normalPage.waitForSelector('h1');
     const menuTextLocked = await normalPage.evaluate(() => document.body.innerText);
-    check(menuTextLocked.includes('v0.1.1'), 'Expected Main Menu to display v0.1.1');
+    check(menuTextLocked.includes('v0.1.2'), 'Expected Main Menu to display v0.1.2');
     check(
       !menuTextLocked.includes('Dev Mode: Internal Brute Numbers'),
       'Expected Dev Mode panel hidden before 3-click :D unlock'
     );
 
-    // Start Game without Dev Mode -> Debug button must be hidden in HUD
+    // Verify F11 triggers fullscreen handler cleanly
+    await normalPage.evaluate(() => {
+      (window as unknown as { __f11Calls: number }).__f11Calls = 0;
+      document.documentElement.requestFullscreen = async () => {
+        (window as unknown as { __f11Calls: number }).__f11Calls++;
+      };
+    });
+    await normalPage.keyboard.press('F11');
+    const f11Calls = await normalPage.evaluate(
+      () => (window as unknown as { __f11Calls: number }).__f11Calls
+    );
+    check(f11Calls === 1, `Expected F11 to trigger requestFullscreen once, got ${f11Calls}`);
+
+    // Verify triple-click High unlocks Extreme for individual axes & Intelligence matches High
+    await normalPage.getByTestId('axis-intelligence-high').click();
+    await normalPage.getByTestId('axis-intelligence-high').click();
+    await normalPage.getByTestId('axis-intelligence-high').click();
+    const intelExtText = await normalPage.getByTestId('axis-intelligence-high').innerText();
+    check(
+      intelExtText.trim() === 'Extreme',
+      `Expected 3 clicks on Intelligence High to flip to Extreme, got "${intelExtText}"`
+    );
+
+    // Start with Extreme Intelligence + Standard Senses/Speed to confirm Extreme Intelligence == High
     await normalPage.getByRole('button', { name: 'Start Game' }).click();
     await normalPage.waitForFunction(() => Boolean(window.__monstrumDebug?.getRuntimeDetails()));
+    const intelExtDetails = await normalPage.evaluate(() =>
+      window.__monstrumDebug!.getRuntimeDetails()
+    );
+    check(
+      intelExtDetails?.difficulty.intelligence === 'EXTREME' &&
+        intelExtDetails.bruteTuning.sweepCoverage === 1.0 &&
+        intelExtDetails.bruteTuning.overshootDist === 250 &&
+        intelExtDetails.bruteTuning.clueRoomDepth === 4,
+      `Expected EXTREME intelligence to match HIGH internals, got ${JSON.stringify(intelExtDetails?.bruteTuning)}`
+    );
+
+    // Reload menu and verify clicking Extreme reverts to High, plus triple-click Nightmare unlocks all Extreme
+    await normalPage.goto(`${url}/`, { waitUntil: 'domcontentloaded' });
+    await normalPage.waitForSelector('[data-testid="axis-senses-high"]');
+    await normalPage.getByTestId('axis-senses-high').click();
+    await normalPage.getByTestId('axis-senses-high').click();
+    await normalPage.getByTestId('axis-senses-high').click();
+    check(
+      (await normalPage.getByTestId('axis-senses-high').innerText()).trim() === 'Extreme',
+      'Expected 3 clicks on Senses High to unlock Extreme'
+    );
+    await normalPage.getByTestId('axis-senses-high').click();
+    check(
+      (await normalPage.getByTestId('axis-senses-high').innerText()).trim() === 'High',
+      'Expected clicking Extreme axis once to revert to High'
+    );
+
+    // Triple-click Nightmare -> flips all 3 axes to Extreme
+    await normalPage.getByTestId('preset-nightmare').click();
+    await normalPage.getByTestId('preset-nightmare').click();
+    await normalPage.getByTestId('preset-nightmare').click();
+    const extremeMenuText = await normalPage.evaluate(() => document.body.innerText);
+    check(
+      extremeMenuText.includes('Extreme Preset') &&
+        (await normalPage.getByTestId('preset-nightmare').innerText()).trim() === 'Extreme' &&
+        (await normalPage.getByTestId('axis-speed-high').innerText()).trim() === 'Extreme' &&
+        (await normalPage.getByTestId('axis-senses-high').innerText()).trim() === 'Extreme',
+      'Expected 3 clicks on Nightmare preset to flip preset and all axes to Extreme'
+    );
+    await normalPage.screenshot({ path: path.join(OUTPUT_DIR, '17_title_menu_extreme.png') });
+    console.log(`Saved ${path.join(OUTPUT_DIR, '17_title_menu_extreme.png')}`);
+
+    // Clicking Extreme preset once reverts back to Nightmare
+    await normalPage.getByTestId('preset-nightmare').click();
+    check(
+      (await normalPage.getByTestId('preset-nightmare').innerText()).trim() === 'Nightmare' &&
+        (await normalPage.getByTestId('axis-speed-high').innerText()).trim() === 'High',
+      'Expected clicking Extreme preset once to revert to Nightmare'
+    );
+
+    // Flip back to Extreme preset and verify escalated Speed & Senses in-engine + hidden Debug button
+    await normalPage.getByTestId('preset-nightmare').click();
+    await normalPage.getByTestId('preset-nightmare').click();
+    await normalPage.getByTestId('preset-nightmare').click();
+    await normalPage.getByRole('button', { name: 'Start Game' }).click();
+    await normalPage.waitForFunction(() => Boolean(window.__monstrumDebug?.getRuntimeDetails()));
+    const extRuntime = await normalPage.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    check(
+      extRuntime?.difficulty.speed === 'EXTREME' &&
+        extRuntime.difficulty.senses === 'EXTREME' &&
+        extRuntime.bruteTuning.chaseSpeed === 316 &&
+        extRuntime.bruteTuning.halfFovDeg === 100 &&
+        extRuntime.bruteTuning.sightMult === 1.42 &&
+        extRuntime.bruteTuning.hearingMult === 1.52,
+      `Expected escalated EXTREME Speed/Senses internals, got ${JSON.stringify(extRuntime?.bruteTuning)}`
+    );
     const debugBtnCountLocked = await normalPage.getByRole('button', { name: 'Toggle debug panel' }).count();
     check(debugBtnCountLocked === 0, `Expected Debug HUD button hidden when locked, found ${debugBtnCountLocked}`);
 
@@ -513,7 +602,7 @@ async function main(): Promise<void> {
     await page.waitForTimeout(80);
     await shot('10_flicker_and_survivor.png');
 
-    // 11. ESCAPE_HELI_OVERHAUL: Verify spatial separation (>= 40 tiles), 6-slot backpack, overhauled chopper, & [J] Journal
+    // 11. ESCAPE_HELI_OVERHAUL: Verify spatial separation (>= 40 tiles), 6-slot backpack, louder repairs, sight-only bias, & [J] Journal
     await page.evaluate(() => {
       window.__monstrumDebug!.loadScenario('ESCAPE_HELI_OVERHAUL');
     });
@@ -533,8 +622,72 @@ async function main(): Promise<void> {
     }
     await shot('11_escape_heli_overhaul.png');
 
+    // Verify Louder Escape Repairs + Sight-Only Escape Bias
+    if (heliInfo) {
+      await page.evaluate(
+        ({ bx, by }) => {
+          window.__monstrumDebug!.setBrutePose(bx, by, Math.PI);
+          window.__monstrumDebug!.setOverlays({ freezeAi: false });
+          window.__monstrumDebug!.holdInteract(true);
+        },
+        { bx: heliInfo.lifeboatPos.x, by: heliInfo.lifeboatPos.y }
+      );
+      // engine clamps dt to 0.05s per update(), so 106 steps = 5.3s (> 5.0s install duration)
+      for (let i = 0; i < 106; i++) {
+        await page.evaluate(() => {
+          window.__monstrumDebug!.step(0.05);
+        });
+      }
+      await page.evaluate(() => {
+        window.__monstrumDebug!.holdInteract(false);
+      });
+      const postRepairInfo = await page.evaluate(() => ({
+        esc: window.__monstrumDebug!.getEscapeInfo(),
+        det: window.__monstrumDebug!.getRuntimeDetails(),
+      }));
+      const maxAcousticRadius = postRepairInfo.det?.maxAcousticRadius ?? 0;
+      console.log('Louder repair & sight bias check:', {
+        maxAcousticRadius,
+        heliParts: postRepairInfo.esc?.heliParts.length,
+        observedEscape: postRepairInfo.det?.observedEscape,
+      });
+      check(
+        maxAcousticRadius >= 900,
+        `Expected louder escape repair acoustic noise radius (>=900px), got ${maxAcousticRadius}`
+      );
+      check(
+        (postRepairInfo.esc?.heliParts.length ?? 0) === 3 &&
+          postRepairInfo.det?.observedEscape.heliRepairs === 0,
+        `Expected heliParts=3 & Brute observedHeliRepairs=0 while out of LoS, got heliParts=${postRepairInfo.esc?.heliParts.length}, observed=${JSON.stringify(postRepairInfo.det?.observedEscape)}`
+      );
+
+      // Move player clear and place Brute onto open Helideck facing Helicopter -> observedHeliRepairs updates
+      await page.evaluate(
+        ({ hx, hy, lx, ly }) => {
+          window.__monstrumDebug!.setPlayerPose(lx, ly);
+          window.__monstrumDebug!.setBrutePose(hx + 95, hy, Math.PI);
+          for (let i = 0; i < 4; i++) {
+            window.__monstrumDebug!.step(0.05);
+          }
+          window.__monstrumDebug!.setOverlays({ freezeAi: true });
+        },
+        {
+          hx: heliInfo.heliPos.x,
+          hy: heliInfo.heliPos.y,
+          lx: heliInfo.lifeboatPos.x,
+          ly: heliInfo.lifeboatPos.y,
+        }
+      );
+      const sightedInfo = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+      check(
+        (sightedInfo?.observedEscape.heliRepairs ?? 0) === 3,
+        `Expected Brute observedHeliRepairs === 3 after sighting repaired Helicopter, got ${JSON.stringify(sightedInfo?.observedEscape)}`
+      );
+    }
+
     // Verify floor drop [G] without consuming item & Journal [J] modal
     await page.evaluate(() => {
+      window.__monstrumDebug!.loadScenario('ESCAPE_HELI_OVERHAUL');
       window.__monstrumDebug!.selectSlot(1); // FLARE
       window.__monstrumDebug!.dropSelectedItem();
     });
@@ -568,6 +721,126 @@ async function main(): Promise<void> {
     check(
       !hudText.includes('Lifeboat (Main Deck):') && !hudText.includes('Helicopter (Helideck):'),
       'Expected always-visible escape part counters to be removed from main HUD'
+    );
+
+    // 11b. STAIR_PEEK: Hold Q circular raycasted landing portal + anti-leak probes
+    await page.evaluate(() => {
+      window.__monstrumDebug!.loadScenario('STAIR_PEEK');
+      window.__monstrumDebug!.setOverlays({ showBlackProbes: true });
+    });
+    await page.waitForTimeout(100);
+    const stairPeekDet = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    const stairProbes = await page.evaluate(() => window.__monstrumDebug!.probePixels());
+    console.log('STAIR_PEEK telemetry & probes:', {
+      peekingStairId: stairPeekDet?.peekingStairId,
+      probes: stairProbes,
+    });
+    check(
+      stairPeekDet?.peekingStairId !== null,
+      `Expected peekingStairId non-null in STAIR_PEEK scenario`
+    );
+    for (const pr of stairProbes) {
+      check(pr.isPureBlack, `STAIR_PEEK leak at "${pr.label}": rgb(${pr.r},${pr.g},${pr.b})`);
+    }
+    await shot('16_stair_peek_portal.png');
+
+    // Verify releasing forceStairPeek and holding real KeyQ works cleanly
+    await page.evaluate(() => {
+      window.__monstrumDebug!.setOverlays({ forceStairPeek: false });
+      window.__monstrumDebug!.step(0.05);
+    });
+    const afterForceOff = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    check(
+      afterForceOff?.peekingStairId === null,
+      `Expected peekingStairId null after disabling forceStairPeek, got ${afterForceOff?.peekingStairId}`
+    );
+    await page.keyboard.down('KeyQ');
+    await page.evaluate(() => {
+      window.__monstrumDebug!.step(0.05);
+    });
+    const duringKeyQ = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    await page.keyboard.up('KeyQ');
+    await page.evaluate(() => {
+      window.__monstrumDebug!.step(0.05);
+    });
+    const afterKeyQ = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails());
+    check(
+      duringKeyQ?.peekingStairId !== null && afterKeyQ?.peekingStairId === null,
+      `Expected KeyQ down/up to toggle stair peek (during=${duringKeyQ?.peekingStairId}, after=${afterKeyQ?.peekingStairId})`
+    );
+
+    // 11c. Uniform Window Resolution Scaling & Small Window HUD Non-Overlap Check
+    const zoom1440 = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails()!.effectiveZoom);
+    const area1440 = (1440 / zoom1440) * (900 / zoom1440);
+
+    await page.setViewportSize({ width: 2560, height: 1440 });
+    await page.waitForTimeout(80);
+    const zoom2560 = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails()!.effectiveZoom);
+    const area2560 = (2560 / zoom2560) * (1440 / zoom2560);
+    const diff2560 = Math.abs(area2560 - area1440) / area1440;
+    console.log('Resolution scaling 2560x1440:', { zoom1440, zoom2560, area1440, area2560, diff2560 });
+    check(
+      diff2560 < 0.03,
+      `Expected 2560x1440 visible world area to match 1440x900 (diff=${(diff2560 * 100).toFixed(2)}%)`
+    );
+
+    await page.setViewportSize({ width: 800, height: 600 });
+    await page.waitForTimeout(80);
+    const zoom800 = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails()!.effectiveZoom);
+    const area800 = (800 / zoom800) * (600 / zoom800);
+    const diff800 = Math.abs(area800 - area1440) / area1440;
+    const hudBoxes800 = await page.evaluate(() => {
+      const panels = Array.from(document.querySelectorAll('[data-hud-panel]'));
+      return panels.map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          name: el.getAttribute('data-hud-panel'),
+          left: r.left,
+          top: r.top,
+          right: r.right,
+          bottom: r.bottom,
+        };
+      });
+    });
+    console.log('Resolution scaling 800x600:', { zoom800, area800, diff800, hudBoxes800 });
+    check(
+      diff800 < 0.03,
+      `Expected 800x600 visible world area to match 1440x900 (diff=${(diff800 * 100).toFixed(2)}%)`
+    );
+    check(hudBoxes800.length === 4, `Expected 4 HUD panels measured at 800x600, got ${hudBoxes800.length}`);
+    for (let i = 0; i < hudBoxes800.length; i++) {
+      const a = hudBoxes800[i];
+      check(
+        a.left >= 0 && a.top >= 0 && a.right <= 800 && a.bottom <= 600,
+        `HUD panel "${a.name}" clipped outside 800x600: ${JSON.stringify(a)}`
+      );
+      for (let j = i + 1; j < hudBoxes800.length; j++) {
+        const b = hudBoxes800[j];
+        const overlaps = !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+        check(!overlaps, `HUD panels "${a.name}" and "${b.name}" overlap at 800x600`);
+      }
+    }
+    await shot('18_small_window_hud.png');
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.waitForTimeout(80);
+
+    // 11d. Brute Pathfinding Anti-Stuck Check (navigates through doorways without snagging)
+    await page.evaluate(() => {
+      window.__monstrumDebug!.loadScenario('LIT_ROOM_DOOR_SPILL');
+      window.__monstrumDebug!.setOverlays({ freezeAi: false });
+    });
+    const navStart = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails()!.brutePos);
+    for (let i = 0; i < 45; i++) {
+      await page.evaluate(() => {
+        window.__monstrumDebug!.step(0.05);
+      });
+    }
+    const navEnd = await page.evaluate(() => window.__monstrumDebug!.getRuntimeDetails()!.brutePos);
+    const bruteMoved = Math.hypot(navEnd.x - navStart.x, navEnd.y - navStart.y);
+    console.log('Brute anti-stuck movement distance over 2.25s:', bruteMoved);
+    check(
+      bruteMoved >= 80,
+      `Expected Brute to navigate smoothly without getting stuck (>=80px), moved ${bruteMoved.toFixed(1)}px`
     );
 
     // 12. ESCAPE_LIFEBOAT_CRANE: Verify 4-slot base inventory, swung crane boat visual, & E victory cutscene
@@ -609,8 +882,8 @@ async function main(): Promise<void> {
     check(
       finalStatus === 'VICTORY' &&
         finalText.includes('You Escaped Alive :D') &&
-        finalText.includes('v0.1.1'),
-      `Expected VICTORY EndModal with v0.1.1 after noir cutscene, got status=${finalStatus}`
+        finalText.includes('v0.1.2'),
+      `Expected VICTORY EndModal with v0.1.2 after noir cutscene, got status=${finalStatus}`
     );
 
     check(consoleErrors.length === 0, `Console errors detected: ${consoleErrors.join('; ')}`);
@@ -618,7 +891,7 @@ async function main(): Promise<void> {
 
     assert(failures.length === 0, `${failures.length} check(s) failed:\n- ${failures.join('\n- ')}`);
 
-    console.log('ALL 0.1.1 DEV MODE, BLOOD STREAKS, DOOR PUSH-THROUGH, VISION & ESCAPE ASSERTIONS PASSED.');
+    console.log('ALL 0.1.2 STAIR PEEK, F11, EXTREME, SCALING, PATHING & ESCAPE ASSERTIONS PASSED.');
   } finally {
     await browser.close();
     if (proc) {

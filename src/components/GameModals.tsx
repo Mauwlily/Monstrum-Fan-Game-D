@@ -1,5 +1,5 @@
 import React from 'react';
-import { detectDifficultyPreset, GAME_VERSION, RunStats } from '../game/types';
+import { detectDifficultyPreset, DifficultyLevel, GAME_VERSION, RunStats } from '../game/types';
 
 interface PauseModalProps {
   seed: number;
@@ -67,8 +67,9 @@ function formatDifficultyLabel(stats: RunStats): string {
   if (preset === 'MERCY') return 'Mercy';
   if (preset === 'STANDARD') return 'Standard';
   if (preset === 'NIGHTMARE') return 'Nightmare';
-  const short = (lvl: 'LOW' | 'MEDIUM' | 'HIGH') =>
-    lvl === 'HIGH' ? 'Hi' : lvl === 'MEDIUM' ? 'Med' : 'Low';
+  if (preset === 'EXTREME') return 'Extreme';
+  const short = (lvl: DifficultyLevel) =>
+    lvl === 'EXTREME' ? 'Ext' : lvl === 'HIGH' ? 'Hi' : lvl === 'MEDIUM' ? 'Med' : 'Low';
   return `Int ${short(stats.difficulty.intelligence)} · Sen ${short(stats.difficulty.senses)} · Spd ${short(stats.difficulty.speed)}`;
 }
 

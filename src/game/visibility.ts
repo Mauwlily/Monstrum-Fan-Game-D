@@ -411,6 +411,14 @@ export function getSensesProfile(
         peripheralCrouch: 50,
         hearingMult: 0.8,
       };
+    case 'EXTREME':
+      return {
+        sightMult: 1.42,
+        halfFovDeg: 100,
+        peripheralBase: 140,
+        peripheralCrouch: 94,
+        hearingMult: 1.52,
+      };
     case 'HIGH':
       return {
         sightMult: 1.18,

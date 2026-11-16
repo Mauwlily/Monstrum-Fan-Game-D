@@ -34,8 +34,8 @@ declare global {
       dropSelectedItem: () => void;
       selectSlot: (idx: number) => void;
       getEscapeInfo: () => {
-        heliPos: { tx: number; ty: number };
-        lifeboatPos: { tx: number; ty: number };
+        heliPos: { tx: number; ty: number; x: number; y: number };
+        lifeboatPos: { tx: number; ty: number; x: number; y: number };
         tileDist: number;
         inventory: ItemId[];
         maxInventorySlots: number;
@@ -50,9 +50,25 @@ declare global {
       getRuntimeDetails: () => {
         bruteTuning: BruteTuningNumbers;
         customBruteTuning: boolean;
+        difficulty: DifficultyConfig;
+        effectiveZoom: number;
+        baseZoom: number;
         bloodStreakCount: number;
         playerX: number;
         playerY: number;
+        peekingStairId: string | null;
+        bruteState: string;
+        brutePos: { x: number; y: number };
+        brutePathLength: number;
+        investigateTarget: { x: number; y: number } | null;
+        observedEscape: {
+          heliRepairs: number;
+          heliActive: boolean;
+          lifeboatRepairs: number;
+          lifeboatActive: boolean;
+        };
+        activeNoiseRipples: Array<{ x: number; y: number; maxRadius: number }>;
+        maxAcousticRadius: number;
         nearestDoor: {
           id: string;
           x: number;
@@ -62,6 +78,8 @@ declare global {
           openProgress: number;
         } | null;
       } | null;
+      setBrutePose: (x: number, y: number, angle?: number) => void;
+      setPlayerPose: (x: number, y: number) => void;
       testPositionInNearestDoor: (offsetFromCenterPx?: number) => {
         doorId: string;
         orientation: 'H' | 'V';
@@ -218,11 +236,12 @@ export default function App() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const w = window.innerWidth;
     const h = window.innerHeight;
+    const zoom = engine.getEffectiveZoom(w, h);
     const results: ProbeReading[] = [];
 
     for (const pt of engine.debugProbePoints) {
-      const sx = (pt.x - engine.cameraX) * engine.zoom + w / 2;
-      const sy = (pt.y - engine.cameraY) * engine.zoom + h / 2;
+      const sx = (pt.x - engine.cameraX) * zoom + w / 2;
+      const sy = (pt.y - engine.cameraY) * zoom + h / 2;
       const px = Math.round(sx * dpr);
       const py = Math.round(sy * dpr);
       if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
@@ -252,6 +271,7 @@ export default function App() {
       hidingSpotId: engine.player.hidingSpotId,
       peekingSpotId: engine.player.peekingSpotId,
       peekingDoorId: engine.player.peekingDoorId,
+      peekingStairId: engine.player.peekingStairId,
       flashlightOn: engine.player.flashlightOn,
       battery: engine.player.battery,
       bruteState: engine.brute.state,
@@ -473,8 +493,8 @@ export default function App() {
         const h = engine.map.heliPos;
         const b = engine.map.lifeboatPos;
         return {
-          heliPos: { tx: h.tx, ty: h.ty },
-          lifeboatPos: { tx: b.tx, ty: b.ty },
+          heliPos: { tx: h.tx, ty: h.ty, x: h.x, y: h.y },
+          lifeboatPos: { tx: b.tx, ty: b.ty, x: b.x, y: b.y },
           tileDist: Math.hypot(h.tx - b.tx, h.ty - b.ty),
           inventory: [...engine.player.inventory],
           maxInventorySlots: engine.player.maxInventorySlots,
@@ -522,11 +542,57 @@ export default function App() {
             ...(engine.bruteTuning ?? buildBruteTuningFromDifficulty(engine.difficulty)),
           },
           customBruteTuning: engine.customBruteTuning,
+          difficulty: { ...engine.difficulty },
+          effectiveZoom: engine.getEffectiveZoom(window.innerWidth, window.innerHeight),
+          baseZoom: engine.zoom,
           bloodStreakCount: engine.map.bloodStreaks.length,
           playerX: engine.player.x,
           playerY: engine.player.y,
+          peekingStairId: engine.player.peekingStairId,
+          bruteState: engine.brute.state,
+          brutePos: { x: engine.brute.x, y: engine.brute.y },
+          brutePathLength: engine.brute.path.length,
+          investigateTarget: engine.brute.investigateTarget
+            ? {
+                x: engine.brute.investigateTarget.x,
+                y: engine.brute.investigateTarget.y,
+              }
+            : null,
+          observedEscape: {
+            heliRepairs: engine.brain.observedHeliRepairs,
+            heliActive: engine.brain.observedHeliActive,
+            lifeboatRepairs: engine.brain.observedLifeboatRepairs,
+            lifeboatActive: engine.brain.observedLifeboatActive,
+          },
+          activeNoiseRipples: engine.ripples.map((r) => ({
+            x: r.x,
+            y: r.y,
+            maxRadius: r.maxRadius,
+          })),
+          maxAcousticRadius: engine.maxEmittedAcousticRadius,
           nearestDoor,
         };
+      },
+      setBrutePose: (x: number, y: number, angle?: number) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.brute.x = x;
+        engine.brute.y = y;
+        if (angle !== undefined) engine.brute.angle = angle;
+        engine.brute.path = [];
+        engine.brute.pathRecalcTimer = 0;
+        renderImmediateFrame();
+        syncDebugTelemetry();
+      },
+      setPlayerPose: (x: number, y: number) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.player.x = x;
+        engine.player.y = y;
+        engine.cameraX = x;
+        engine.cameraY = y;
+        renderImmediateFrame();
+        syncDebugTelemetry();
       },
       testPositionInNearestDoor: (offsetFromCenterPx = 6) => {
         const engine = engineRef.current;
