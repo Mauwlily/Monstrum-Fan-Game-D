@@ -234,7 +234,7 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
           <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
             <span className="font-mono-num font-semibold text-slate-200">v{GAME_VERSION}</span>
             <span aria-hidden="true">·</span>
-            <span>Multi-Deck Cargo Vessel</span>
+            <span>3-Deck Cargo Vessel</span>
             <span aria-hidden="true">·</span>
             <span>Brute-Only Edition</span>
             <span aria-hidden="true">·</span>
@@ -283,12 +283,13 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
             </span>
           </h1>
           <p className="mt-3 max-w-2xl text-base leading-relaxed text-slate-300">
-            Trapped aboard a pitch-black procedural cargo vessel spanning an open Main Weather Deck
-            and a cramped Lower Hull linked by stairwells. Hauling parts inside a tight 4-slot pack
-            (expandable via the Crew Backpack), repair the{' '}
-            <span className="font-medium text-sky-300">Bow Lifeboat</span> or{' '}
-            <span className="font-medium text-amber-300">Stern Helicopter</span> while the Brute
-            patrols both routes.
+            Trapped aboard a sprawling 3-deck procedural freighter descending from the structured
+            Upper Deck into a maze-like Lower Hull laced with rupturing steam pipes. Read fixed
+            per-deck Paper Maps to orient yourself and repair the{' '}
+            <span className="font-medium text-amber-300">Deck 3 Helicopter</span>,{' '}
+            <span className="font-medium text-sky-300">Deck 2 Lifeboat</span>, or{' '}
+            <span className="font-medium text-emerald-300">Deck 1 Submarine</span> while the Brute
+            prowls every stairwell.
           </p>
         </div>
 
@@ -349,9 +350,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
 
             <div className="mt-6 border-t border-slate-800/80 pt-4 text-xs text-slate-400 leading-relaxed">
               <span className="font-semibold text-slate-300">Controls:</span> WASD Move · Shift
-              Sprint · C Sneak · Hold Q Peek Doors, Stairs &amp; Vents · E / Hold E Interact &amp;
-              Repair · F / Right-Click Flashlight · Left-Click Use Tool · G Drop · J Journal · F11
-              Fullscreen
+              Sprint · C Sneak · Hold Q Peek Doors, Stairs &amp; Vents · E / Hold E Interact, Repair
+              &amp; Read Deck Paper Maps · F / Right-Click Flashlight · Left-Click Use Tool · G
+              Drop · J Journal · F11 Fullscreen
             </div>
           </div>
 

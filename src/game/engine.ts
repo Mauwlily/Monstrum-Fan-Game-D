@@ -16,11 +16,14 @@ import {
   DroppedLight,
   EscapeProgress,
   FloorMaterial,
+  getDeckIndex,
+  getDeckLabel,
   getViewportResolutionScale,
   HidingSpot,
   HudSnapshot,
   ITEM_CATALOG,
   ItemId,
+  PaperMapStand,
   Particle,
   PlayerState,
   RoomLightSwitch,
@@ -30,6 +33,7 @@ import {
   ShipMap,
   SoundRipple,
   Stairwell,
+  SteamPipe,
   WorldPickup,
 } from './types';
 import {
@@ -92,6 +96,7 @@ export class MonstrumGameEngine {
   private repairTickTimer = 0;
   private heliPulseTimer = 0;
   private lifeboatPulseTimer = 0;
+  private subPulseTimer = 0;
   private activeRepairLabel: string | null = null;
   private activeRepairProgress = 0;
   public maxEmittedAcousticRadius = 0;
@@ -156,6 +161,10 @@ export class MonstrumGameEngine {
       preHidePos: null,
       climbingStairId: null,
       climbProgress: 0,
+      steamStaggerTimer: 0,
+      steamFogAlpha: 0,
+      openPaperMapDeck: null,
+      openPaperMapStandPos: null,
       inventory: ['GLOWSTICK'], // Start with 1 glowstick; 4 slots by default (+2 via Backpack)
       maxInventorySlots: 4,
       hasBackpack: false,
@@ -205,14 +214,19 @@ export class MonstrumGameEngine {
     this.escape = {
       lifeboatParts: [],
       heliParts: [],
+      submarineParts: [],
       lifeboatPartProgress: 0,
       heliPartProgress: 0,
+      submarinePartProgress: 0,
       lifeboatActivatingHold: 0,
       heliActivatingHold: 0,
+      submarineActivatingHold: 0,
       lifeboatState: 'IDLE',
       heliState: 'IDLE',
+      submarineState: 'IDLE',
       lifeboatActivationProgress: 0,
       heliActivationProgress: 0,
+      submarineActivationProgress: 0,
     };
 
     this.cameraX = this.player.x;
@@ -316,7 +330,7 @@ export class MonstrumGameEngine {
     this.zoom += (this.targetZoom - this.zoom) * Math.min(1, clampedDt * 12);
 
     this.updateDoors(clampedDt);
-    this.updateSteamVents(clampedDt);
+    this.updateSteamPipes(clampedDt);
     this.updateDroppedLights(clampedDt);
     this.updatePlayer(clampedDt, canvasWidth, canvasHeight);
     this.updateEscapeActivations(clampedDt);
@@ -404,28 +418,111 @@ export class MonstrumGameEngine {
     }
   }
 
-  private updateSteamVents(dt: number): void {
-    for (const v of this.map.steamVents) {
-      if (v.activeTimer > 0) {
-        v.activeTimer -= dt;
-        if (Math.random() < 0.45) {
+  public getSteamPipeClippedRangeTiles(pipe: SteamPipe): number {
+    let reach = 0;
+    for (let step = 0; step < pipe.rangeTiles; step++) {
+      const tx = pipe.nozzleTx + pipe.dirX * step;
+      const ty = pipe.nozzleTy + pipe.dirY * step;
+      if (tx < 0 || tx >= this.map.width || ty < 0 || ty >= this.map.height) break;
+      if (!isTileWalkable(this.map.tiles[ty][tx])) break;
+      const door = this.doorsByTile.get(ty * this.map.width + tx);
+      if (door && !door.isOpen && !door.isBroken) break;
+      reach = step + 1;
+    }
+    return reach;
+  }
+
+  private updateSteamPipes(dt: number): void {
+    const p = this.player;
+    const ts = this.map.tileSize;
+
+    for (const pipe of this.map.steamPipes) {
+      if (pipe.activeTimer > 0) {
+        pipe.activeTimer -= dt;
+        const clippedTiles = this.getSteamPipeClippedRangeTiles(pipe);
+        const jetLenPx = clippedTiles * ts;
+
+        if (clippedTiles > 0 && Math.random() < 0.72) {
+          const along = Math.random() * jetLenPx;
+          const nozzleWorldX = pipe.x - pipe.dirX * (ts * 0.42);
+          const nozzleWorldY = pipe.y - pipe.dirY * (ts * 0.42);
           this.particles.push({
-            x: v.x + (Math.random() - 0.5) * 14,
-            y: v.y + (Math.random() - 0.5) * 14,
-            vx: (Math.random() - 0.5) * 26,
-            vy: -18 - Math.random() * 24,
-            life: 0.65,
-            maxLife: 0.65,
-            size: 6 + Math.random() * 7,
-            color: 'rgba(203, 213, 225, 0.32)',
+            x: nozzleWorldX + pipe.dirX * along + (Math.random() - 0.5) * 10,
+            y: nozzleWorldY + pipe.dirY * along + (Math.random() - 0.5) * 10,
+            vx: pipe.dirX * (170 + Math.random() * 110) + (Math.random() - 0.5) * 26,
+            vy: pipe.dirY * (170 + Math.random() * 110) + (Math.random() - 0.5) * 26,
+            life: 0.42,
+            maxLife: 0.42,
+            size: 5 + Math.random() * 7,
+            color: 'rgba(226, 232, 240, 0.42)',
           });
         }
+
+        // Hit detection against exposed player inside clipped directional steam plume
+        if (
+          clippedTiles > 0 &&
+          p.hidingSpotId === null &&
+          p.climbingStairId === null
+        ) {
+          const originX = pipe.x - pipe.dirX * (ts * 0.46);
+          const originY = pipe.y - pipe.dirY * (ts * 0.46);
+          const relX = p.x - originX;
+          const relY = p.y - originY;
+          const proj = relX * pipe.dirX + relY * pipe.dirY;
+          const perp = Math.abs(relX * -pipe.dirY + relY * pipe.dirX);
+          if (proj >= -4 && proj <= jetLenPx + ts * 0.36 && perp <= ts * 0.46) {
+            if (!pipe.hitPlayerThisBurst) {
+              pipe.hitPlayerThisBurst = true;
+              p.steamStaggerTimer = 2.6;
+              p.steamFogAlpha = Math.min(1, p.steamFogAlpha + 0.92);
+              p.sprinting = false;
+              this.screenShake = Math.max(this.screenShake, 7.5);
+              this.audio.playSteamPipeBurst(pipe.x - p.x, 0, true);
+              this.emitNoise(p.x, p.y, 780, 'rgba(248, 250, 252, 0.78)', true, 0.92);
+              this.showToast('Scalding steam blast — vision obscured & staggered!', 2.6);
+              this.emitHud();
+            } else {
+              p.steamFogAlpha = Math.min(1, Math.max(p.steamFogAlpha, 0.85));
+            }
+          }
+        }
+      } else if (pipe.warningTimer > 0) {
+        pipe.warningTimer -= dt;
+        if (Math.random() < 0.38) {
+          const nozzleX = pipe.x - pipe.dirX * (ts * 0.44);
+          const nozzleY = pipe.y - pipe.dirY * (ts * 0.44);
+          this.particles.push({
+            x: nozzleX + (Math.random() - 0.5) * 6,
+            y: nozzleY + (Math.random() - 0.5) * 6,
+            vx: pipe.dirX * 55 + (Math.random() - 0.5) * 18,
+            vy: pipe.dirY * 55 + (Math.random() - 0.5) * 18,
+            life: 0.35,
+            maxLife: 0.35,
+            size: 3 + Math.random() * 3,
+            color: 'rgba(251, 191, 36, 0.42)',
+          });
+        }
+        if (pipe.warningTimer <= 0) {
+          pipe.activeTimer = 2.0;
+          pipe.cycleTimer = pipe.nextInterval;
+          pipe.hitPlayerThisBurst = false;
+          const occ = this.computeAcousticOcclusion(pipe.x, pipe.y, p.x, p.y);
+          const dist = this.getEffectiveNoiseDistance(pipe.x, pipe.y, p.x, p.y);
+          if (dist < 620) {
+            this.audio.playSteamPipeBurst(pipe.x - p.x, occ, false);
+          }
+          this.emitNoise(pipe.x, pipe.y, 440, 'rgba(203, 213, 225, 0.45)', false);
+        }
       } else {
-        v.timer -= dt;
-        if (v.timer <= 0) {
-          v.activeTimer = 2.2;
-          v.timer = 11 + Math.random() * 10;
-          this.emitNoise(v.x, v.y, 330, 'rgba(148, 163, 184, 0.45)', false);
+        pipe.cycleTimer -= dt;
+        if (pipe.cycleTimer <= 0) {
+          pipe.warningTimer = 1.35;
+          const occ = this.computeAcousticOcclusion(pipe.x, pipe.y, p.x, p.y);
+          const dist = this.getEffectiveNoiseDistance(pipe.x, pipe.y, p.x, p.y);
+          if (dist < 560) {
+            this.audio.playSteamPipeWarning(pipe.x - p.x, occ);
+          }
+          this.emitNoise(pipe.x, pipe.y, 260, 'rgba(251, 191, 36, 0.34)', false);
         }
       }
     }
@@ -462,6 +559,26 @@ export class MonstrumGameEngine {
 
   private updatePlayer(dt: number, canvasWidth: number, canvasHeight: number): void {
     const p = this.player;
+
+    if (p.steamStaggerTimer > 0) {
+      p.steamStaggerTimer = Math.max(0, p.steamStaggerTimer - dt);
+    }
+    if (p.steamFogAlpha > 0) {
+      p.steamFogAlpha = Math.max(0, p.steamFogAlpha - dt * 0.24);
+    }
+
+    // Auto-close stationary Paper Map if player moves away from stand or climbs/hides
+    if (p.openPaperMapDeck !== null) {
+      const stand = p.openPaperMapStandPos;
+      if (
+        !stand ||
+        p.hidingSpotId !== null ||
+        p.climbingStairId !== null ||
+        Math.hypot(p.x - stand.x, p.y - stand.y) > 95
+      ) {
+        this.closePaperMap(false);
+      }
+    }
 
     // Flash checked highlight fade
     for (const spot of this.map.hidingSpots) {
@@ -547,15 +664,14 @@ export class MonstrumGameEngine {
 
           this.audio.playStairTraversal(0);
           this.emitNoise(dest.x, dest.y, 210, 'rgba(148, 163, 184, 0.35)', true, 0.55);
-          this.showToast(
-            `${dest.deck === 'LOWER' ? 'Lower Hull Deck' : 'Main Weather Deck'} — ${dest.room}`
-          );
+          this.showToast(`${getDeckLabel(dest.deck)} — ${dest.room}`);
           this.emitHud();
         }
 
         p.stamina = Math.min(p.maxStamina, p.stamina + dt * 5);
         this.escape.lifeboatActivatingHold = 0;
         this.escape.heliActivatingHold = 0;
+        this.escape.submarineActivatingHold = 0;
         this.activeRepairLabel = null;
         this.activeRepairProgress = 0;
         return;
@@ -626,6 +742,7 @@ export class MonstrumGameEngine {
       if (p.stamina >= 25) p.exhausted = false;
       this.escape.lifeboatActivatingHold = 0;
       this.escape.heliActivatingHold = 0;
+      this.escape.submarineActivatingHold = 0;
       this.activeRepairLabel = null;
       this.activeRepairProgress = 0;
       return;
@@ -696,7 +813,8 @@ export class MonstrumGameEngine {
       p.peekingStairId = null;
     }
 
-    const sprintKey = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
+    const isStaggered = p.steamStaggerTimer > 0;
+    const sprintKey = !isStaggered && (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight'));
     if (sprintKey && moving && !p.exhausted && p.stamina > 0) {
       // Starting a sprint cleanly exits toggleable sneak stance
       p.crouching = false;
@@ -717,7 +835,8 @@ export class MonstrumGameEngine {
       if (p.stamina >= 25) p.exhausted = false;
     }
 
-    const speed = p.sprinting ? 212 : p.crouching ? 86 : 142;
+    const baseSpeed = p.sprinting ? 212 : p.crouching ? 86 : 142;
+    const speed = isStaggered ? baseSpeed * 0.62 : baseSpeed;
 
     if (moving) {
       const prevX = p.x;
@@ -745,9 +864,19 @@ export class MonstrumGameEngine {
     this.updateEscapeInteractHold(dt);
   }
 
-  public getHeldPartForRoute(route: 'LIFEBOAT' | 'HELI'): ItemId | null {
-    const targetCategory = route === 'LIFEBOAT' ? 'LIFEBOAT_PART' : 'HELI_PART';
-    const installed = route === 'LIFEBOAT' ? this.escape.lifeboatParts : this.escape.heliParts;
+  public getHeldPartForRoute(route: 'LIFEBOAT' | 'HELI' | 'SUBMARINE'): ItemId | null {
+    const targetCategory =
+      route === 'LIFEBOAT'
+        ? 'LIFEBOAT_PART'
+        : route === 'HELI'
+          ? 'HELI_PART'
+          : 'SUBMARINE_PART';
+    const installed =
+      route === 'LIFEBOAT'
+        ? this.escape.lifeboatParts
+        : route === 'HELI'
+          ? this.escape.heliParts
+          : this.escape.submarineParts;
     for (const itemId of this.player.inventory) {
       const meta = ITEM_CATALOG[itemId];
       if (meta.category === targetCategory && !installed.includes(itemId)) {
@@ -761,6 +890,8 @@ export class MonstrumGameEngine {
     const p = this.player;
     const distLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
     const distHeli = Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y);
+    const distSubDock = Math.hypot(p.x - this.map.submarinePos.x, p.y - this.map.submarinePos.y);
+    const distSubLever = Math.hypot(p.x - this.map.submarinePos.leverX, p.y - this.map.submarinePos.leverY);
 
     let label: string | null = null;
     let progress = 0;
@@ -931,6 +1062,96 @@ export class MonstrumGameEngine {
       this.escape.heliActivatingHold = Math.max(0, this.escape.heliActivatingHold - dt * 1.4);
     }
 
+    // 3. Submarine Moonpool partial repair (at dock) OR Floodgate Launch Lever (at lever console)
+    const heldSubPart = this.getHeldPartForRoute('SUBMARINE');
+    let subPartHolding = false;
+    let subLeverHolding = false;
+    if (this.holdingInteract && this.escape.submarineState === 'IDLE') {
+      if (this.escape.submarineParts.length < 3 && heldSubPart && distSubDock < 92) {
+        subPartHolding = true;
+        this.escape.submarinePartProgress = Math.min(1, this.escape.submarinePartProgress + dt / 5.0);
+        label = `Installing ${ITEM_CATALOG[heldSubPart].name}...`;
+        progress = this.escape.submarinePartProgress;
+
+        this.repairTickTimer -= dt;
+        if (this.repairTickTimer <= 0) {
+          this.repairTickTimer = 0.78;
+          this.audio.playRepairTick('SUBMARINE', heldSubPart);
+          this.emitNoise(
+            this.map.submarinePos.x,
+            this.map.submarinePos.y,
+            880,
+            'rgba(45, 212, 191, 0.52)',
+            true,
+            0.88
+          );
+          for (let i = 0; i < 4; i++) {
+            this.particles.push({
+              x: this.map.submarinePos.x + (Math.random() - 0.5) * 24,
+              y: this.map.submarinePos.y + (Math.random() - 0.5) * 24,
+              vx: (Math.random() - 0.5) * 65,
+              vy: (Math.random() - 0.5) * 65,
+              life: 0.35,
+              maxLife: 0.35,
+              size: 2.5,
+              color: heldSubPart === 'SUB_BATTERY' ? '#2dd4bf' : '#fde68a',
+            });
+          }
+        }
+
+        if (this.escape.submarinePartProgress >= 1) {
+          this.escape.submarinePartProgress = 0;
+          const idx = p.inventory.indexOf(heldSubPart);
+          if (idx !== -1) p.inventory.splice(idx, 1);
+          if (p.selectedSlot >= p.inventory.length) {
+            p.selectedSlot = Math.max(0, p.inventory.length - 1);
+          }
+          this.escape.submarineParts.push(heldSubPart);
+          this.audio.playRepairComplete();
+          this.emitNoise(
+            this.map.submarinePos.x,
+            this.map.submarinePos.y,
+            960,
+            'rgba(45, 212, 191, 0.65)',
+            true,
+            0.94
+          );
+          this.showToast(
+            `${ITEM_CATALOG[heldSubPart].name} installed on Submarine (${this.escape.submarineParts.length}/3)!`
+          );
+          this.emitHud();
+        }
+      } else if (this.escape.submarineParts.length === 3 && distSubLever < 78) {
+        subLeverHolding = true;
+        this.escape.submarineActivatingHold = Math.min(1, this.escape.submarineActivatingHold + dt / 1.4);
+        label = 'Pulling Floodgate Launch Lever...';
+        progress = this.escape.submarineActivatingHold;
+        if (this.escape.submarineActivatingHold >= 1) {
+          this.escape.submarineActivatingHold = 0;
+          this.escape.submarineState = 'ACTIVATING';
+          this.escape.submarineActivationProgress = 0;
+          this.subPulseTimer = 0.25;
+          this.audio.playEscapeActivationStart('SUBMARINE');
+          this.emitNoise(
+            this.map.submarinePos.leverX,
+            this.map.submarinePos.leverY,
+            960,
+            'rgba(45, 212, 191, 0.72)',
+            true,
+            0.98
+          );
+          this.showToast('Moonpool floodgates opening — survive the deluge until launch pressure!');
+          this.emitHud();
+        }
+      }
+    }
+    if (!subPartHolding) {
+      this.escape.submarinePartProgress = Math.max(0, this.escape.submarinePartProgress - dt * 0.14);
+    }
+    if (!subLeverHolding) {
+      this.escape.submarineActivatingHold = Math.max(0, this.escape.submarineActivatingHold - dt * 1.4);
+    }
+
     this.activeRepairLabel = label;
     this.activeRepairProgress = progress;
   }
@@ -1000,6 +1221,43 @@ export class MonstrumGameEngine {
         this.escape.heliState = 'READY';
         this.audio.playEscapeReadyChime('HELI');
         this.showToast('HELICOPTER AT FLIGHT RPM — Press E on the helideck to escape!');
+        this.emitHud();
+      }
+    }
+
+    if (this.escape.submarineState === 'ACTIVATING') {
+      this.escape.submarineActivationProgress = Math.min(
+        1,
+        this.escape.submarineActivationProgress + dt / 9.5
+      );
+      this.subPulseTimer -= dt;
+      if (this.subPulseTimer <= 0) {
+        this.subPulseTimer = 1.1;
+        const occ = this.computeAcousticOcclusion(
+          this.map.submarinePos.x,
+          this.map.submarinePos.y,
+          p.x,
+          p.y
+        );
+        this.audio.playEscapeActivationPulse(
+          'SUBMARINE',
+          this.escape.submarineActivationProgress,
+          this.map.submarinePos.x - p.x,
+          occ
+        );
+        this.emitNoise(
+          this.map.submarinePos.x,
+          this.map.submarinePos.y,
+          960,
+          'rgba(45, 212, 191, 0.62)',
+          true,
+          0.96
+        );
+      }
+      if (this.escape.submarineActivationProgress >= 1) {
+        this.escape.submarineState = 'READY';
+        this.audio.playEscapeReadyChime('SUBMARINE');
+        this.showToast('SUBMARINE FLOODED & LAUNCH READY — Press E at Submarine Bay to dive!');
         this.emitHud();
       }
     }
@@ -1133,8 +1391,8 @@ export class MonstrumGameEngine {
 
     const bTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(b.x / this.map.tileSize)));
     const bTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(b.y / this.map.tileSize)));
-    const bruteCurrRoom = this.map.roomGrid[bTy][bTx];
-    this.brain.markRoomVisited(bruteCurrRoom, this.elapsedSeconds);
+    const bruteCurrRoomId = this.map.roomIdGrid[bTy][bTx];
+    this.brain.markRoomVisited(bruteCurrRoomId, this.elapsedSeconds);
 
     // 1. Stunned state (Fire Extinguisher CO2 blast)
     if (b.state === 'STUNNED') {
@@ -1142,7 +1400,7 @@ export class MonstrumGameEngine {
       if (b.stunTimer <= 0) {
         b.state = 'SEARCH_ROOM';
         b.alertTimer = 7.5;
-        this.queueSearchRoomHidingSpots(bruteCurrRoom, b.x, b.y);
+        this.queueSearchRoomHidingSpots(bruteCurrRoomId, b.x, b.y);
       }
       return;
     }
@@ -1357,7 +1615,7 @@ export class MonstrumGameEngine {
                   ? 190
                   : 120);
 
-            const bDeck = this.map.deckGrid[bTy]?.[bTx] ?? 'MAIN';
+            const bDeck = this.map.deckGrid[bTy]?.[bTx] ?? 'DECK_2';
             const arrivedLanding = b.pursuitStairId
               ? this.map.stairwells.find((s) => s.id === b.pursuitStairId && s.deck === bDeck)
               : undefined;
@@ -1404,7 +1662,7 @@ export class MonstrumGameEngine {
               b.chaseAggroTimer = 2.8;
               return;
             }
-            this.finishPursuitIntoSweep(bruteCurrRoom);
+            this.finishPursuitIntoSweep(bruteCurrRoomId);
           }
         }
         return;
@@ -1416,7 +1674,7 @@ export class MonstrumGameEngine {
         this.followTarget(b, target.x, target.y, speeds.chase, dt, true);
         const distToOver = Math.hypot(target.x - b.x, target.y - b.y);
         if (distToOver < 34 || b.chaseAggroTimer <= 0) {
-          this.finishPursuitIntoSweep(bruteCurrRoom);
+          this.finishPursuitIntoSweep(bruteCurrRoomId);
         }
         return;
       }
@@ -1437,7 +1695,7 @@ export class MonstrumGameEngine {
       if (!spot) {
         b.watchedPlayerHideSpotId = null;
         this.checkHidingStallTimer = 0;
-        this.advanceHidingSearch(bruteCurrRoom);
+        this.advanceHidingSearch(bruteCurrRoomId);
         return;
       }
 
@@ -1484,7 +1742,7 @@ export class MonstrumGameEngine {
             return;
           }
           b.watchedPlayerHideSpotId = null;
-          this.advanceHidingSearch(bruteCurrRoom);
+          this.advanceHidingSearch(bruteCurrRoomId);
         }
       }
       return;
@@ -1511,13 +1769,13 @@ export class MonstrumGameEngine {
             this.emitNoise(sw.x, sw.y, 165, 'rgba(245, 158, 11, 0.35)', false);
           }
         }
-        const arrivalRoom = st.room;
-        this.brain.markRoomCleared(arrivalRoom, this.elapsedSeconds);
+        const arrivalRoomId = st.roomId;
+        this.brain.markRoomCleared(arrivalRoomId, this.elapsedSeconds);
         const shouldSweep = st.sweepHidingOnArrival;
         this.brain.stalkTarget = null;
 
         if (shouldSweep) {
-          this.queueSearchRoomHidingSpots(arrivalRoom, b.x, b.y);
+          this.queueSearchRoomHidingSpots(arrivalRoomId, b.x, b.y);
           if (b.searchSpotsQueue.length > 0) {
             b.currentInspectSpotId = b.searchSpotsQueue.shift()!;
             b.inspectTimer = 0;
@@ -1539,7 +1797,7 @@ export class MonstrumGameEngine {
         this.followTarget(b, target.x, target.y, speeds.investigate, dt, false);
       } else {
         b.investigateTarget = null;
-        this.queueSearchRoomHidingSpots(bruteCurrRoom, b.x, b.y);
+        this.queueSearchRoomHidingSpots(bruteCurrRoomId, b.x, b.y);
         if (b.searchSpotsQueue.length > 0) {
           b.currentInspectSpotId = b.searchSpotsQueue.shift()!;
           b.inspectTimer = 0;
@@ -1558,7 +1816,7 @@ export class MonstrumGameEngine {
       b.targetAngle += dt * 1.9 * b.scanSweepDir;
       this.turnBruteTowardTarget(dt, 5);
       if (b.alertTimer <= 0) {
-        this.brain.markRoomCleared(bruteCurrRoom, this.elapsedSeconds);
+        this.brain.markRoomCleared(bruteCurrRoomId, this.elapsedSeconds);
         b.state = 'ROAM';
         this.pickRandomRoamTarget();
       }
@@ -1585,12 +1843,13 @@ export class MonstrumGameEngine {
       const wy = (b.roamTarget.ty + 0.5) * this.map.tileSize;
       const dist = Math.hypot(wx - b.x, wy - b.y);
       if (dist < 28) {
-        this.brain.markRoomCleared(b.roamTarget.room, this.elapsedSeconds);
+        const targetRoomId = b.roamTarget.roomId ?? bruteCurrRoomId;
+        this.brain.markRoomCleared(targetRoomId, this.elapsedSeconds);
         b.pauseAtWaypointTimer = 1.0 + Math.random() * 1.25;
         b.scanSweepDir = Math.random() > 0.5 ? 1 : -1;
         // Occasionally during random roaming, Brute checks a nearby unchecked hiding spot!
         if (Math.random() < 0.32) {
-          this.queueSearchRoomHidingSpots(b.roamTarget.room, b.x, b.y, 1);
+          this.queueSearchRoomHidingSpots(targetRoomId, b.x, b.y, 1);
           if (b.searchSpotsQueue.length > 0) {
             b.currentInspectSpotId = b.searchSpotsQueue.shift()!;
             b.state = 'CHECK_HIDING';
@@ -1604,16 +1863,16 @@ export class MonstrumGameEngine {
     }
   }
 
-  private finishPursuitIntoSweep(currRoom: RoomName): void {
+  private finishPursuitIntoSweep(currRoomId: number): void {
     const b = this.brute;
     b.lastKnownPlayerPos = null;
     b.chaseOvershootPos = null;
     b.lastSeenPlayerVelocity = null;
-    this.queueSearchRoomHidingSpots(currRoom, b.x, b.y);
+    this.queueSearchRoomHidingSpots(currRoomId, b.x, b.y);
     this.brain.initiateChaseLossSweep(
       b.x,
       b.y,
-      currRoom,
+      currRoomId,
       this.elapsedSeconds,
       this.difficulty.intelligence,
       this.bruteTuning
@@ -1631,13 +1890,17 @@ export class MonstrumGameEngine {
   }
 
   private queueSearchRoomHidingSpots(
-    room: RoomName,
+    roomId: number,
     cx: number,
     cy: number,
     capOverride?: number
   ): void {
+    const tx = Math.max(0, Math.min(this.map.width - 1, Math.floor(cx / this.map.tileSize)));
+    const ty = Math.max(0, Math.min(this.map.height - 1, Math.floor(cy / this.map.tileSize)));
+    const roomName = this.brain.roomMemory.get(roomId)?.room ?? this.map.roomGrid[ty][tx];
     let spots = this.brain.getRoomUncheckedSpots(
-      room,
+      roomId,
+      roomName,
       cx,
       cy,
       this.elapsedSeconds,
@@ -1650,7 +1913,7 @@ export class MonstrumGameEngine {
     this.brute.searchSpotsQueue = spots;
   }
 
-  private advanceHidingSearch(currRoom: RoomName): void {
+  private advanceHidingSearch(currRoomId: number): void {
     const b = this.brute;
     if (b.searchSpotsQueue.length > 0) {
       b.currentInspectSpotId = b.searchSpotsQueue.shift()!;
@@ -1658,7 +1921,7 @@ export class MonstrumGameEngine {
       b.state = 'CHECK_HIDING';
     } else {
       b.currentInspectSpotId = null;
-      this.brain.markRoomCleared(currRoom, this.elapsedSeconds);
+      this.brain.markRoomCleared(currRoomId, this.elapsedSeconds);
       if (this.brain.advanceStalkQueue(this.elapsedSeconds)) {
         b.state = 'STALK';
       } else {
@@ -2190,6 +2453,10 @@ export class MonstrumGameEngine {
     return bestTarget;
   }
 
+  private deckCenterY(deck: ShipDeck): number {
+    return this.map.deckBounds[deck].centerY * this.map.tileSize;
+  }
+
   private maybeEmitVerticalEchoRipple(
     wx: number,
     wy: number,
@@ -2203,9 +2470,9 @@ export class MonstrumGameEngine {
     const srcDeck = this.map.deckGrid[ty][tx];
     if (srcDeck === pDeck) return;
 
-    const localY = wy - (srcDeck === 'LOWER' ? 30 * ts : 0);
-    const projectedY = localY + (pDeck === 'LOWER' ? 30 * ts : 0);
-    if (this.getEffectiveNoiseDistance(wx, wy, this.player.x, this.player.y) > 420) return;
+    const localY = wy - this.deckCenterY(srcDeck);
+    const projectedY = localY + this.deckCenterY(pDeck);
+    if (this.getEffectiveNoiseDistance(wx, wy, this.player.x, this.player.y) > 460) return;
 
     this.ripples.push({
       id: this.nextId++,
@@ -2228,20 +2495,36 @@ export class MonstrumGameEngine {
     const d2 = this.map.deckGrid[ty2][tx2];
     if (d1 === d2) return Math.hypot(x2 - x1, y2 - y1);
 
-    // 1. Acoustic path via stairwell shafts
+    const deckDiff = Math.abs(getDeckIndex(d1) - getDeckIndex(d2));
+
+    // 1. Acoustic paths via stairwell shafts (1-hop direct or 2-hop via Deck 2)
     let best = Infinity;
-    for (const s of this.map.stairwells) {
-      if (s.deck !== d1) continue;
-      const target = this.map.stairwells.find((o) => o.id === s.targetStairId);
-      if (!target) continue;
-      const distViaStairs =
-        Math.hypot(s.x - x1, s.y - y1) + Math.hypot(x2 - target.x, y2 - target.y) + 145;
-      if (distViaStairs < best) best = distViaStairs;
+    for (const s1 of this.map.stairwells) {
+      if (s1.deck !== d1) continue;
+      const t1 = this.map.stairwells.find((o) => o.id === s1.targetStairId);
+      if (!t1) continue;
+      if (t1.deck === d2) {
+        const distViaStairs =
+          Math.hypot(s1.x - x1, s1.y - y1) + Math.hypot(x2 - t1.x, y2 - t1.y) + 145;
+        if (distViaStairs < best) best = distViaStairs;
+      } else if (deckDiff === 2) {
+        for (const s2 of this.map.stairwells) {
+          if (s2.deck !== t1.deck) continue;
+          const t2 = this.map.stairwells.find((o) => o.id === s2.targetStairId);
+          if (!t2 || t2.deck !== d2) continue;
+          const dist2Hop =
+            Math.hypot(s1.x - x1, s1.y - y1) +
+            Math.hypot(s2.x - t1.x, s2.y - t1.y) +
+            Math.hypot(x2 - t2.x, y2 - t2.y) +
+            260;
+          if (dist2Hop < best) best = dist2Hop;
+        }
+      }
     }
 
     // 2. Vertical sound bleed directly through ship grates, cargo hatches & companionway openings
-    const localY1 = y1 - (d1 === 'LOWER' ? 30 * ts : 0);
-    const localY2 = y2 - (d2 === 'LOWER' ? 30 * ts : 0);
+    const localY1 = y1 - this.deckCenterY(d1);
+    const localY2 = y2 - this.deckCenterY(d2);
     const horizDist = Math.hypot(x2 - x1, localY2 - localY1);
 
     const mat1 = this.map.floorMaterial[ty1][tx1];
@@ -2257,7 +2540,7 @@ export class MonstrumGameEngine {
       mat2 === 'GRATING' ||
       mat1 === 'CARGO' ||
       mat2 === 'CARGO';
-    const platePenalty = openConductive ? 140 : 225;
+    const platePenalty = (openConductive ? 140 : 225) + (deckDiff - 1) * 190;
 
     return Math.min(best, horizDist + platePenalty);
   }
@@ -2281,10 +2564,9 @@ export class MonstrumGameEngine {
       return { dx, dy, dist: Math.hypot(dx, dy), muffled: false };
     }
 
-    // Opposite decks: combine stairwell shaft acoustic path + vertical grate/hull-plate proximity
     const dist = this.getEffectiveNoiseDistance(p.x, p.y, b.x, b.y);
-    const localPy = p.y - (pDeck === 'LOWER' ? 30 * this.map.tileSize : 0);
-    const localBy = b.y - (bDeck === 'LOWER' ? 30 * this.map.tileSize : 0);
+    const localPy = p.y - this.deckCenterY(pDeck);
+    const localBy = b.y - this.deckCenterY(bDeck);
     return {
       dx: b.x - p.x,
       dy: localBy - localPy,
@@ -2305,6 +2587,9 @@ export class MonstrumGameEngine {
     if (t === 'EXTERIOR_DECK' || t === 'ESCAPE_HELI' || t === 'ESCAPE_LIFEBOAT') {
       return 'WEATHER';
     }
+    if (t === 'ESCAPE_SUBMARINE') {
+      return 'GRATING';
+    }
     return this.map.floorMaterial[ty][tx] ?? 'STEEL';
   }
 
@@ -2321,9 +2606,10 @@ export class MonstrumGameEngine {
     let sy1 = y1;
     let sy2 = y2;
     if (d1 !== d2) {
-      occlusion += 0.48;
-      sy1 = y1 - (d1 === 'LOWER' ? 30 * ts : 0);
-      sy2 = y2 - (d2 === 'LOWER' ? 30 * ts : 0);
+      const deckDiff = Math.abs(getDeckIndex(d1) - getDeckIndex(d2));
+      occlusion += 0.42 * deckDiff;
+      sy1 = y1 - this.deckCenterY(d1);
+      sy2 = y2 - this.deckCenterY(d2);
     }
 
     const dx = x2 - x1;
@@ -2332,8 +2618,8 @@ export class MonstrumGameEngine {
     if (len < ts * 0.5) return Math.min(0.94, occlusion);
 
     const stepSize = ts * 0.45;
-    const steps = Math.min(48, Math.ceil(len / stepSize));
-    const deckYOffset = d2 === 'LOWER' ? 30 * ts : 0;
+    const steps = Math.min(54, Math.ceil(len / stepSize));
+    const deckYOffset = this.deckCenterY(d2);
     let lastKey = -1;
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
@@ -2381,14 +2667,15 @@ export class MonstrumGameEngine {
       }
     }
 
-    // Nearest active steam vent intensity
+    // Nearest active steam pipe burst / warning intensity
     let nearestVentIntensity = 0;
-    for (const v of this.map.steamVents) {
-      if (v.activeTimer <= 0) continue;
-      const d = this.getEffectiveNoiseDistance(v.x, v.y, p.x, p.y);
+    for (const pipe of this.map.steamPipes) {
+      if (pipe.activeTimer <= 0 && pipe.warningTimer <= 0) continue;
+      const d = this.getEffectiveNoiseDistance(pipe.x, pipe.y, p.x, p.y);
       if (d < 460) {
-        const occ = this.computeAcousticOcclusion(v.x, v.y, p.x, p.y);
-        const inten = Math.pow(1 - d / 460, 1.35) * (1 - occ * 0.65);
+        const occ = this.computeAcousticOcclusion(pipe.x, pipe.y, p.x, p.y);
+        const mult = pipe.activeTimer > 0 ? 1.0 : 0.45;
+        const inten = Math.pow(1 - d / 460, 1.35) * (1 - occ * 0.65) * mult;
         if (inten > nearestVentIntensity) nearestVentIntensity = inten;
       }
     }
@@ -2503,6 +2790,14 @@ export class MonstrumGameEngine {
     this.emitHud();
   }
 
+  public closePaperMap(playSound = true): void {
+    if (this.player.openPaperMapDeck === null) return;
+    this.player.openPaperMapDeck = null;
+    this.player.openPaperMapStandPos = null;
+    if (playSound) this.audio.playPaperMapToggle(false);
+    this.emitHud();
+  }
+
   public useSelectedItem(): void {
     if (this.ended || this.player.hidingSpotId !== null || this.player.climbingStairId !== null) return;
     const slot = this.player.selectedSlot;
@@ -2511,8 +2806,18 @@ export class MonstrumGameEngine {
 
     const p = this.player;
     const meta = ITEM_CATALOG[itemId];
-    if (meta.category === 'LIFEBOAT_PART' || meta.category === 'HELI_PART') {
-      this.showToast(`Take ${meta.name} to the ${meta.category === 'HELI_PART' ? 'Stern Helideck' : 'Bow Lifeboat Davit'} and Hold E.`);
+    if (
+      meta.category === 'LIFEBOAT_PART' ||
+      meta.category === 'HELI_PART' ||
+      meta.category === 'SUBMARINE_PART'
+    ) {
+      const destLabel =
+        meta.category === 'HELI_PART'
+          ? 'Deck 3 Stern Helideck'
+          : meta.category === 'LIFEBOAT_PART'
+            ? 'Deck 2 Bow Lifeboat Davit'
+            : 'Deck 1 Submarine Bay';
+      this.showToast(`Take ${meta.name} to the ${destLabel} and Hold E.`);
       return;
     }
 
@@ -2610,6 +2915,11 @@ export class MonstrumGameEngine {
     if (this.ended || this.player.climbingStairId !== null) return;
     const p = this.player;
 
+    if (p.openPaperMapDeck !== null && !cuttersOnly) {
+      this.closePaperMap(true);
+      return;
+    }
+
     // 1. Exit hiding spot if currently hiding (return cleanly to saved entry position, keep flashlight OFF)
     if (p.hidingSpotId !== null && !cuttersOnly) {
       if (p.preHidePos && !this.collidesAt(p.preHidePos.x, p.preHidePos.y, p.radius, false)) {
@@ -2630,6 +2940,18 @@ export class MonstrumGameEngine {
     const nearest = this.findNearestInteractable();
     if (!nearest) return;
 
+    if (nearest.kind === 'PAPER_MAP' && !cuttersOnly) {
+      p.openPaperMapDeck = nearest.stand.deck;
+      p.openPaperMapStandPos = {
+        x: nearest.stand.x,
+        y: nearest.stand.y,
+        deck: nearest.stand.deck,
+      };
+      this.audio.playPaperMapToggle(true);
+      this.emitHud();
+      return;
+    }
+
     if (nearest.kind === 'ESCAPE_LIFEBOAT' && !cuttersOnly) {
       if (this.escape.lifeboatState === 'READY') {
         this.triggerVictory('LIFEBOAT');
@@ -2640,6 +2962,13 @@ export class MonstrumGameEngine {
     if (nearest.kind === 'ESCAPE_HELI' && !cuttersOnly) {
       if (this.escape.heliState === 'READY') {
         this.triggerVictory('HELICOPTER');
+      }
+      return;
+    }
+
+    if (nearest.kind === 'ESCAPE_SUBMARINE' && !cuttersOnly) {
+      if (this.escape.submarineState === 'READY') {
+        this.triggerVictory('SUBMARINE');
       }
       return;
     }
@@ -2751,7 +3080,9 @@ export class MonstrumGameEngine {
           p.inventory.push(c.item);
           this.audio.playContainerSearch(true);
           this.showToast(
-            meta.category === 'LIFEBOAT_PART' || meta.category === 'HELI_PART'
+            meta.category === 'LIFEBOAT_PART' ||
+              meta.category === 'HELI_PART' ||
+              meta.category === 'SUBMARINE_PART'
               ? `Picked up ${meta.name} (check [J] Journal).`
               : `Picked up ${meta.name}.`
           );
@@ -2810,8 +3141,10 @@ export class MonstrumGameEngine {
     | { kind: 'CONTAINER'; container: Container; dist: number; prompt: string; sub: string }
     | { kind: 'PICKUP'; pickup: WorldPickup; dist: number; prompt: string; sub: string }
     | { kind: 'HIDING'; spot: HidingSpot; dist: number; prompt: string; sub: string }
+    | { kind: 'PAPER_MAP'; stand: PaperMapStand; dist: number; prompt: string; sub: string }
     | { kind: 'ESCAPE_LIFEBOAT'; dist: number; prompt: string; sub: string }
     | { kind: 'ESCAPE_HELI'; dist: number; prompt: string; sub: string }
+    | { kind: 'ESCAPE_SUBMARINE'; subTarget: 'DOCK' | 'LEVER'; dist: number; prompt: string; sub: string }
     | null {
     const p = this.player;
     if (p.hidingSpotId !== null || p.climbingStairId !== null) {
@@ -2819,7 +3152,7 @@ export class MonstrumGameEngine {
     }
 
     let best: ReturnType<MonstrumGameEngine['findNearestInteractable']> = null;
-    let bestDist = 72;
+    let bestDist = 78;
 
     // Escape zones
     const dLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
@@ -2878,7 +3211,66 @@ export class MonstrumGameEngine {
       bestDist = dHeli;
     }
 
+    const dSubDock = Math.hypot(p.x - this.map.submarinePos.x, p.y - this.map.submarinePos.y);
+    const dSubLever = Math.hypot(p.x - this.map.submarinePos.leverX, p.y - this.map.submarinePos.leverY);
+    if ((dSubDock < 92 || dSubLever < 78) && Math.min(dSubDock, dSubLever) < bestDist) {
+      const heldSub = this.getHeldPartForRoute('SUBMARINE');
+      const nearLever = dSubLever < 78 && (this.escape.submarineParts.length === 3 || dSubLever <= dSubDock);
+      let prompt = `Deck 1 Submarine Dock (${this.escape.submarineParts.length}/3)`;
+      let sub = 'Press J to view required Submarine parts in your Field Journal.';
+      if (this.escape.submarineState === 'READY') {
+        prompt = 'Press E to Board Submarine & Dive!';
+        sub = 'Moonpool floodgates open & hull pressurized — dive now!';
+      } else if (this.escape.submarineState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.submarineActivationProgress * 100);
+        prompt = `Flooding Moonpool Chamber (${pct}%)`;
+        sub = 'Floodgate klaxon blaring — survive until 100%, then Press E at the sub!';
+      } else if (this.escape.submarineParts.length === 3) {
+        if (dSubLever < 78) {
+          prompt = 'Hold E to Pull Floodgate Launch Lever';
+          sub = 'All 3 parts installed — opening the sea lock blares klaxons & alerts the Brute!';
+        } else {
+          prompt = 'All Parts Installed — Pull Floodgate Lever Inside Bay';
+          sub = 'Head to the Floodgate Console at the northwest corner of Submarine Bay.';
+        }
+      } else if (heldSub && dSubDock < 92) {
+        prompt = `Hold E to Install ${ITEM_CATALOG[heldSub].name} (${this.escape.submarineParts.length}/3)`;
+        sub = 'Heavy retrofit (~5s) — loud clanging draws the Brute.';
+      } else if (nearLever) {
+        prompt = `Floodgate Launch Console (${this.escape.submarineParts.length}/3 Parts)`;
+        sub = 'Install all 3 Submarine parts at the drydock hull before pulling the floodgate lever.';
+      }
+      const chosenDist = nearLever ? dSubLever : dSubDock;
+      best = {
+        kind: 'ESCAPE_SUBMARINE',
+        subTarget: nearLever ? 'LEVER' : 'DOCK',
+        dist: chosenDist,
+        prompt,
+        sub,
+      };
+      bestDist = chosenDist;
+    }
+
     const pDeck = this.getCurrentDeck();
+    for (const stand of this.map.paperMaps) {
+      if (stand.deck !== pDeck) continue;
+      const dist = Math.hypot(stand.x - p.x, stand.y - p.y);
+      if (
+        dist < 54 &&
+        dist < bestDist &&
+        hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, stand.x, stand.y)
+      ) {
+        bestDist = dist;
+        best = {
+          kind: 'PAPER_MAP',
+          stand,
+          dist,
+          prompt: `Press E to Inspect Deck Paper Map (${getDeckLabel(stand.deck)})`,
+          sub: 'Fixed wall chart — world stays live while reading! Cannot be carried.',
+        };
+      }
+    }
+
     for (const wp of this.worldPickups) {
       if (wp.deck !== pDeck) continue;
       const dist = Math.hypot(wp.x - p.x, wp.y - p.y);
@@ -2972,8 +3364,8 @@ export class MonstrumGameEngine {
           dist,
           prompt:
             st.direction === 'DOWN'
-              ? 'Press E to Take Stairs Down (Lower Deck)'
-              : 'Press E to Take Stairs Up (Main Deck)',
+              ? `Press E to Take Stairs Down (${getDeckLabel(st.targetDeck)})`
+              : `Press E to Take Stairs Up (${getDeckLabel(st.targetDeck)})`,
           sub: `Hold Q to Peek Landing · ${st.label} → ${st.targetRoom}`,
         };
       }
@@ -3035,11 +3427,15 @@ export class MonstrumGameEngine {
   private triggerGameOver(reason: string): void {
     if (this.ended) return;
     this.ended = true;
+    this.closePaperMap(false);
     this.audio.playDeathImpact();
     this.emitHud();
     this.callbacks.onGameOver({
       elapsedSeconds: this.elapsedSeconds,
-      partsInstalled: this.escape.lifeboatParts.length + this.escape.heliParts.length,
+      partsInstalled:
+        this.escape.lifeboatParts.length +
+        this.escape.heliParts.length +
+        this.escape.submarineParts.length,
       containersSearched: this.containersSearched,
       bruteSightings: this.brute.sightingsCount,
       cluesSpotted: this.brute.cluesSpottedTotal,
@@ -3053,14 +3449,18 @@ export class MonstrumGameEngine {
     });
   }
 
-  private triggerVictory(method: 'LIFEBOAT' | 'HELICOPTER'): void {
+  private triggerVictory(method: 'LIFEBOAT' | 'HELICOPTER' | 'SUBMARINE'): void {
     if (this.ended) return;
     this.ended = true;
+    this.closePaperMap(false);
     this.audio.playVictoryHorn();
     this.emitHud();
     this.callbacks.onVictory({
       elapsedSeconds: this.elapsedSeconds,
-      partsInstalled: this.escape.lifeboatParts.length + this.escape.heliParts.length,
+      partsInstalled:
+        this.escape.lifeboatParts.length +
+        this.escape.heliParts.length +
+        this.escape.submarineParts.length,
       containersSearched: this.containersSearched,
       bruteSightings: this.brute.sightingsCount,
       cluesSpotted: this.brute.cluesSpottedTotal,
@@ -3092,7 +3492,7 @@ export class MonstrumGameEngine {
       const st = this.map.stairwells.find((s) => s.id === this.player.peekingStairId);
       const dest = st ? this.map.stairwells.find((s) => s.id === st.targetStairId) : undefined;
       if (st && dest) {
-        promptText = `Peeking ${dest.deck === 'LOWER' ? 'Lower Deck' : 'Main Deck'} Landing — ${dest.room}`;
+        promptText = `Peeking ${getDeckLabel(dest.deck)} Landing — ${dest.room}`;
         promptSubtext = 'Release Q to step back · Press E to climb companionway.';
       }
     } else if (this.player.hidingSpotId !== null) {
@@ -3135,12 +3535,21 @@ export class MonstrumGameEngine {
       hasBackpack: this.player.hasBackpack,
       selectedSlot: this.player.selectedSlot,
       journalOpen: this.journalOpen,
+      paperMapDeck: this.player.openPaperMapDeck,
+      paperMapStandPos: this.player.openPaperMapStandPos
+        ? { ...this.player.openPaperMapStandPos }
+        : null,
+      steamFogAlpha: this.player.steamFogAlpha,
+      steamStaggered: this.player.steamStaggerTimer > 0,
       lifeboatParts: [...this.escape.lifeboatParts],
       heliParts: [...this.escape.heliParts],
+      submarineParts: [...this.escape.submarineParts],
       lifeboatState: this.escape.lifeboatState,
       heliState: this.escape.heliState,
+      submarineState: this.escape.submarineState,
       lifeboatActivationProgress: this.escape.lifeboatActivationProgress,
       heliActivationProgress: this.escape.heliActivationProgress,
+      submarineActivationProgress: this.escape.submarineActivationProgress,
       promptText,
       promptSubtext,
       bruteState: this.brute.state,

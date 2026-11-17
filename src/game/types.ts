@@ -1,4 +1,4 @@
-export const GAME_VERSION = '0.1.2';
+export const GAME_VERSION = '0.2.0';
 
 export const REFERENCE_VIEWPORT_WIDTH = 1440;
 export const REFERENCE_VIEWPORT_HEIGHT = 900;
@@ -89,40 +89,40 @@ export function buildBruteTuningFromDifficulty(cfg: DifficultyConfig): BruteTuni
               stairClimbPatrol: 0.74,
             };
 
+  // 0.2.0: Slight senses buff (~10-14%) across all difficulties to compensate for 4.5x larger 3-deck vessel
   const sensesPart =
     cfg.senses === 'LOW'
       ? {
-          sightMult: 0.82,
-          halfFovDeg: 66,
-          peripheralBase: 76,
-          peripheralCrouch: 50,
-          hearingMult: 0.8,
+          sightMult: 0.9,
+          halfFovDeg: 70,
+          peripheralBase: 86,
+          peripheralCrouch: 56,
+          hearingMult: 0.9,
         }
       : cfg.senses === 'EXTREME'
         ? {
-            sightMult: 1.42,
-            halfFovDeg: 100,
-            peripheralBase: 140,
-            peripheralCrouch: 94,
-            hearingMult: 1.52,
+            sightMult: 1.54,
+            halfFovDeg: 105,
+            peripheralBase: 156,
+            peripheralCrouch: 105,
+            hearingMult: 1.68,
           }
         : cfg.senses === 'HIGH'
           ? {
-              sightMult: 1.18,
-              halfFovDeg: 84,
-              peripheralBase: 112,
-              peripheralCrouch: 74,
-              hearingMult: 1.25,
+              sightMult: 1.3,
+              halfFovDeg: 89,
+              peripheralBase: 126,
+              peripheralCrouch: 84,
+              hearingMult: 1.38,
             }
           : {
-              sightMult: 1.0,
-              halfFovDeg: 76,
-              peripheralBase: 95,
-              peripheralCrouch: 62,
-              hearingMult: 1.0,
+              sightMult: 1.1,
+              halfFovDeg: 80,
+              peripheralBase: 108,
+              peripheralCrouch: 70,
+              hearingMult: 1.12,
             };
 
-  // Extreme intelligence intentionally matches High in 0.1.2
   const intelPart =
     cfg.intelligence === 'LOW'
       ? {
@@ -185,33 +185,82 @@ export type TileType =
   | 'EXTERIOR_DECK'
   | 'STEAM_VENT'
   | 'ESCAPE_LIFEBOAT'
-  | 'ESCAPE_HELI';
+  | 'ESCAPE_HELI'
+  | 'ESCAPE_SUBMARINE';
 
-export type ShipDeck = 'MAIN' | 'LOWER';
+export type ShipDeck = 'DECK_3' | 'DECK_2' | 'DECK_1';
+
+export const SHIP_DECK_ORDER: ShipDeck[] = ['DECK_3', 'DECK_2', 'DECK_1'];
+
+export function getDeckIndex(deck: ShipDeck): number {
+  return deck === 'DECK_3' ? 2 : deck === 'DECK_2' ? 1 : 0;
+}
+
+export function getDeckLabel(deck: ShipDeck): string {
+  return deck === 'DECK_3' ? 'Deck 3' : deck === 'DECK_2' ? 'Deck 2' : 'Deck 1';
+}
 
 export type ShipArchetype = 'CONTAINER_FREIGHTER' | 'BULK_CARRIER' | 'ICEBREAKER';
 
 export type FloorMaterial = 'STEEL' | 'WEATHER' | 'GRATING' | 'CARGO' | 'CABIN' | 'BRIDGE';
 
+export type RoomCategory = 'UNIQUE' | 'GENERIC' | 'CIRCULATION';
+
 export type RoomName =
+  // Unique Rooms (max 1 per vessel)
   | 'Helideck'
   | 'Lifeboat Davit'
+  | 'Submarine Bay'
   | 'Weather Deck'
   | 'Container Bay'
   | 'Forecastle'
   | 'Bridge'
   | 'Chart Room'
+  | 'Radio Room'
+  | "Captain's Quarters"
   | 'Officers Mess'
   | 'Infirmary'
+  | 'Galley & Mess'
   | 'Engine Room'
   | 'Boiler Room'
-  | 'Workshop'
-  | 'Lower Cargo Hold'
-  | 'Crew Quarters'
-  | 'Galley & Mess'
   | 'Pump Room'
+  // Generic Rooms (can spawn multiple independent compartments across decks)
+  | 'Crew Quarters'
+  | 'Storage Room'
+  | 'Cargo Hold'
+  | 'Workshop'
+  | 'Electrical Room'
+  | 'Maintenance Bay'
+  // Circulation
   | 'Corridor'
   | 'Catwalk';
+
+export const ROOM_CATEGORIES: Record<RoomName, RoomCategory> = {
+  Helideck: 'UNIQUE',
+  'Lifeboat Davit': 'UNIQUE',
+  'Submarine Bay': 'UNIQUE',
+  'Weather Deck': 'UNIQUE',
+  'Container Bay': 'GENERIC',
+  Forecastle: 'UNIQUE',
+  Bridge: 'UNIQUE',
+  'Chart Room': 'UNIQUE',
+  'Radio Room': 'UNIQUE',
+  "Captain's Quarters": 'UNIQUE',
+  'Officers Mess': 'UNIQUE',
+  Infirmary: 'UNIQUE',
+  'Galley & Mess': 'UNIQUE',
+  'Engine Room': 'UNIQUE',
+  'Boiler Room': 'UNIQUE',
+  'Pump Room': 'UNIQUE',
+  'Crew Quarters': 'GENERIC',
+  'Storage Room': 'GENERIC',
+  'Cargo Hold': 'GENERIC',
+  Workshop: 'GENERIC',
+  'Electrical Room': 'GENERIC',
+  'Maintenance Bay': 'GENERIC',
+  Corridor: 'CIRCULATION',
+  Catwalk: 'CIRCULATION',
+};
 
 export type ItemId =
   | 'WINCH_CRANK'
@@ -220,6 +269,9 @@ export type ItemId =
   | 'AVIATION_FUEL'
   | 'IGNITION_KEY'
   | 'ROTOR_FUSE'
+  | 'SUB_BATTERY'
+  | 'BALLAST_PUMP'
+  | 'DIVE_KEY'
   | 'BATTERY_PACK'
   | 'GLOWSTICK'
   | 'FLARE'
@@ -231,7 +283,7 @@ export interface ItemMeta {
   id: ItemId;
   name: string;
   shortName: string;
-  category: 'LIFEBOAT_PART' | 'HELI_PART' | 'TOOL' | 'UPGRADE';
+  category: 'LIFEBOAT_PART' | 'HELI_PART' | 'SUBMARINE_PART' | 'TOOL' | 'UPGRADE';
   description: string;
   color: string;
 }
@@ -242,7 +294,7 @@ export const ITEM_CATALOG: Record<ItemId, ItemMeta> = {
     name: 'Winch Crank',
     shortName: 'Winch',
     category: 'LIFEBOAT_PART',
-    description: 'Lifeboat part — lowers the port stern davit.',
+    description: 'Lifeboat part — lowers the Deck 2 davit.',
     color: '#38bdf8',
   },
   MARINE_BATTERY: {
@@ -266,7 +318,7 @@ export const ITEM_CATALOG: Record<ItemId, ItemMeta> = {
     name: 'Aviation Fuel',
     shortName: 'Av-Fuel',
     category: 'HELI_PART',
-    description: 'Helicopter part — fuels the stern chopper.',
+    description: 'Helicopter part — fuels the Deck 3 stern chopper.',
     color: '#fbbf24',
   },
   IGNITION_KEY: {
@@ -284,6 +336,30 @@ export const ITEM_CATALOG: Record<ItemId, ItemMeta> = {
     category: 'HELI_PART',
     description: 'Helicopter part — restores main turbine power.',
     color: '#fbbf24',
+  },
+  SUB_BATTERY: {
+    id: 'SUB_BATTERY',
+    name: 'Submarine Battery',
+    shortName: 'Sub Battery',
+    category: 'SUBMARINE_PART',
+    description: 'Submarine part — powers the Deck 1 submersible hull.',
+    color: '#10b981',
+  },
+  BALLAST_PUMP: {
+    id: 'BALLAST_PUMP',
+    name: 'Ballast Pump',
+    shortName: 'Ballast',
+    category: 'SUBMARINE_PART',
+    description: 'Submarine part — regulates moonpool dive trim.',
+    color: '#10b981',
+  },
+  DIVE_KEY: {
+    id: 'DIVE_KEY',
+    name: 'Dive Ignition Key',
+    shortName: 'Dive Key',
+    category: 'SUBMARINE_PART',
+    description: 'Submarine part — engages the sub conning drive.',
+    color: '#10b981',
   },
   BATTERY_PACK: {
     id: 'BATTERY_PACK',
@@ -350,6 +426,7 @@ export interface Door {
 
 export interface RoomLightSwitch {
   id: string;
+  roomId: number;
   room: RoomName;
   tx: number;
   ty: number;
@@ -368,7 +445,9 @@ export interface Stairwell {
   targetStairId: string;
   targetDeck: ShipDeck;
   targetRoom: RoomName;
+  targetRoomId: number;
   room: RoomName;
+  roomId: number;
   label: string;
   direction: 'UP' | 'DOWN';
 }
@@ -386,7 +465,11 @@ export type ShipPropKind =
   | 'WORKBENCH'
   | 'CAPSTAN'
   | 'CRANE_PEDESTAL'
-  | 'PIPE_RUN';
+  | 'PIPE_RUN'
+  | 'SUBMARINE_HULL'
+  | 'FLOODGATE_LEVER'
+  | 'PUMP_UNIT'
+  | 'SWITCHGEAR';
 
 export interface ShipProp {
   id: string;
@@ -411,6 +494,8 @@ export interface HidingSpot {
   y: number;
   type: HidingSpotType;
   room: RoomName;
+  roomId: number;
+  deck: ShipDeck;
   angle: number;
   checkedFlash: number; // visual flash timer when Brute rips it open
 }
@@ -425,22 +510,45 @@ export interface Container {
   y: number;
   type: ContainerType;
   room: RoomName;
+  roomId: number;
   searched: boolean;
   item: ItemId | null;
 }
 
-export interface SteamVent {
+export interface SteamPipe {
   id: string;
+  deck: ShipDeck;
+  wallTx: number;
+  wallTy: number;
+  nozzleTx: number;
+  nozzleTy: number;
+  x: number;
+  y: number;
+  dirX: number; // unit tile direction along corridor (-1, 0, 1)
+  dirY: number;
+  rangeTiles: number; // 2..4 corridor tiles
+  cycleTimer: number; // idle countdown until telegraph starts
+  warningTimer: number; // >0 means metallic clank + amber gauge + pre-burst wisps
+  activeTimer: number; // >0 means directional steam jet firing
+  nextInterval: number;
+  hitPlayerThisBurst?: boolean;
+}
+
+export interface PaperMapStand {
+  id: string;
+  deck: ShipDeck;
   tx: number;
   ty: number;
   x: number;
   y: number;
-  timer: number;
-  activeTimer: number; // >0 means hissing loud steam cloud
+  room: RoomName;
+  roomId: number;
 }
 
 export interface RoomBounds {
+  id: number;
   name: RoomName;
+  category: RoomCategory;
   deck: ShipDeck;
   x1: number;
   y1: number;
@@ -461,6 +569,7 @@ export interface BloodStreak {
   intensity: number;
   seed: number;
   room: RoomName;
+  roomId?: number;
 }
 
 export interface ShipMap {
@@ -470,7 +579,9 @@ export interface ShipMap {
   archetype: ShipArchetype;
   tiles: TileType[][];
   roomGrid: RoomName[][];
+  roomIdGrid: number[][];
   deckGrid: ShipDeck[][];
+  deckBounds: Record<ShipDeck, { y1: number; y2: number; centerY: number }>;
   floorMaterial: FloorMaterial[][];
   rooms: RoomBounds[];
   doors: Door[];
@@ -478,13 +589,24 @@ export interface ShipMap {
   props: ShipProp[];
   hidingSpots: HidingSpot[];
   containers: Container[];
-  steamVents: SteamVent[];
+  steamPipes: SteamPipe[];
+  paperMaps: PaperMapStand[];
   lightSwitches: RoomLightSwitch[];
   bloodStreaks: BloodStreak[];
   playerSpawn: { x: number; y: number };
   bruteSpawn: { x: number; y: number };
   lifeboatPos: { x: number; y: number; tx: number; ty: number };
   heliPos: { x: number; y: number; tx: number; ty: number };
+  submarinePos: {
+    x: number;
+    y: number;
+    tx: number;
+    ty: number;
+    leverX: number;
+    leverY: number;
+    leverTx: number;
+    leverTy: number;
+  };
   seed: number;
 }
 
@@ -509,6 +631,10 @@ export interface PlayerState {
   preHidePos: { x: number; y: number } | null;
   climbingStairId: string | null;
   climbProgress: number; // 0..1 timed climb progress
+  steamStaggerTimer: number; // >0 means movement stagger limp from Deck 1 steam burst
+  steamFogAlpha: number; // 0..1 condensation screen fog
+  openPaperMapDeck: ShipDeck | null;
+  openPaperMapStandPos: { x: number; y: number; deck: ShipDeck } | null;
   inventory: ItemId[];
   maxInventorySlots: number;
   hasBackpack: boolean;
@@ -537,7 +663,7 @@ export interface BruteState {
   state: BruteBehaviorState;
   path: Array<{ tx: number; ty: number }>;
   pathRecalcTimer: number;
-  roamTarget: { tx: number; ty: number; room: RoomName } | null;
+  roamTarget: { tx: number; ty: number; room: RoomName; roomId?: number } | null;
   investigateTarget: { x: number; y: number; urgency: number } | null;
   lastKnownPlayerPos: { x: number; y: number } | null;
   lastSeenPlayerVelocity: { vx: number; vy: number } | null;
@@ -610,14 +736,19 @@ export type EscapeActivationState = 'IDLE' | 'ACTIVATING' | 'READY';
 export interface EscapeProgress {
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
+  submarineParts: ItemId[];
   lifeboatPartProgress: number;
   heliPartProgress: number;
+  submarinePartProgress: number;
   lifeboatActivatingHold: number;
   heliActivatingHold: number;
+  submarineActivatingHold: number;
   lifeboatState: EscapeActivationState;
   heliState: EscapeActivationState;
+  submarineState: EscapeActivationState;
   lifeboatActivationProgress: number; // 0..1 timed hydraulic crane swing-out
   heliActivationProgress: number; // 0..1 timed turbine spin-up
+  submarineActivationProgress: number; // 0..1 timed floodgate deluge & ballast pressurize
 }
 
 export interface RunStats {
@@ -628,7 +759,7 @@ export interface RunStats {
   cluesSpotted: number;
   hidingSpotsCheckedByBrute: number;
   doorsSmashed: number;
-  escapeMethod: 'LIFEBOAT' | 'HELICOPTER' | null;
+  escapeMethod: 'LIFEBOAT' | 'HELICOPTER' | 'SUBMARINE' | null;
   deathReason: string | null;
   seed: number;
   difficulty: DifficultyConfig;
@@ -649,12 +780,19 @@ export interface HudSnapshot {
   hasBackpack: boolean;
   selectedSlot: number;
   journalOpen: boolean;
+  paperMapDeck: ShipDeck | null;
+  paperMapStandPos: { x: number; y: number; deck: ShipDeck } | null;
+  steamFogAlpha: number;
+  steamStaggered: boolean;
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
+  submarineParts: ItemId[];
   lifeboatState: EscapeActivationState;
   heliState: EscapeActivationState;
+  submarineState: EscapeActivationState;
   lifeboatActivationProgress: number;
   heliActivationProgress: number;
+  submarineActivationProgress: number;
   promptText: string | null;
   promptSubtext: string | null;
   bruteState: BruteBehaviorState;

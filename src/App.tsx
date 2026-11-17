@@ -4,6 +4,7 @@ import { EscapeCutsceneModal } from './components/EscapeCutsceneModal';
 import { EscapeJournalModal } from './components/EscapeJournalModal';
 import { GameHud } from './components/GameHud';
 import { EndModal, PauseModal } from './components/GameModals';
+import { PaperMapModal } from './components/PaperMapModal';
 import { TitleMenu } from './components/TitleMenu';
 import { HorrorAudioEngine } from './game/audio';
 import { MonstrumGameEngine } from './game/engine';
@@ -36,16 +37,29 @@ declare global {
       getEscapeInfo: () => {
         heliPos: { tx: number; ty: number; x: number; y: number };
         lifeboatPos: { tx: number; ty: number; x: number; y: number };
+        submarinePos: {
+          tx: number;
+          ty: number;
+          x: number;
+          y: number;
+          leverTx: number;
+          leverTy: number;
+          leverX: number;
+          leverY: number;
+        };
         tileDist: number;
         inventory: ItemId[];
         maxInventorySlots: number;
         hasBackpack: boolean;
         journalOpen: boolean;
+        openPaperMapDeck: string | null;
         worldPickupsCount: number;
         heliParts: ItemId[];
         lifeboatParts: ItemId[];
+        submarineParts: ItemId[];
         heliState: string;
         lifeboatState: string;
+        submarineState: string;
       } | null;
       getRuntimeDetails: () => {
         bruteTuning: BruteTuningNumbers;
@@ -54,8 +68,11 @@ declare global {
         effectiveZoom: number;
         baseZoom: number;
         bloodStreakCount: number;
+        steamPipesCount: number;
+        paperMapsCount: number;
         playerX: number;
         playerY: number;
+        steamStaggerTimer: number;
         peekingStairId: string | null;
         bruteState: string;
         brutePos: { x: number; y: number };
@@ -66,6 +83,8 @@ declare global {
           heliActive: boolean;
           lifeboatRepairs: number;
           lifeboatActive: boolean;
+          subRepairs: number;
+          subActive: boolean;
         };
         activeNoiseRipples: Array<{ x: number; y: number; maxRadius: number }>;
         maxAcousticRadius: number;
@@ -492,19 +511,24 @@ export default function App() {
         if (!engine) return null;
         const h = engine.map.heliPos;
         const b = engine.map.lifeboatPos;
+        const s = engine.map.submarinePos;
         return {
           heliPos: { tx: h.tx, ty: h.ty, x: h.x, y: h.y },
           lifeboatPos: { tx: b.tx, ty: b.ty, x: b.x, y: b.y },
+          submarinePos: { ...s },
           tileDist: Math.hypot(h.tx - b.tx, h.ty - b.ty),
           inventory: [...engine.player.inventory],
           maxInventorySlots: engine.player.maxInventorySlots,
           hasBackpack: engine.player.hasBackpack,
           journalOpen: engine.journalOpen,
+          openPaperMapDeck: engine.player.openPaperMapDeck,
           worldPickupsCount: engine.worldPickups.length,
           heliParts: [...engine.escape.heliParts],
           lifeboatParts: [...engine.escape.lifeboatParts],
+          submarineParts: [...engine.escape.submarineParts],
           heliState: engine.escape.heliState,
           lifeboatState: engine.escape.lifeboatState,
+          submarineState: engine.escape.submarineState,
         };
       },
       getRuntimeDetails: () => {
@@ -546,8 +570,11 @@ export default function App() {
           effectiveZoom: engine.getEffectiveZoom(window.innerWidth, window.innerHeight),
           baseZoom: engine.zoom,
           bloodStreakCount: engine.map.bloodStreaks.length,
+          steamPipesCount: engine.map.steamPipes.length,
+          paperMapsCount: engine.map.paperMaps.length,
           playerX: engine.player.x,
           playerY: engine.player.y,
+          steamStaggerTimer: engine.player.steamStaggerTimer,
           peekingStairId: engine.player.peekingStairId,
           bruteState: engine.brute.state,
           brutePos: { x: engine.brute.x, y: engine.brute.y },
@@ -563,6 +590,8 @@ export default function App() {
             heliActive: engine.brain.observedHeliActive,
             lifeboatRepairs: engine.brain.observedLifeboatRepairs,
             lifeboatActive: engine.brain.observedLifeboatActive,
+            subRepairs: engine.brain.observedSubRepairs,
+            subActive: engine.brain.observedSubActive,
           },
           activeNoiseRipples: engine.ripples.map((r) => ({
             x: r.x,
@@ -661,6 +690,10 @@ export default function App() {
       if (e.code === 'Escape') {
         if (statusRef.current === 'PLAYING') {
           const eng = engineRef.current;
+          if (eng?.player.openPaperMapDeck !== null && eng?.player.openPaperMapDeck !== undefined) {
+            eng.closePaperMap(true);
+            return;
+          }
           if (eng?.journalOpen) {
             eng.toggleJournal();
             return;
@@ -836,6 +869,16 @@ export default function App() {
               engineRef.current.toggleJournal();
             }
           }}
+        />
+      )}
+
+      {hud && status === 'PLAYING' && hud.paperMapDeck && hud.paperMapStandPos && engineRef.current && (
+        <PaperMapModal
+          map={engineRef.current.map}
+          initialDeck={hud.paperMapDeck}
+          standPos={hud.paperMapStandPos}
+          devModeUnlocked={devModeUnlocked}
+          onClose={() => engineRef.current?.closePaperMap(true)}
         />
       )}
 

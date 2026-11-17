@@ -19,6 +19,12 @@ const LIFEBOAT_PARTS: Array<{ id: ItemId; note: string }> = [
   { id: 'MARINE_BATTERY', note: 'Energizes crane floodlight & release solenoid' },
 ];
 
+const SUBMARINE_PARTS: Array<{ id: ItemId; note: string }> = [
+  { id: 'SUB_BATTERY', note: 'Powers Deck 1 submersible hull & ballast array' },
+  { id: 'BALLAST_PUMP', note: 'Pressurizes moonpool trim & dive tanks' },
+  { id: 'DIVE_KEY', note: 'Engages submersible conning drive & rudder' },
+];
+
 function getPartStatus(
   id: ItemId,
   installed: ItemId[],
@@ -96,13 +102,22 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
           ? 'All 3 parts fitted — Hold E at Bow Davit to Swing Boat Clear'
           : `Install each held part one by one (Hold E · ~5s each) — ${hud.lifeboatParts.length}/3 fitted`;
 
+  const subStatusText =
+    hud.submarineState === 'READY'
+      ? 'Moonpool flooded & pressurized — Press E at Submersible to Dive'
+      : hud.submarineState === 'ACTIVATING'
+        ? `Floodgate Deluge (${Math.round(hud.submarineActivationProgress * 100)}%) — Survive until 100%`
+        : hud.submarineParts.length === 3
+          ? 'All 3 parts fitted — Hold E on Moonpool Floodgate Lever to Launch'
+          : `Install each held part one by one (Hold E · ~5s each) — ${hud.submarineParts.length}/3 fitted`;
+
   return (
     <div
       className="fixed inset-0 z-30 flex items-center justify-center bg-black/78 px-4 backdrop-blur-sm"
       role="dialog"
       aria-label="Escape Field Journal"
     >
-      <div className="w-full max-w-2xl rounded-lg border border-slate-700/90 bg-[#0b1017] p-6 shadow-2xl text-slate-100">
+      <div className="w-full max-w-4xl rounded-lg border border-slate-700/90 bg-[#0b1017] p-6 shadow-2xl text-slate-100 max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-start justify-between gap-4 border-b border-slate-800 pb-4">
           <div className="flex items-center gap-3">
@@ -114,7 +129,7 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
                 Crew Escape Field Journal
               </h2>
               <p className="text-xs text-slate-400">
-                Inspect salvage progress — escape craft lie at opposite ends of the Main Deck.
+                Inspect salvage progress — three escape craft span Deck 3, Deck 2, and Deck 1.
               </p>
             </div>
           </div>
@@ -130,13 +145,13 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
           </button>
         </div>
 
-        {/* Two Routes Grid */}
-        <div className="mt-5 grid gap-4 md:grid-cols-2">
-          {/* Stern Helicopter */}
+        {/* Three Routes Grid */}
+        <div className="mt-5 grid gap-4 md:grid-cols-3">
+          {/* Deck 3: Stern Helicopter */}
           <div className="rounded-md border border-slate-800 bg-[#0f1621] p-4">
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-display text-lg font-semibold text-amber-300">
-                Stern Helideck Chopper
+                Helideck Chopper · D3
               </h3>
               <span className="font-mono-num text-xs font-semibold text-slate-300">
                 {hud.heliParts.length}/3
@@ -148,11 +163,11 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
             </div>
           </div>
 
-          {/* Bow Lifeboat Davit */}
+          {/* Deck 2: Bow Lifeboat Davit */}
           <div className="rounded-md border border-slate-800 bg-[#0f1621] p-4">
             <div className="flex items-center justify-between gap-2">
               <h3 className="font-display text-lg font-semibold text-sky-300">
-                Bow Forecastle Lifeboat
+                Bow Lifeboat · D2
               </h3>
               <span className="font-mono-num text-xs font-semibold text-slate-300">
                 {hud.lifeboatParts.length}/3
@@ -161,6 +176,22 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
             <p className="mt-1 text-[11px] text-slate-400">{boatStatusText}</p>
             <div className="mt-3 space-y-2">
               {LIFEBOAT_PARTS.map((p) => renderPartRow(p, hud.lifeboatParts))}
+            </div>
+          </div>
+
+          {/* Deck 1: Moonpool Submarine */}
+          <div className="rounded-md border border-slate-800 bg-[#0f1621] p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-display text-lg font-semibold text-emerald-300">
+                Submarine Bay · D1
+              </h3>
+              <span className="font-mono-num text-xs font-semibold text-slate-300">
+                {hud.submarineParts.length}/3
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-slate-400">{subStatusText}</p>
+            <div className="mt-3 space-y-2">
+              {SUBMARINE_PARTS.map((p) => renderPartRow(p, hud.submarineParts))}
             </div>
           </div>
         </div>

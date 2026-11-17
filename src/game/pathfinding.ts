@@ -50,18 +50,44 @@ export function findPath(
   }
 
   const goalDeck = deckGrid[goalTy][goalTx];
+  // Precompute shortest stair-to-goal cost for every stairwell on any non-goal deck (supports 1-hop and 2-hop 3-deck routing)
+  const stairToGoalCost = new Map<string, number>();
+  // Pass 1: direct 1-hop stairs reaching goalDeck
+  for (const s of stairwells) {
+    if (s.targetDeck !== goalDeck) continue;
+    const target = stairById.get(s.targetStairId);
+    if (!target) continue;
+    stairToGoalCost.set(s.id, 3.5 + Math.hypot(goalTx - target.tx, goalTy - target.ty));
+  }
+  // Pass 2: 2-hop stairs (e.g. DECK_3 -> DECK_2 -> DECK_1 or DECK_1 -> DECK_2 -> DECK_3)
+  for (const s of stairwells) {
+    if (s.deck === goalDeck || stairToGoalCost.has(s.id)) continue;
+    const midLanding = stairById.get(s.targetStairId);
+    if (!midLanding) continue;
+    let bestRest = Infinity;
+    for (const s2 of stairwells) {
+      if (s2.deck !== midLanding.deck) continue;
+      const c2 = stairToGoalCost.get(s2.id);
+      if (c2 === undefined) continue;
+      const total = 3.5 + Math.hypot(s2.tx - midLanding.tx, s2.ty - midLanding.ty) + c2;
+      if (total < bestRest) bestRest = total;
+    }
+    if (Number.isFinite(bestRest)) {
+      stairToGoalCost.set(s.id, bestRest);
+    }
+  }
+
   const calcHeuristic = (tx: number, ty: number): number => {
-    if (deckGrid[ty][tx] === goalDeck) {
+    const curDeck = deckGrid[ty][tx];
+    if (curDeck === goalDeck) {
       return Math.hypot(goalTx - tx, goalTy - ty);
     }
     let best = Infinity;
-    const curDeck = deckGrid[ty][tx];
     for (const s of stairwells) {
       if (s.deck !== curDeck) continue;
-      const target = stairById.get(s.targetStairId);
-      if (!target) continue;
-      const d =
-        Math.hypot(s.tx - tx, s.ty - ty) + 3.5 + Math.hypot(goalTx - target.tx, goalTy - target.ty);
+      const rest = stairToGoalCost.get(s.id);
+      if (rest === undefined) continue;
+      const d = Math.hypot(s.tx - tx, s.ty - ty) + rest;
       if (d < best) best = d;
     }
     return Number.isFinite(best) ? best : Math.hypot(goalTx - tx, goalTy - ty);

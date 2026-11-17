@@ -243,13 +243,133 @@ const LIFEBOAT_FRAMES: CutsceneFrame[] = [
   },
 ];
 
+const SUBMARINE_FRAMES: CutsceneFrame[] = [
+  {
+    reelLabel: 'REEL 01 · DECK 1 MOONPOOL FLOODGATE',
+    headline: 'BALLAST BLOWN, FLOODGATES OPEN',
+    caption:
+      'You yanked the deluge lever, slammed the brass hatch shut, and waved politely through the viewport as seawater swallowed the moonpool catwalk.',
+    renderSvg: () => (
+      <svg viewBox="0 0 640 300" className="h-full w-full bg-[#060606]" aria-hidden="true">
+        <rect width="640" height="300" fill="#060606" />
+        {/* Moonpool concrete walls & rising water */}
+        <rect x="30" y="32" width="120" height="236" fill="#171717" stroke="#a3a3a3" strokeWidth="2.5" />
+        <rect x="490" y="32" width="120" height="236" fill="#171717" stroke="#a3a3a3" strokeWidth="2.5" />
+        <path d="M150,210 Q230,194 310,210 T490,210" fill="none" stroke="#e5e5e5" strokeWidth="3" />
+        {/* Submarine hull in moonpool */}
+        <ellipse cx="320" cy="182" rx="132" ry="38" fill="#1f1f1f" stroke="#ffffff" strokeWidth="3" />
+        <rect x="288" y="118" width="64" height="32" rx="4" fill="#262626" stroke="#ffffff" strokeWidth="2.5" />
+        <line x1="320" y1="118" x2="320" y2="92" stroke="#e5e5e5" strokeWidth="3" />
+        <line x1="320" y1="92" x2="334" y2="92" stroke="#ffffff" strokeWidth="3" />
+        {/* Happy :D survivor inside conning viewport */}
+        <circle cx="320" cy="134" r="13" fill="#f5f5f5" />
+        <circle cx="315" cy="131" r="2" fill="#000000" />
+        <circle cx="325" cy="131" r="2" fill="#000000" />
+        <path d="M314,137 Q320,145 326,137 Z" fill="#000000" />
+        {/* Furious Brute left pounding on catwalk above */}
+        <g transform="translate(96, 86)">
+          <path d="M-22,52 L-16,10 L16,10 L22,52 Z" fill="#0f0f0f" stroke="#d4d4d4" strokeWidth="2.2" />
+          <circle cx="0" cy="2" r="13" fill="#0f0f0f" stroke="#ffffff" strokeWidth="2.2" />
+          <circle cx="-4" cy="0" r="2.2" fill="#ffffff" />
+          <circle cx="4" cy="0" r="2.2" fill="#ffffff" />
+          <text x="16" y="-8" fill="#ffffff" fontSize="20" fontWeight="800" fontFamily="monospace">
+            !!
+          </text>
+        </g>
+        {/* Floodgate spray arcs */}
+        <path d="M150,74 Q195,95 215,154" fill="none" stroke="#d4d4d4" strokeWidth="2.5" strokeDasharray="6 4" />
+        <path d="M490,74 Q445,95 425,154" fill="none" stroke="#d4d4d4" strokeWidth="2.5" strokeDasharray="6 4" />
+      </svg>
+    ),
+  },
+  {
+    reelLabel: 'REEL 02 · ABYSSAL DESCENT',
+    headline: 'ZERO SONAR, MAXIMUM CONFIDENCE :D',
+    caption:
+      'Warning klaxons blared in three languages while steam hissed from every seam, yet you spun the dive trim wheel until the depth needle wrapped twice.',
+    renderSvg: () => (
+      <svg viewBox="0 0 640 300" className="h-full w-full bg-[#050505]" aria-hidden="true">
+        <rect width="640" height="300" fill="#050505" />
+        {/* Bubbles & abyssal depth streaks */}
+        {[90, 160, 230, 440, 510, 570].map((bx, i) => (
+          <circle
+            key={bx}
+            cx={bx}
+            cy={55 + ((i * 47) % 180)}
+            r={4 + (i % 3) * 3}
+            fill="none"
+            stroke="#737373"
+            strokeWidth="1.8"
+          />
+        ))}
+        {/* Angled diving submersible */}
+        <g transform="translate(320, 155) rotate(14)">
+          <ellipse cx="0" cy="0" rx="138" ry="38" fill="#171717" stroke="#ffffff" strokeWidth="3" />
+          <rect x="-26" y="-64" width="54" height="30" rx="4" fill="#262626" stroke="#e5e5e5" strokeWidth="2.5" />
+          {/* Rear propeller & wake */}
+          <line x1="-148" y1="-20" x2="-148" y2="20" stroke="#ffffff" strokeWidth="4" />
+          <line x1="-164" y1="-8" x2="-210" y2="-16" stroke="#a3a3a3" strokeWidth="2" strokeDasharray="6 6" />
+          <line x1="-164" y1="8" x2="-215" y2="14" stroke="#a3a3a3" strokeWidth="2" strokeDasharray="6 6" />
+          {/* Beam into dark ocean */}
+          <polygon points="136,-6 290,-52 290,48 136,10" fill="rgba(255,255,255,0.12)" />
+          {/* Giant grin in circular viewport */}
+          <circle cx="52" cy="0" r="20" fill="#0a0a0a" stroke="#ffffff" strokeWidth="2.5" />
+          <circle cx="52" cy="0" r="15" fill="#ffffff" />
+          <circle cx="47" cy="-3" r="2.2" fill="#000000" />
+          <circle cx="57" cy="-3" r="2.2" fill="#000000" />
+          <path d="M45,3 Q52,12 59,3 Z" fill="#000000" />
+        </g>
+        <text x="42" y="268" fill="#a3a3a3" fontSize="14" fontWeight="700" fontFamily="monospace">
+          DEPTH: YES · BRUTES ABOARD: NONE
+        </text>
+      </svg>
+    ),
+  },
+  {
+    reelLabel: 'REEL 03 · SURFACE BREACH',
+    headline: 'SURFACED ALIVE · DRY SOCKS OPTIONAL :D',
+    caption:
+      'Half a mile clear of the freighter’s silhouette, the ballast tanks blew dry and popped you into freezing starlight—still grinning wider than the hatch.',
+    renderSvg: () => (
+      <svg viewBox="0 0 640 300" className="h-full w-full bg-[#040404]" aria-hidden="true">
+        <rect width="640" height="300" fill="#040404" />
+        <circle cx="520" cy="68" r="28" fill="#f5f5f5" />
+        <circle cx="508" cy="62" r="26" fill="#040404" />
+        {/* Shrinking freighter on horizon */}
+        <path d="M48,186 L176,186 L186,172 L38,172 Z" fill="#262626" stroke="#737373" strokeWidth="1.5" />
+        <rect x="74" y="154" width="32" height="18" fill="#171717" stroke="#737373" strokeWidth="1.5" />
+        {/* Waves */}
+        <path d="M0,214 Q90,200 180,214 T360,214 T540,214 T640,214" fill="none" stroke="#d4d4d4" strokeWidth="3" />
+        <path d="M0,248 Q80,236 160,248 T320,248 T480,248 T640,248" fill="none" stroke="#525252" strokeWidth="2" />
+        {/* Surfaced submarine conning tower + survivor */}
+        <g transform="translate(382, 198)">
+          <path d="M-110,16 Q0,-24 110,16 Z" fill="#1f1f1f" stroke="#ffffff" strokeWidth="3" />
+          <rect x="-34" y="-36" width="68" height="38" rx="4" fill="#262626" stroke="#ffffff" strokeWidth="2.8" />
+          <circle cx="0" cy="-62" r="28" fill="#ffffff" />
+          <circle cx="-10" cy="-67" r="3.8" fill="#000000" />
+          <circle cx="10" cy="-67" r="3.8" fill="#000000" />
+          <path d="M-13,-56 Q0,-38 13,-56 Z" fill="#000000" />
+          <text x="-92" y="-104" fill="#ffffff" fontSize="20" fontWeight="800" fontFamily="monospace">
+            DIVE COMPLETE :D
+          </text>
+        </g>
+      </svg>
+    ),
+  },
+];
+
 export const EscapeCutsceneModal: React.FC<EscapeCutsceneModalProps> = ({
   stats,
   onAdvanceFrame,
   onComplete,
 }) => {
   const frames = useMemo(
-    () => (stats.escapeMethod === 'HELICOPTER' ? HELI_FRAMES : LIFEBOAT_FRAMES),
+    () =>
+      stats.escapeMethod === 'HELICOPTER'
+        ? HELI_FRAMES
+        : stats.escapeMethod === 'SUBMARINE'
+          ? SUBMARINE_FRAMES
+          : LIFEBOAT_FRAMES,
     [stats.escapeMethod]
   );
   const [frameIdx, setFrameIdx] = useState(0);

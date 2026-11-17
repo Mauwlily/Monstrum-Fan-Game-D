@@ -2,7 +2,7 @@ import { getRoomLightFlicker } from './lighting';
 import { isTileWalkable } from './mapGen';
 import { MonstrumGameEngine } from './engine';
 import { createProceduralShipTextures, ProceduralShipTextures } from './textures';
-import { Container, HidingSpot, RoomLightSwitch, RoomName } from './types';
+import { Container, getDeckLabel, HidingSpot, RoomLightSwitch, RoomName, ShipDeck } from './types';
 import {
   computeVisibilityPolygon,
   getLocalOccluders,
@@ -108,18 +108,20 @@ export class GameRenderer {
 
     this.drawOceanWaves(ctx, engine, width, height, timeSec, zoom);
     this.drawTiles(ctx, engine, width, height, timeSec, zoom);
-    this.drawRoomStencils(ctx, engine);
+    this.drawRoomStencils(ctx, engine, width, height, zoom);
     this.drawBloodStreaks(ctx, engine, width, height, zoom);
     this.drawStairwells(ctx, engine, incomingStairId, timeSec);
     this.drawBulkheads(ctx, engine, width, height, zoom);
     this.drawEscapeZones(ctx, engine, timeSec);
-    this.drawShipProps(ctx, engine);
-    this.drawContainers(ctx, engine);
-    this.drawHidingSpots(ctx, engine);
-    this.drawLightSwitches(ctx, engine, timeSec);
-    this.drawDoors(ctx, engine);
-    this.drawDroppedLights(ctx, engine, timeSec);
-    this.drawWorldPickups(ctx, engine, timeSec);
+    this.drawShipProps(ctx, engine, width, height, zoom);
+    this.drawSteamPipes(ctx, engine, width, height, zoom, timeSec);
+    this.drawPaperMaps(ctx, engine, width, height, zoom, timeSec);
+    this.drawContainers(ctx, engine, width, height, zoom);
+    this.drawHidingSpots(ctx, engine, width, height, zoom);
+    this.drawLightSwitches(ctx, engine, timeSec, width, height, zoom);
+    this.drawDoors(ctx, engine, width, height, zoom);
+    this.drawDroppedLights(ctx, engine, timeSec, width, height, zoom);
+    this.drawWorldPickups(ctx, engine, timeSec, undefined, width, height, zoom);
     this.drawParticles(ctx, engine);
 
     if (engine.player.hidingSpotId === null) {
@@ -305,7 +307,7 @@ export class GameRenderer {
 
         // Deterministic rust/oil grime decals breaking repetition
         const hash = ((tx * 73856093) ^ (ty * 19349663)) >>> 0;
-        if (tex && tex.grimeDecals.length > 0 && mat !== 'BRIDGE' && t !== 'STEAM_VENT' && hash % 7 === 0) {
+        if (tex && tex.grimeDecals.length > 0 && mat !== 'BRIDGE' && hash % 7 === 0) {
           const decal = tex.grimeDecals[hash % tex.grimeDecals.length];
           ctx.drawImage(decal, x, y);
         }
@@ -323,35 +325,12 @@ export class GameRenderer {
           ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
           ctx.lineWidth = 1;
           ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
-        }
-
-        // Recessed cast-iron steam vent grate
-        if (t === 'STEAM_VENT') {
-          const cx = x + tileSize / 2;
-          const cy = y + tileSize / 2;
-          ctx.fillStyle = '#070a0f';
-          ctx.beginPath();
-          ctx.arc(cx, cy, 13, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.strokeStyle = '#475569';
-          ctx.lineWidth = 2.4;
-          ctx.stroke();
-          ctx.strokeStyle = '#64748b';
-          ctx.lineWidth = 1.6;
-          ctx.beginPath();
-          ctx.moveTo(cx - 9, cy);
-          ctx.lineTo(cx + 9, cy);
-          ctx.moveTo(cx, cy - 9);
-          ctx.lineTo(cx, cy + 9);
-          ctx.moveTo(cx - 6, cy - 6);
-          ctx.lineTo(cx + 6, cy + 6);
-          ctx.moveTo(cx + 6, cy - 6);
-          ctx.lineTo(cx - 6, cy + 6);
-          ctx.stroke();
-          ctx.fillStyle = '#334155';
-          ctx.beginPath();
-          ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-          ctx.fill();
+        } else if (t === 'ESCAPE_SUBMARINE') {
+          ctx.fillStyle = 'rgba(45, 212, 191, 0.14)';
+          ctx.fillRect(x, y, tileSize, tileSize);
+          ctx.strokeStyle = 'rgba(45, 212, 191, 0.34)';
+          ctx.lineWidth = 1.2;
+          ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
         }
 
         // Floor-to-wall Ambient Occlusion + crisp steel bulkhead baseboard along inner wall edge
@@ -462,17 +441,6 @@ export class GameRenderer {
         }
       }
     }
-
-    // Subtle steam vent warning pulse when active
-    for (const v of engine.map.steamVents) {
-      if (v.activeTimer > 0) {
-        const pulse = 0.25 + Math.sin(timeSec * 16) * 0.1;
-        ctx.fillStyle = `rgba(226, 232, 240, ${pulse})`;
-        ctx.beginPath();
-        ctx.arc(v.x, v.y, 18, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
   }
 
   private drawBulkheads(
@@ -571,7 +539,17 @@ export class GameRenderer {
     }
   }
 
-  private drawRoomStencils(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
+  private drawRoomStencils(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const halfW = width / (2 * zoom) + 220;
+    const halfH = height / (2 * zoom) + 180;
     ctx.save();
     ctx.font = '600 11px "Barlow Condensed", sans-serif';
     ctx.textAlign = 'center';
@@ -583,6 +561,7 @@ export class GameRenderer {
       if (r.name === 'Catwalk') continue;
       const cx = ((r.x1 + r.x2 + 1) / 2) * ts;
       const cy = ((r.y1 + r.y2 + 1) / 2) * ts;
+      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
       ctx.fillText(r.name.toUpperCase(), cx, cy);
     }
     ctx.restore();
@@ -697,13 +676,30 @@ export class GameRenderer {
     }
   }
 
-  private drawShipProps(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
+  private drawShipProps(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
     const ts = engine.map.tileSize;
+    const halfW = width / (2 * zoom) + 120;
+    const halfH = height / (2 * zoom) + 120;
+    const minX = camX - halfW;
+    const maxX = camX + halfW;
+    const minY = camY - halfH;
+    const maxY = camY + halfH;
+
     for (const prop of engine.map.props) {
+      if (prop.kind === 'SUBMARINE_HULL') continue; // Rendered with moonpool detail in drawEscapeZones
       const px = prop.tx * ts;
       const py = prop.ty * ts;
       const pw = prop.tw * ts;
       const ph = prop.th * ts;
+      if (px + pw < minX || px > maxX || py + ph < minY || py > maxY) continue;
 
       ctx.save();
       if (prop.kind === 'SHIPPING_CONTAINER') {
@@ -946,7 +942,219 @@ export class GameRenderer {
         ctx.moveTo(px + pw / 2, py + ph / 2);
         ctx.lineTo(px + pw / 2 + 28, py + ph / 2 - 16);
         ctx.stroke();
+      } else if (prop.kind === 'FLOODGATE_LEVER') {
+        const subPartsDone = engine.escape.submarineParts.length === 3;
+        const subActiveOrReady = engine.escape.submarineState !== 'IDLE';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.strokeStyle = subActiveOrReady ? '#34d399' : subPartsDone ? '#2dd4bf' : '#64748b';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        // Lever track & handle
+        ctx.fillStyle = '#090d14';
+        ctx.fillRect(px + pw * 0.5 - 3, py + 11, 6, ph - 22);
+        const leverY = subActiveOrReady ? py + ph - 16 : py + 14;
+        ctx.fillStyle = subActiveOrReady ? '#34d399' : subPartsDone ? '#f59e0b' : '#ef4444';
+        ctx.fillRect(px + pw * 0.5 - 7, leverY - 3, 14, 6);
+      } else if (prop.kind === 'PUMP_UNIT') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
+        traceRoundedRect(ctx, px + 6, py + 7, pw - 8, ph - 8, 5);
+        ctx.fill();
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, px + 4, py + 4, pw - 8, ph - 8, 5);
+        ctx.fill();
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#0f766e';
+        ctx.beginPath();
+        ctx.arc(px + pw * 0.5, py + ph * 0.5, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#94a3b8';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else if (prop.kind === 'SWITCHGEAR') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#242f3f';
+        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 10, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#64748b';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        for (let sx = px + 14; sx < px + pw - 12; sx += 18) {
+          ctx.fillStyle = sx % 36 < 18 ? '#f59e0b' : '#34d399';
+          ctx.fillRect(sx, py + 12, 4, 4);
+        }
       }
+      ctx.restore();
+    }
+  }
+
+  private drawSteamPipes(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    timeSec: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const ts = engine.map.tileSize;
+    const halfW = width / (2 * zoom) + 220;
+    const halfH = height / (2 * zoom) + 220;
+
+    for (const pipe of engine.map.steamPipes) {
+      if (Math.abs(pipe.x - camX) > halfW || Math.abs(pipe.y - camY) > halfH) continue;
+
+      const wallCx = (pipe.wallTx + 0.5) * ts;
+      const wallCy = (pipe.wallTy + 0.5) * ts;
+      const edgeX = wallCx + pipe.dirX * (ts * 0.48);
+      const edgeY = wallCy + pipe.dirY * (ts * 0.48);
+      const perpX = -pipe.dirY;
+      const perpY = pipe.dirX;
+
+      const isWarn = pipe.warningTimer > 0;
+      const isActive = pipe.activeTimer > 0;
+
+      ctx.save();
+      // Wall-mounted bronze/iron pipe collar & directional flanged nozzle
+      ctx.strokeStyle = '#090d14';
+      ctx.lineWidth = 8;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(edgeX - pipe.dirX * 10, edgeY - pipe.dirY * 10);
+      ctx.lineTo(edgeX + pipe.dirX * 11, edgeY + pipe.dirY * 11);
+      ctx.stroke();
+
+      ctx.strokeStyle = isActive ? '#e2e8f0' : isWarn ? '#f59e0b' : '#9a3412';
+      ctx.lineWidth = 5.2;
+      ctx.beginPath();
+      ctx.moveTo(edgeX - pipe.dirX * 9, edgeY - pipe.dirY * 9);
+      ctx.lineTo(edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10);
+      ctx.stroke();
+
+      // Bolted wall flange collar
+      ctx.strokeStyle = '#cbd5e1';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(edgeX - perpX * 8, edgeY - perpY * 8);
+      ctx.lineTo(edgeX + perpX * 8, edgeY + perpY * 8);
+      ctx.stroke();
+
+      // Pressure valve gauge LED
+      ctx.fillStyle = isActive
+        ? '#ef4444'
+        : isWarn
+          ? Math.sin(timeSec * 22) > 0
+            ? '#fde047'
+            : '#f97316'
+          : '#475569';
+      ctx.beginPath();
+      ctx.arc(edgeX - pipe.dirX * 4 + perpX * 6, edgeY - pipe.dirY * 4 + perpY * 6, 2.8, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Warning hiss flare at nozzle before burst
+      if (isWarn) {
+        const wPulse = 0.35 + 0.25 * Math.sin(timeSec * 24);
+        const wGrad = ctx.createRadialGradient(edgeX, edgeY, 2, edgeX + pipe.dirX * 18, edgeY + pipe.dirY * 18, 28);
+        wGrad.addColorStop(0, `rgba(253, 224, 71, ${wPulse})`);
+        wGrad.addColorStop(1, 'rgba(251, 191, 36, 0)');
+        ctx.fillStyle = wGrad;
+        ctx.beginPath();
+        ctx.arc(edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10, 26, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Directional high-pressure steam burst jet (clipped by walls & closed doors)
+      if (isActive) {
+        const clippedTiles = engine.getSteamPipeClippedRangeTiles(pipe);
+        if (clippedTiles > 0) {
+          const jetLen = clippedTiles * ts - 4;
+          const endX = edgeX + pipe.dirX * jetLen;
+          const endY = edgeY + pipe.dirY * jetLen;
+          const jetGrad = ctx.createLinearGradient(edgeX, edgeY, endX, endY);
+          jetGrad.addColorStop(0, 'rgba(248, 250, 252, 0.72)');
+          jetGrad.addColorStop(0.5, 'rgba(226, 232, 240, 0.45)');
+          jetGrad.addColorStop(1, 'rgba(203, 213, 225, 0.08)');
+
+          const wobble = Math.sin(timeSec * 36 + pipe.wallTx) * 2.5;
+          ctx.fillStyle = jetGrad;
+          ctx.beginPath();
+          ctx.moveTo(edgeX + perpX * 5, edgeY + perpY * 5);
+          ctx.lineTo(endX + perpX * (16 + wobble), endY + perpY * (16 + wobble));
+          ctx.lineTo(endX - perpX * (16 - wobble), endY - perpY * (16 - wobble));
+          ctx.lineTo(edgeX - perpX * 5, edgeY - perpY * 5);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  private drawPaperMaps(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    timeSec: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const halfW = width / (2 * zoom) + 90;
+    const halfH = height / (2 * zoom) + 90;
+
+    for (const stand of engine.map.paperMaps) {
+      if (Math.abs(stand.x - camX) > halfW || Math.abs(stand.y - camY) > halfH) continue;
+
+      ctx.save();
+      ctx.translate(stand.x, stand.y);
+
+      // Stand drop shadow & steel table pedestal
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
+      traceRoundedRect(ctx, -13, -9, 28, 22, 3);
+      ctx.fill();
+
+      ctx.fillStyle = '#334155';
+      traceRoundedRect(ctx, -15, -11, 28, 22, 3);
+      ctx.fill();
+      ctx.strokeStyle = '#64748b';
+      ctx.lineWidth = 1.4;
+      ctx.stroke();
+
+      // Blueprint parchment sheet pinned to lectern
+      ctx.fillStyle = '#e7dcc2';
+      traceRoundedRect(ctx, -11, -8, 20, 16, 1.5);
+      ctx.fill();
+
+      // Ink schematic deck lines + tiny red "YOU ARE HERE" pin
+      ctx.strokeStyle = '#1e3a5f';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(-8, -3);
+      ctx.lineTo(6, -3);
+      ctx.moveTo(-8, 2);
+      ctx.lineTo(4, 2);
+      ctx.stroke();
+
+      const pulse = 0.65 + 0.35 * Math.sin(timeSec * 4.5);
+      ctx.fillStyle = `rgba(220, 38, 38, ${pulse})`;
+      ctx.beginPath();
+      ctx.arc(2, -1, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Warm brass map reading lamp rim
+      ctx.fillStyle = '#f59e0b';
+      ctx.fillRect(-12, -10, 6, 3);
+
       ctx.restore();
     }
   }
@@ -1596,17 +1804,178 @@ export class GameRenderer {
 
     ctx.restore();
     ctx.restore();
+
+    // --- 3. DECK 1 MOONPOOL CHAMBER & DEEP-DIVE SUBMARINE ---
+    const subPos = engine.map.submarinePos;
+    const poolX = 102 * ts;
+    const poolY = 92 * ts;
+    const poolW = 4 * ts;
+    const poolH = 6 * ts;
+    const hasSubBat = esc.submarineParts.includes('SUB_BATTERY');
+    const hasBallast = esc.submarineParts.includes('BALLAST_PUMP');
+    const hasDiveKey = esc.submarineParts.includes('DIVE_KEY');
+    const subReady = esc.submarineState === 'READY';
+    const subActivating = esc.submarineState === 'ACTIVATING';
+    const floodLevel = subReady ? 1 : subActivating ? esc.submarineActivationProgress : 0;
+
+    ctx.save();
+    // Recessed Moonpool Water Basin (centered on 102..105, 92..97)
+    ctx.fillStyle = '#04121d';
+    traceRoundedRect(ctx, poolX - 6, poolY - 6, poolW + 12, poolH + 12, 6);
+    ctx.fill();
+
+    // Water ripples inside moonpool + surging white foam during floodgate deluge
+    const waterAlpha = 0.42 + floodLevel * 0.45;
+    ctx.fillStyle = `rgba(13, 148, 136, ${waterAlpha * 0.25})`;
+    traceRoundedRect(ctx, poolX, poolY, poolW, poolH, 4);
+    ctx.fill();
+
+    ctx.strokeStyle = subActivating
+      ? `rgba(153, 246, 228, ${0.45 + Math.sin(timeSec * 14) * 0.25})`
+      : 'rgba(45, 212, 191, 0.22)';
+    ctx.lineWidth = 1.6;
+    for (let wy = poolY + 24; wy < poolY + poolH - 18; wy += 36) {
+      const drift = Math.sin(timeSec * (subActivating ? 8 : 2.1) + wy * 0.05) * 6;
+      ctx.beginPath();
+      ctx.moveTo(poolX + 16 + drift, wy);
+      ctx.quadraticCurveTo(poolX + poolW * 0.5, wy - 6, poolX + poolW - 16 + drift, wy);
+      ctx.stroke();
+    }
+
+    // Moonpool steel coaming & hazard border
+    ctx.strokeStyle = subReady ? '#34d399' : esc.submarineParts.length === 3 ? '#2dd4bf' : 'rgba(45, 212, 191, 0.48)';
+    ctx.lineWidth = 2.6;
+    ctx.setLineDash([10, 6]);
+    traceRoundedRect(ctx, poolX - 4, poolY - 4, poolW + 8, poolH + 8, 5);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Boarding boarding-gangway apron at submarinePos (100, 95)
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
+    traceRoundedRect(ctx, subPos.x - 18, subPos.y - 26, 46, 52, 4);
+    ctx.fill();
+    ctx.strokeStyle = subReady ? '#34d399' : '#2dd4bf';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // Deep-Dive Rescue Submarine (vertical bow-south / bow-north posture inside moonpool)
+    const subCx = poolX + poolW * 0.5;
+    const subCy = poolY + poolH * 0.5 + (subReady ? Math.sin(timeSec * 3) * 2.5 : 0);
+    ctx.save();
+    ctx.translate(subCx, subCy);
+
+    // Shadow in water
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
+    ctx.beginPath();
+    ctx.ellipse(4, 4, 34, 98, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Outer dive hull (deep graphite + rescue-yellow dorsal stripe)
+    const subGrad = ctx.createLinearGradient(-32, 0, 32, 0);
+    subGrad.addColorStop(0, '#0f172a');
+    subGrad.addColorStop(0.5, '#334155');
+    subGrad.addColorStop(1, '#0f172a');
+    ctx.fillStyle = subGrad;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 31, 94, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = subReady ? '#34d399' : '#64748b';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Bow & stern hydroplanes
+    ctx.fillStyle = '#475569';
+    ctx.fillRect(-42, -56, 12, 10);
+    ctx.fillRect(30, -56, 12, 10);
+    ctx.fillRect(-38, 70, 10, 8);
+    ctx.fillRect(28, 70, 10, 8);
+
+    // Centerline safety stripe
+    ctx.strokeStyle = '#eab308';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.moveTo(0, -82);
+    ctx.lineTo(0, 82);
+    ctx.stroke();
+
+    // Conning tower sail & hatch
+    ctx.fillStyle = '#1e293b';
+    traceRoundedRect(ctx, -16, -24, 32, 48, 12);
+    ctx.fill();
+    ctx.strokeStyle = subReady ? '#34d399' : '#94a3b8';
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // Part 1: SUB_BATTERY — Port Power Cell Bank
+    ctx.fillStyle = hasSubBat ? '#0d9488' : '#090d14';
+    traceRoundedRect(ctx, -28, -16, 10, 32, 2);
+    ctx.fill();
+    ctx.strokeStyle = hasSubBat ? '#5eead4' : '#475569';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    if (hasSubBat) {
+      ctx.fillStyle = '#5eead4';
+      ctx.fillRect(-25, -10, 4, 6);
+      ctx.fillRect(-25, 4, 4, 6);
+    }
+
+    // Part 2: BALLAST_PUMP — Aft Starboard Trim Manifold
+    ctx.fillStyle = hasBallast ? '#0369a1' : '#090d14';
+    traceRoundedRect(ctx, 18, 18, 11, 26, 2);
+    ctx.fill();
+    ctx.strokeStyle = hasBallast ? '#38bdf8' : '#475569';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+
+    // Part 3: DIVE_KEY — Conning Periscope & Helm Console Beacon
+    ctx.fillStyle = hasDiveKey ? '#064e3b' : '#090d14';
+    ctx.beginPath();
+    ctx.arc(0, -4, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = hasDiveKey ? '#34d399' : '#475569';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    if (hasDiveKey) {
+      ctx.fillStyle = '#34d399';
+      ctx.beginPath();
+      ctx.arc(0, -4, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+
+    // Floodgate Lever floor beacon ring
+    ctx.strokeStyle =
+      esc.submarineState === 'READY'
+        ? 'rgba(52, 211, 153, 0.75)'
+        : esc.submarineParts.length === 3
+          ? `rgba(45, 212, 191, ${0.45 + 0.35 * Math.sin(timeSec * 6)})`
+          : 'rgba(148, 163, 184, 0.32)';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(subPos.leverX, subPos.leverY, 26, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.restore();
   }
 
   private drawWorldPickups(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
     timeSec: number,
-    deckOverride?: 'MAIN' | 'LOWER'
+    deckOverride?: ShipDeck,
+    width = 1280,
+    height = 720,
+    zoom = 1.25,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
     const deck = deckOverride ?? engine.getCurrentDeck();
+    const halfW = width / (2 * zoom) + 80;
+    const halfH = height / (2 * zoom) + 80;
     for (const wp of engine.worldPickups) {
       if (wp.deck !== deck) continue;
+      if (Math.abs(wp.x - camX) > halfW || Math.abs(wp.y - camY) > halfH) continue;
       const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
       ctx.save();
       ctx.translate(wp.x, wp.y);
@@ -1619,7 +1988,9 @@ export class GameRenderer {
             ? 'rgba(251, 191, 36, 0.65)'
             : wp.item === 'WINCH_CRANK' || wp.item === 'MARINE_BATTERY' || wp.item === 'HULL_PATCH'
               ? 'rgba(56, 189, 248, 0.65)'
-              : 'rgba(163, 230, 53, 0.55)';
+              : wp.item === 'SUB_BATTERY' || wp.item === 'BALLAST_PUMP' || wp.item === 'DIVE_KEY'
+                ? 'rgba(45, 212, 191, 0.68)'
+                : 'rgba(163, 230, 53, 0.55)';
       ctx.lineWidth = 1.4;
       ctx.beginPath();
       ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2);
@@ -1649,8 +2020,8 @@ export class GameRenderer {
         ctx.fill();
         ctx.fillStyle = '#fbbf24';
         ctx.fillRect(1, -9, 4, 3);
-      } else if (wp.item === 'IGNITION_KEY') {
-        ctx.strokeStyle = '#fbbf24';
+      } else if (wp.item === 'IGNITION_KEY' || wp.item === 'DIVE_KEY') {
+        ctx.strokeStyle = wp.item === 'DIVE_KEY' ? '#2dd4bf' : '#fbbf24';
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(-3, 0, 3.5, 0, Math.PI * 2);
@@ -1682,14 +2053,25 @@ export class GameRenderer {
         ctx.moveTo(0, 0);
         ctx.lineTo(7, -4);
         ctx.stroke();
-      } else if (wp.item === 'MARINE_BATTERY') {
-        ctx.fillStyle = '#0369a1';
+      } else if (wp.item === 'MARINE_BATTERY' || wp.item === 'SUB_BATTERY') {
+        ctx.fillStyle = wp.item === 'SUB_BATTERY' ? '#0f766e' : '#0369a1';
         traceRoundedRect(ctx, -6, -6, 12, 12, 1.5);
         ctx.fill();
-        ctx.fillStyle = '#38bdf8';
+        ctx.fillStyle = wp.item === 'SUB_BATTERY' ? '#5eead4' : '#38bdf8';
         ctx.fillRect(-4, -8, 3, 2);
         ctx.fillStyle = '#ef4444';
         ctx.fillRect(1, -8, 3, 2);
+      } else if (wp.item === 'BALLAST_PUMP') {
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, -7, -5, 14, 10, 2);
+        ctx.fill();
+        ctx.strokeStyle = '#2dd4bf';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#2dd4bf';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+        ctx.fill();
       } else {
         // General Tool Drop
         ctx.fillStyle =
@@ -1710,8 +2092,19 @@ export class GameRenderer {
     }
   }
 
-  private drawContainers(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
+  private drawContainers(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const halfW = width / (2 * zoom) + 70;
+    const halfH = height / (2 * zoom) + 70;
     for (const c of engine.map.containers) {
+      if (Math.abs(c.x - camX) > halfW || Math.abs(c.y - camY) > halfH) continue;
       this.drawSingleContainer(ctx, c);
     }
   }
@@ -1775,8 +2168,19 @@ export class GameRenderer {
     ctx.restore();
   }
 
-  private drawHidingSpots(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
+  private drawHidingSpots(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const halfW = width / (2 * zoom) + 70;
+    const halfH = height / (2 * zoom) + 70;
     for (const s of engine.map.hidingSpots) {
+      if (Math.abs(s.x - camX) > halfW || Math.abs(s.y - camY) > halfH) continue;
       this.drawSingleHidingSpot(ctx, s, engine.player.hidingSpotId === s.id);
     }
   }
@@ -1838,10 +2242,18 @@ export class GameRenderer {
   private drawLightSwitches(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
-    timeSec: number
+    timeSec: number,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
     const b = engine.brute;
+    const halfW = width / (2 * zoom) + 70;
+    const halfH = height / (2 * zoom) + 70;
     for (const sw of engine.map.lightSwitches) {
+      if (Math.abs(sw.x - camX) > halfW || Math.abs(sw.y - camY) > halfH) continue;
       const flk = sw.isOn
         ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
         : { intensity: 1, sputterAmount: 0 };
@@ -1865,11 +2277,22 @@ export class GameRenderer {
     }
   }
 
-  private drawDoors(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
+  private drawDoors(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
     const ts = engine.map.tileSize;
+    const halfW = width / (2 * zoom) + ts * 2;
+    const halfH = height / (2 * zoom) + ts * 2;
     for (const d of engine.map.doors) {
       const cx = (d.tx + 0.5) * ts;
       const cy = (d.ty + 0.5) * ts;
+      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
       ctx.save();
       ctx.translate(cx, cy);
 
@@ -1942,9 +2365,17 @@ export class GameRenderer {
   private drawDroppedLights(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
-    timeSec: number
+    timeSec: number,
+    width: number,
+    height: number,
+    zoom: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
   ): void {
+    const halfW = width / (2 * zoom) + 70;
+    const halfH = height / (2 * zoom) + 70;
     for (const l of engine.droppedLights) {
+      if (Math.abs(l.x - camX) > halfW || Math.abs(l.y - camY) > halfH) continue;
       ctx.save();
       if (l.type === 'GLOWSTICK') {
         ctx.fillStyle = '#34d399';
@@ -2332,7 +2763,7 @@ export class GameRenderer {
 
   private findNearestWalkableInRoom(
     engine: MonstrumGameEngine,
-    room: RoomName,
+    roomId: number,
     targetX: number,
     targetY: number
   ): { x: number; y: number } {
@@ -2340,7 +2771,7 @@ export class GameRenderer {
     const ts = map.tileSize;
     const tTx = Math.max(0, Math.min(map.width - 1, Math.floor(targetX / ts)));
     const tTy = Math.max(0, Math.min(map.height - 1, Math.floor(targetY / ts)));
-    if (isTileWalkable(map.tiles[tTy]?.[tTx] ?? 'VOID') && map.roomGrid[tTy][tTx] === room) {
+    if (isTileWalkable(map.tiles[tTy]?.[tTx] ?? 'VOID') && map.roomIdGrid[tTy][tTx] === roomId) {
       return { x: targetX, y: targetY };
     }
 
@@ -2348,7 +2779,7 @@ export class GameRenderer {
     let bestPt = { x: targetX, y: targetY };
     for (let y = 0; y < map.height; y++) {
       for (let x = 0; x < map.width; x++) {
-        if (map.roomGrid[y][x] !== room || !isTileWalkable(map.tiles[y][x])) continue;
+        if (map.roomIdGrid[y][x] !== roomId || !isTileWalkable(map.tiles[y][x])) continue;
         const wx = (x + 0.5) * ts;
         const wy = (y + 0.5) * ts;
         const d = Math.hypot(wx - targetX, wy - targetY);
@@ -2366,7 +2797,7 @@ export class GameRenderer {
     sw: RoomLightSwitch
   ): Array<{ x: number; y: number; range: number }> {
     const ts = engine.map.tileSize;
-    const rm = engine.map.rooms.find((r) => r.name === sw.room);
+    const rm = engine.map.rooms.find((r) => r.id === sw.roomId);
     if (!rm) {
       return [{ x: sw.x, y: sw.y, range: 360 }];
     }
@@ -2375,7 +2806,7 @@ export class GameRenderer {
     const rH = (rm.y2 - rm.y1 + 1) * ts;
     const rcx = ((rm.x1 + rm.x2 + 1) / 2) * ts;
     const rcy = ((rm.y1 + rm.y2 + 1) / 2) * ts;
-    const centerPt = this.findNearestWalkableInRoom(engine, sw.room, rcx, rcy);
+    const centerPt = this.findNearestWalkableInRoom(engine, sw.roomId, rcx, rcy);
     const range = Math.max(310, Math.hypot(rW, rH) * 0.65 + 175);
 
     const fixtures: Array<{ x: number; y: number; range: number }> = [
@@ -2386,13 +2817,13 @@ export class GameRenderer {
     if (rm.x2 - rm.x1 >= 7) {
       const leftPt = this.findNearestWalkableInRoom(
         engine,
-        sw.room,
+        sw.roomId,
         (rm.x1 + 1.5) * ts,
         rcy
       );
       const rightPt = this.findNearestWalkableInRoom(
         engine,
-        sw.room,
+        sw.roomId,
         (rm.x2 - 0.5) * ts,
         rcy
       );
@@ -2922,6 +3353,12 @@ export class GameRenderer {
         r: engine.escape.heliState !== 'IDLE' ? 150 : 120,
         alpha: engine.escape.heliState !== 'IDLE' ? 0.82 : 0.65,
       },
+      {
+        x: engine.map.submarinePos.x,
+        y: engine.map.submarinePos.y,
+        r: engine.escape.submarineState !== 'IDLE' ? 165 : 130,
+        alpha: engine.escape.submarineState !== 'IDLE' ? 0.85 : 0.68,
+      },
     ];
     for (const bc of beacons) {
       const bPoly = computeVisibilityPolygon(
@@ -3170,6 +3607,9 @@ export class GameRenderer {
     } else if (nearest.kind === 'HIDING') {
       tx = nearest.spot.x;
       ty = nearest.spot.y;
+    } else if (nearest.kind === 'PAPER_MAP') {
+      tx = nearest.stand.x;
+      ty = nearest.stand.y;
     } else if (nearest.kind === 'LIGHT_SWITCH') {
       tx = nearest.lightSwitch.x;
       ty = nearest.lightSwitch.y;
@@ -3185,6 +3625,15 @@ export class GameRenderer {
     } else if (nearest.kind === 'ESCAPE_HELI') {
       tx = engine.map.heliPos.x;
       ty = engine.map.heliPos.y;
+    } else if (nearest.kind === 'ESCAPE_SUBMARINE') {
+      tx =
+        nearest.subTarget === 'LEVER'
+          ? engine.map.submarinePos.leverX
+          : engine.map.submarinePos.x;
+      ty =
+        nearest.subTarget === 'LEVER'
+          ? engine.map.submarinePos.leverY
+          : engine.map.submarinePos.y;
     }
 
     const pulse = 18 + Math.sin(timeSec * 6) * 2.5;
@@ -3381,17 +3830,19 @@ export class GameRenderer {
 
       const worldSpan = viewWorldRadius * 2.2;
       this.drawTiles(ctx, engine, worldSpan, worldSpan, timeSec, 1, dest.x, dest.y);
-      this.drawRoomStencils(ctx, engine);
+      this.drawRoomStencils(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawBloodStreaks(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawStairwells(ctx, engine, null, timeSec);
       this.drawBulkheads(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawShipProps(ctx, engine);
-      this.drawContainers(ctx, engine);
-      this.drawHidingSpots(ctx, engine);
-      this.drawLightSwitches(ctx, engine, timeSec);
-      this.drawDoors(ctx, engine);
-      this.drawDroppedLights(ctx, engine, timeSec);
-      this.drawWorldPickups(ctx, engine, timeSec, dest.deck);
+      this.drawShipProps(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawSteamPipes(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
+      this.drawPaperMaps(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
+      this.drawContainers(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawHidingSpots(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawLightSwitches(ctx, engine, timeSec, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawDoors(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawDroppedLights(ctx, engine, timeSec, worldSpan, worldSpan, 1, dest.x, dest.y);
+      this.drawWorldPickups(ctx, engine, timeSec, dest.deck, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawParticles(ctx, engine);
 
       // Render Brute inside landing portal if on destination deck and inside LoS
@@ -3506,7 +3957,7 @@ export class GameRenderer {
     ctx.stroke();
 
     // Subtle rectangular deck header bar just above portal rim
-    const badgeText = `${dest.deck === 'LOWER' ? 'LOWER DECK' : 'MAIN DECK'} · ${dest.room.toUpperCase()}`;
+    const badgeText = `${getDeckLabel(dest.deck).toUpperCase()} · ${dest.room.toUpperCase()}`;
     ctx.font = '600 11px "JetBrains Mono", monospace';
     const textW = ctx.measureText(badgeText).width;
     const boxW = textW + 18;
@@ -3559,8 +4010,9 @@ export class GameRenderer {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
 
-    // Clip red danger/chase pulse strictly inside visible player sight polygons so #000000 void stays untouched
-    if ((redBoost > 0 || engine.spotFlashAlpha > 0) && this.lastPlayerSightPolys.length > 0) {
+    // Clip red danger/chase pulse + steam condensation fog strictly inside player sight polygons
+    const steamFog = engine.player.steamFogAlpha;
+    if ((redBoost > 0 || engine.spotFlashAlpha > 0 || steamFog > 0.01) && this.lastPlayerSightPolys.length > 0) {
       ctx.save();
       ctx.translate(width / 2, height / 2);
       ctx.scale(zoom, zoom);
@@ -3576,6 +4028,22 @@ export class GameRenderer {
       }
       ctx.clip();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      if (steamFog > 0.01) {
+        const fogGrad = ctx.createRadialGradient(
+          width / 2,
+          height / 2,
+          Math.min(width, height) * 0.06,
+          width / 2,
+          height / 2,
+          Math.max(width, height) * 0.72
+        );
+        fogGrad.addColorStop(0, `rgba(226, 232, 240, ${(steamFog * 0.56).toFixed(3)})`);
+        fogGrad.addColorStop(0.55, `rgba(203, 213, 225, ${(steamFog * 0.68).toFixed(3)})`);
+        fogGrad.addColorStop(1, `rgba(148, 163, 184, ${(steamFog * 0.74).toFixed(3)})`);
+        ctx.fillStyle = fogGrad;
+        ctx.fillRect(0, 0, width, height);
+      }
 
       if (redBoost > 0) {
         const dGrad = ctx.createRadialGradient(
@@ -3604,9 +4072,11 @@ export class GameRenderer {
 export function getRoomGuidanceLabel(room: RoomName): string {
   switch (room) {
     case 'Lifeboat Davit':
-      return 'Bow Lifeboat Davit';
+      return 'Deck 2 Lifeboat Davit';
     case 'Helideck':
-      return 'Stern Helideck';
+      return 'Deck 3 Stern Helideck';
+    case 'Submarine Bay':
+      return 'Deck 1 Submarine Bay';
     default:
       return room;
   }

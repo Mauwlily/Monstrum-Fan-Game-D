@@ -1292,7 +1292,109 @@ export class HorrorAudioEngine {
     src.stop(now + 0.09);
   }
 
-  public playRepairTick(route: 'LIFEBOAT' | 'HELI', partId: string): void {
+  public playPaperMapToggle(opening: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted || !this.shortWhiteNoise) return;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.shortWhiteNoise;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(opening ? 1580 : 1080, now);
+    filter.frequency.exponentialRampToValueAtTime(opening ? 940 : 680, now + 0.14);
+    filter.Q.value = 1.25;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.085, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.17);
+  }
+
+  public playSteamPipeWarning(dx = 0, occ = 0): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const occParams = this.computeOcclusionParams(occ, false);
+
+    // Dual metallic valve pressure clanks
+    [0, 0.24].forEach((offset, i) => {
+      if (!this.ctx) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(i === 0 ? 740 : 880, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(240, now + offset + 0.09);
+      gain.gain.setValueAtTime(safeGain(0.16 * occParams.gainMult), now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.11);
+      osc.connect(gain);
+      this.routeSpatialNode(gain, dx, occ, false);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.12);
+    });
+
+    // Rising pre-burst pressure hiss
+    if (this.shortWhiteNoise) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.shortWhiteNoise;
+      const band = this.ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.setValueAtTime(920, now + 0.18);
+      band.frequency.exponentialRampToValueAtTime(safeFreq(2900 * (1 - occ * 0.55), 1100), now + 1.18);
+      band.Q.value = 1.9;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now + 0.18);
+      gain.gain.linearRampToValueAtTime(safeGain(0.14 * occParams.gainMult), now + 1.1);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.3);
+      src.connect(band);
+      band.connect(gain);
+      this.routeSpatialNode(gain, dx, occ, false);
+      src.start(now + 0.18);
+      src.stop(now + 1.32);
+    }
+  }
+
+  public playSteamPipeBurst(dx = 0, occ = 0, hitPlayer = false): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const occParams = this.computeOcclusionParams(occ, false);
+    const noise = this.shortWhiteNoise ?? this.createWhiteNoiseBuffer(0.7);
+    if (noise) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = noise;
+      const band = this.ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.setValueAtTime(safeFreq((hitPlayer ? 2400 : 1850) * (1 - occ * 0.6), 700), now);
+      band.frequency.exponentialRampToValueAtTime(safeFreq(900 * (1 - occ * 0.5), 420), now + 0.75);
+      band.Q.value = 1.1;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(safeGain((hitPlayer ? 0.34 : 0.22) * occParams.gainMult), now + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
+      src.connect(band);
+      band.connect(gain);
+      this.routeSpatialNode(gain, dx, occ, false);
+      src.start(now);
+      src.stop(now + 0.88);
+    }
+
+    if (hitPlayer) {
+      const thud = this.ctx.createOscillator();
+      const thudGain = this.ctx.createGain();
+      thud.type = 'sine';
+      thud.frequency.setValueAtTime(125, now);
+      thud.frequency.exponentialRampToValueAtTime(38, now + 0.26);
+      thudGain.gain.setValueAtTime(0.28, now);
+      thudGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      thud.connect(thudGain);
+      thudGain.connect(this.masterGain);
+      thud.start(now);
+      thud.stop(now + 0.3);
+    }
+  }
+
+  public playRepairTick(route: 'LIFEBOAT' | 'HELI' | 'SUBMARINE', partId: string): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -1307,13 +1409,20 @@ export class HorrorAudioEngine {
       clang.type = 'triangle';
       clang.frequency.setValueAtTime(480, now);
       clang.frequency.exponentialRampToValueAtTime(190, now + 0.07);
-    } else if (partId === 'ROTOR_FUSE' || partId === 'MARINE_BATTERY') {
+    } else if (partId === 'ROTOR_FUSE' || partId === 'MARINE_BATTERY' || partId === 'SUB_BATTERY') {
       osc.type = 'square';
       osc.frequency.setValueAtTime(640 + Math.random() * 140, now);
       osc.frequency.exponentialRampToValueAtTime(260, now + 0.07);
       clang.type = 'triangle';
       clang.frequency.setValueAtTime(920, now);
       clang.frequency.exponentialRampToValueAtTime(340, now + 0.08);
+    } else if (route === 'SUBMARINE') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(partId === 'BALLAST_PUMP' ? 165 : 295, now);
+      osc.frequency.exponentialRampToValueAtTime(76, now + 0.12);
+      clang.type = 'triangle';
+      clang.frequency.setValueAtTime(520, now);
+      clang.frequency.exponentialRampToValueAtTime(185, now + 0.1);
     } else {
       osc.type = 'triangle';
       osc.frequency.setValueAtTime(route === 'HELI' ? 350 : 270, now);
@@ -1368,7 +1477,7 @@ export class HorrorAudioEngine {
     });
   }
 
-  public playEscapeActivationStart(route: 'LIFEBOAT' | 'HELI'): void {
+  public playEscapeActivationStart(route: 'LIFEBOAT' | 'HELI' | 'SUBMARINE'): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -1377,6 +1486,11 @@ export class HorrorAudioEngine {
     if (route === 'HELI') {
       osc.frequency.setValueAtTime(75, now);
       osc.frequency.exponentialRampToValueAtTime(340, now + 0.75);
+    } else if (route === 'SUBMARINE') {
+      // Heavy floodgate klaxon + deep hydraulic gate roar
+      osc.frequency.setValueAtTime(168, now);
+      osc.frequency.linearRampToValueAtTime(112, now + 0.36);
+      osc.frequency.linearRampToValueAtTime(174, now + 0.78);
     } else {
       osc.frequency.setValueAtTime(220, now);
       osc.frequency.linearRampToValueAtTime(145, now + 0.35);
@@ -1395,7 +1509,12 @@ export class HorrorAudioEngine {
     osc.stop(now + 0.88);
   }
 
-  public playEscapeActivationPulse(route: 'LIFEBOAT' | 'HELI', progress: number, dx = 0, occ = 0): void {
+  public playEscapeActivationPulse(
+    route: 'LIFEBOAT' | 'HELI' | 'SUBMARINE',
+    progress: number,
+    dx = 0,
+    occ = 0
+  ): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
@@ -1407,6 +1526,15 @@ export class HorrorAudioEngine {
       osc.frequency.setValueAtTime(pitch, now);
       gain.gain.setValueAtTime(0.0001, now);
       gain.gain.linearRampToValueAtTime(safeGain(0.14 * occParams.gainMult), now + 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+    } else if (route === 'SUBMARINE') {
+      // Floodgate klaxon pulse + deep ballast surge
+      osc.type = 'sine';
+      const pitch = safeFreq(310 + progress * 90, 320);
+      osc.frequency.setValueAtTime(pitch, now);
+      osc.frequency.exponentialRampToValueAtTime(pitch * 0.74, now + 0.28);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(safeGain(0.17 * occParams.gainMult), now + 0.025);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
     } else {
       osc.type = 'triangle';
@@ -1422,15 +1550,20 @@ export class HorrorAudioEngine {
     osc.stop(now + 0.34);
   }
 
-  public playEscapeReadyChime(route: 'LIFEBOAT' | 'HELI'): void {
+  public playEscapeReadyChime(route: 'LIFEBOAT' | 'HELI' | 'SUBMARINE'): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
     const now = this.ctx.currentTime;
-    const notes = route === 'HELI' ? [523.25, 659.25, 783.99] : [440, 554.37, 659.25];
+    const notes =
+      route === 'HELI'
+        ? [523.25, 659.25, 783.99]
+        : route === 'SUBMARINE'
+          ? [698.46, 698.46, 880.0]
+          : [440, 554.37, 659.25];
     notes.forEach((f, idx) => {
       if (!this.ctx || !this.masterGain) return;
       const osc = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
-      osc.type = 'triangle';
+      osc.type = route === 'SUBMARINE' ? 'sine' : 'triangle';
       osc.frequency.setValueAtTime(f, now + idx * 0.09);
       gain.gain.setValueAtTime(0.16, now + idx * 0.09);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.09 + 0.34);

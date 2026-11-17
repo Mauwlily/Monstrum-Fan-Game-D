@@ -6,9 +6,11 @@ import {
   DifficultyLevel,
   Door,
   EscapeProgress,
+  getDeckIndex,
   PlayerState,
   RoomLightSwitch,
   RoomName,
+  ShipDeck,
   ShipMap,
 } from './types';
 import { canBruteSeePlayer, canBruteSeePoint, getSensesProfile } from './visibility';
@@ -22,11 +24,13 @@ export interface RememberedDoor {
 }
 
 export interface RoomMemory {
+  roomId: number;
   room: RoomName;
+  deck: ShipDeck;
   lastVisitedAt: number;
   lastClearedAt: number;
   suspicion: number;
-  connectedRooms: RoomName[];
+  connectedRoomIds: number[];
   walkableTiles: Array<{ tx: number; ty: number }>;
   centerWorld: { x: number; y: number };
 }
@@ -43,6 +47,7 @@ export interface StalkTarget {
   x: number;
   y: number;
   room: RoomName;
+  roomId: number;
   reason:
     | 'OPEN_DOOR'
     | 'CUT_LOCK'
@@ -57,10 +62,12 @@ export interface ClueDetectionEvent {
   x: number;
   y: number;
   room: RoomName;
+  roomId: number;
   reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON';
 }
 
 export interface StalkQueueEntry {
+  roomId: number;
   room: RoomName;
   x?: number;
   y?: number;
@@ -72,8 +79,11 @@ export class BruteBrain {
   public rememberedContainers: Map<string, boolean> = new Map();
   public rememberedLights: Map<string, boolean> = new Map();
   public lightCooldowns: Map<string, number> = new Map();
-  public roomMemory: Map<RoomName, RoomMemory> = new Map();
-  public doorSides: Map<string, { sideA: RoomName; sideB: RoomName }> = new Map();
+  public roomMemory: Map<number, RoomMemory> = new Map();
+  public doorSides: Map<
+    string,
+    { sideA: RoomName; sideB: RoomName; sideAId: number; sideBId: number }
+  > = new Map();
 
   public activeGoal: UtilityGoal = 'UNLEASHED_ROAM';
   public stalkTarget: StalkTarget | null = null;
@@ -84,6 +94,8 @@ export class BruteBrain {
   public observedHeliActive = false;
   public observedLifeboatRepairs = 0;
   public observedLifeboatActive = false;
+  public observedSubRepairs = 0;
+  public observedSubActive = false;
 
   private map: ShipMap;
   private recentlyCheckedSpots: Map<string, number> = new Map();
@@ -116,18 +128,24 @@ export class BruteBrain {
       this.lightCooldowns.set(ls.id, 0);
     }
 
-    // Build per-room walkable tile buckets and adjacency graph
-    const tilesByRoom = new Map<RoomName, Array<{ tx: number; ty: number }>>();
-    const adjacency = new Map<RoomName, Set<RoomName>>();
+    // Build per-compartment (roomId) walkable tile buckets and adjacency graph
+    const tilesByRoomId = new Map<number, Array<{ tx: number; ty: number }>>();
+    const roomMetaById = new Map<number, { room: RoomName; deck: ShipDeck }>();
+    const adjacency = new Map<number, Set<number>>();
 
     for (let y = 0; y < this.map.height; y++) {
       for (let x = 0; x < this.map.width; x++) {
         if (!isTileWalkable(this.map.tiles[y][x])) continue;
-        const r = this.map.roomGrid[y][x];
-        if (!tilesByRoom.has(r)) tilesByRoom.set(r, []);
-        tilesByRoom.get(r)!.push({ tx: x, ty: y });
+        const rId = this.map.roomIdGrid[y][x];
+        const rName = this.map.roomGrid[y][x];
+        const deck = this.map.deckGrid[y][x];
+        if (!tilesByRoomId.has(rId)) {
+          tilesByRoomId.set(rId, []);
+          roomMetaById.set(rId, { room: rName, deck });
+        }
+        tilesByRoomId.get(rId)!.push({ tx: x, ty: y });
 
-        if (!adjacency.has(r)) adjacency.set(r, new Set());
+        if (!adjacency.has(rId)) adjacency.set(rId, new Set());
         const neighbors = [
           [x + 1, y],
           [x - 1, y],
@@ -137,37 +155,42 @@ export class BruteBrain {
         for (const [nx, ny] of neighbors) {
           if (nx < 0 || nx >= this.map.width || ny < 0 || ny >= this.map.height) continue;
           if (!isTileWalkable(this.map.tiles[ny][nx])) continue;
-          const nr = this.map.roomGrid[ny][nx];
-          if (nr !== r) {
-            adjacency.get(r)!.add(nr);
+          const nrId = this.map.roomIdGrid[ny][nx];
+          if (nrId !== rId) {
+            adjacency.get(rId)!.add(nrId);
           }
         }
       }
     }
 
-    // Link stairwells across MAIN <-> LOWER decks in room adjacency graph
+    // Link stairwells across DECK_3 <-> DECK_2 <-> DECK_1 in compartment adjacency graph
     for (const st of this.map.stairwells) {
-      if (!adjacency.has(st.room)) adjacency.set(st.room, new Set());
-      if (!adjacency.has(st.targetRoom)) adjacency.set(st.targetRoom, new Set());
-      if (st.room !== st.targetRoom) {
-        adjacency.get(st.room)!.add(st.targetRoom);
-        adjacency.get(st.targetRoom)!.add(st.room);
+      const aId = st.roomId;
+      const bId = st.targetRoomId;
+      if (!adjacency.has(aId)) adjacency.set(aId, new Set());
+      if (!adjacency.has(bId)) adjacency.set(bId, new Set());
+      if (aId !== bId) {
+        adjacency.get(aId)!.add(bId);
+        adjacency.get(bId)!.add(aId);
       }
     }
 
-    for (const [room, tiles] of tilesByRoom.entries()) {
+    for (const [roomId, tiles] of tilesByRoomId.entries()) {
       let sx = 0;
       let sy = 0;
       for (const t of tiles) {
         sx += (t.tx + 0.5) * this.map.tileSize;
         sy += (t.ty + 0.5) * this.map.tileSize;
       }
-      this.roomMemory.set(room, {
-        room,
+      const meta = roomMetaById.get(roomId) ?? { room: 'Corridor' as RoomName, deck: 'DECK_2' as ShipDeck };
+      this.roomMemory.set(roomId, {
+        roomId,
+        room: meta.room,
+        deck: meta.deck,
         lastVisitedAt: -30,
         lastClearedAt: -30,
         suspicion: 0,
-        connectedRooms: Array.from(adjacency.get(room) ?? []),
+        connectedRoomIds: Array.from(adjacency.get(roomId) ?? []),
         walkableTiles: tiles,
         centerWorld: {
           x: sx / Math.max(1, tiles.length),
@@ -177,7 +200,9 @@ export class BruteBrain {
     }
   }
 
-  private resolveDoorSides(door: Door): { sideA: RoomName; sideB: RoomName } {
+  private resolveDoorSides(
+    door: Door
+  ): { sideA: RoomName; sideB: RoomName; sideAId: number; sideBId: number } {
     const dirs =
       door.orientation === 'H'
         ? [
@@ -189,16 +214,20 @@ export class BruteBrain {
             [1, 0],
           ];
     const rooms: RoomName[] = [];
+    const roomIds: number[] = [];
     for (const [dx, dy] of dirs) {
       const nx = door.tx + dx;
       const ny = door.ty + dy;
       if (nx >= 0 && nx < this.map.width && ny >= 0 && ny < this.map.height) {
         rooms.push(this.map.roomGrid[ny][nx]);
+        roomIds.push(this.map.roomIdGrid[ny][nx]);
       }
     }
     return {
       sideA: rooms[0] ?? 'Corridor',
       sideB: rooms[1] ?? 'Corridor',
+      sideAId: roomIds[0] ?? 0,
+      sideBId: roomIds[1] ?? 0,
     };
   }
 
@@ -212,14 +241,14 @@ export class BruteBrain {
     });
   }
 
-  public markRoomVisited(room: RoomName, nowSec: number): void {
-    const mem = this.roomMemory.get(room);
+  public markRoomVisited(roomId: number, nowSec: number): void {
+    const mem = this.roomMemory.get(roomId);
     if (!mem) return;
     mem.lastVisitedAt = nowSec;
   }
 
-  public markRoomCleared(room: RoomName, nowSec: number): void {
-    const mem = this.roomMemory.get(room);
+  public markRoomCleared(roomId: number, nowSec: number): void {
+    const mem = this.roomMemory.get(roomId);
     if (!mem) return;
     mem.lastClearedAt = nowSec;
     mem.suspicion = Math.max(0, mem.suspicion * 0.25);
@@ -237,7 +266,14 @@ export class BruteBrain {
     this.recentlyCheckedSpots.set(spotId, nowSec + 26);
   }
 
+  private getDeckAtWorld(wx: number, wy: number): ShipDeck {
+    const tx = Math.max(0, Math.min(this.map.width - 1, Math.floor(wx / this.map.tileSize)));
+    const ty = Math.max(0, Math.min(this.map.height - 1, Math.floor(wy / this.map.tileSize)));
+    return this.map.deckGrid[ty][tx];
+  }
+
   public getRoomUncheckedSpots(
+    roomId: number,
     room: RoomName,
     refX: number,
     refY: number,
@@ -245,16 +281,14 @@ export class BruteBrain {
     intelligence: DifficultyLevel,
     tuning?: BruteTuningNumbers
   ): string[] {
-    const deckSplitY = 29 * this.map.tileSize;
-    const onLower = refY > deckSplitY;
+    const refDeck = this.getDeckAtWorld(refX, refY);
 
     let candidates = this.map.hidingSpots.filter((s) => {
       if ((this.recentlyCheckedSpots.get(s.id) ?? -1) > nowSec) return false;
       if (room !== 'Corridor' && room !== 'Catwalk') {
-        return s.room === room;
+        return s.roomId === roomId;
       }
-      const spotLower = s.y > deckSplitY;
-      return spotLower === onLower && Math.hypot(s.x - refX, s.y - refY) <= 230;
+      return s.deck === refDeck && Math.hypot(s.x - refX, s.y - refY) <= 230;
     });
 
     if (candidates.length === 0 && (room === 'Corridor' || room === 'Catwalk')) {
@@ -277,13 +311,11 @@ export class BruteBrain {
       const cap = Math.max(3, Math.ceil(candidates.length * 0.75));
       return candidates.slice(0, cap).map((s) => s.id);
     }
-    // HIGH intelligence sweeps 100% of unchecked hiding spots in the suspect room!
     return candidates.map((s) => s.id);
   }
 
   /**
-   * Checks doors and containers inside the Brute's real raycasted FoV.
-   * Returns newly discovered ClueDetectionEvents (if any).
+   * Checks doors, containers, lights, and escape bays inside the Brute's real raycasted FoV.
    */
   public perceiveClues(
     dt: number,
@@ -342,10 +374,11 @@ export class BruteBrain {
         mem.cooldownUntil = nowSec + 18;
 
         if (!silentSyncOnly) {
-          const farRoom = this.pickFarRoomFromDoor(door, brute);
+          const far = this.pickFarRoomFromDoor(door, brute);
           const reason = lockTampered ? 'CUT_LOCK' : 'OPEN_DOOR';
           this.triggerClueReaction(
-            farRoom,
+            far.roomId,
+            far.room,
             doorX,
             doorY,
             reason,
@@ -354,10 +387,9 @@ export class BruteBrain {
             undefined,
             tuning
           );
-          events.push({ x: doorX, y: doorY, room: farRoom, reason });
+          events.push({ x: doorX, y: doorY, room: far.room, roomId: far.roomId, reason });
         }
       } else {
-        // Sync normal expected state (e.g. player closed a door behind them, or door already observed)
         mem.isOpen = door.isOpen;
         mem.isBroken = door.isBroken;
         mem.isLocked = door.isLocked;
@@ -387,6 +419,7 @@ export class BruteBrain {
       this.rememberedContainers.set(cont.id, cont.searched);
       if (cont.searched && !silentSyncOnly) {
         this.triggerClueReaction(
+          cont.roomId,
           cont.room,
           cont.x,
           cont.y,
@@ -396,14 +429,21 @@ export class BruteBrain {
           undefined,
           tuning
         );
-        events.push({ x: cont.x, y: cont.y, room: cont.room, reason: 'LOOTED_CONTAINER' });
+        events.push({
+          x: cont.x,
+          y: cont.y,
+          room: cont.room,
+          roomId: cont.roomId,
+          reason: 'LOOTED_CONTAINER',
+        });
       }
     }
 
-    // 3. Check Room Light Switches left ON unexpectedly!
+    // 3. Check Room Light Switches left ON unexpectedly (scoped per roomId!)
     const bTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(brute.x / this.map.tileSize)));
     const bTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(brute.y / this.map.tileSize)));
     const bruteRoom = this.map.roomGrid[bTy][bTx];
+    const bruteRoomId = this.map.roomIdGrid[bTy][bTx];
     const lightSightRange = 485 * senses.sightMult;
 
     for (const sw of this.map.lightSwitches) {
@@ -415,9 +455,9 @@ export class BruteBrain {
       if (memOn) continue;
       if (nowSec < (this.lightCooldowns.get(sw.id) ?? 0)) continue;
 
-      const roomMem = this.roomMemory.get(sw.room);
+      const roomMem = this.roomMemory.get(sw.roomId);
       const seesLight =
-        bruteRoom === sw.room ||
+        bruteRoomId === sw.roomId ||
         canBruteSeePoint(
           brute,
           sw.x,
@@ -441,6 +481,7 @@ export class BruteBrain {
       if (seesLight && !silentSyncOnly) {
         this.lightCooldowns.set(sw.id, nowSec + 18);
         this.triggerClueReaction(
+          sw.roomId,
           sw.room,
           sw.x,
           sw.y,
@@ -450,11 +491,17 @@ export class BruteBrain {
           sw,
           tuning
         );
-        events.push({ x: sw.x, y: sw.y, room: sw.room, reason: 'LIGHT_LEFT_ON' });
+        events.push({
+          x: sw.x,
+          y: sw.y,
+          room: sw.room,
+          roomId: sw.roomId,
+          reason: 'LIGHT_LEFT_ON',
+        });
       }
     }
 
-    // 4. Sight-based Escape Craft inspection: only learn repairs/activation when in real LoS!
+    // 4. Sight-based Escape Craft inspection across all 3 decks (Heli Deck 3, Lifeboat Deck 2, Submarine Deck 1)
     if (escape) {
       const escapeSightRange = 500 * senses.sightMult;
       const seesHeli =
@@ -472,8 +519,9 @@ export class BruteBrain {
         const nextHeliRepairs = escape.heliParts.length;
         const nextHeliActive = escape.heliState === 'ACTIVATING' || escape.heliState === 'READY';
         if (nextHeliRepairs > this.observedHeliRepairs || (nextHeliActive && !this.observedHeliActive)) {
-          const heliMem = this.roomMemory.get('Helideck');
-          if (heliMem) heliMem.suspicion = Math.min(1, heliMem.suspicion + 0.55);
+          for (const mem of this.roomMemory.values()) {
+            if (mem.room === 'Helideck') mem.suspicion = Math.min(1, mem.suspicion + 0.55);
+          }
         }
         this.observedHeliRepairs = nextHeliRepairs;
         this.observedHeliActive = nextHeliActive;
@@ -498,35 +546,76 @@ export class BruteBrain {
           nextLifeRepairs > this.observedLifeboatRepairs ||
           (nextLifeActive && !this.observedLifeboatActive)
         ) {
-          const lifeMem = this.roomMemory.get('Lifeboat Davit');
-          if (lifeMem) lifeMem.suspicion = Math.min(1, lifeMem.suspicion + 0.55);
+          for (const mem of this.roomMemory.values()) {
+            if (mem.room === 'Lifeboat Davit') mem.suspicion = Math.min(1, mem.suspicion + 0.55);
+          }
         }
         this.observedLifeboatRepairs = nextLifeRepairs;
         this.observedLifeboatActive = nextLifeActive;
+      }
+
+      const seesSub =
+        bruteRoom === 'Submarine Bay' ||
+        canBruteSeePoint(
+          brute,
+          this.map.submarinePos.x,
+          this.map.submarinePos.y,
+          escapeSightRange,
+          this.map,
+          doorsByTile,
+          senses.halfFovDeg
+        );
+      if (seesSub) {
+        const nextSubRepairs = escape.submarineParts.length;
+        const nextSubActive =
+          escape.submarineState === 'ACTIVATING' || escape.submarineState === 'READY';
+        if (nextSubRepairs > this.observedSubRepairs || (nextSubActive && !this.observedSubActive)) {
+          for (const mem of this.roomMemory.values()) {
+            if (mem.room === 'Submarine Bay') mem.suspicion = Math.min(1, mem.suspicion + 0.55);
+          }
+        }
+        this.observedSubRepairs = nextSubRepairs;
+        this.observedSubActive = nextSubActive;
       }
     }
 
     return events;
   }
 
-  private pickFarRoomFromDoor(door: Door, brute: BruteState): RoomName {
+  private pickFarRoomFromDoor(
+    door: Door,
+    brute: BruteState
+  ): { room: RoomName; roomId: number } {
     const sides = this.doorSides.get(door.id);
-    if (!sides) return this.map.roomGrid[door.ty][door.tx];
+    if (!sides) {
+      return {
+        room: this.map.roomGrid[door.ty][door.tx],
+        roomId: this.map.roomIdGrid[door.ty][door.tx],
+      };
+    }
 
     const bruteTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(brute.x / this.map.tileSize)));
     const bruteTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(brute.y / this.map.tileSize)));
-    const bruteRoom = this.map.roomGrid[bruteTy][bruteTx];
+    const bruteRoomId = this.map.roomIdGrid[bruteTy][bruteTx];
 
-    if (sides.sideA === bruteRoom && sides.sideB !== bruteRoom) return sides.sideB;
-    if (sides.sideB === bruteRoom && sides.sideA !== bruteRoom) return sides.sideA;
+    if (sides.sideAId === bruteRoomId && sides.sideBId !== bruteRoomId) {
+      return { room: sides.sideB, roomId: sides.sideBId };
+    }
+    if (sides.sideBId === bruteRoomId && sides.sideAId !== bruteRoomId) {
+      return { room: sides.sideA, roomId: sides.sideAId };
+    }
 
-    // Prefer named compartment over generic Corridor
-    if (sides.sideA !== 'Corridor' && sides.sideB === 'Corridor') return sides.sideA;
-    if (sides.sideB !== 'Corridor' && sides.sideA === 'Corridor') return sides.sideB;
-    return sides.sideA;
+    if (sides.sideA !== 'Corridor' && sides.sideB === 'Corridor') {
+      return { room: sides.sideA, roomId: sides.sideAId };
+    }
+    if (sides.sideB !== 'Corridor' && sides.sideA === 'Corridor') {
+      return { room: sides.sideB, roomId: sides.sideBId };
+    }
+    return { room: sides.sideA, roomId: sides.sideAId };
   }
 
   private triggerClueReaction(
+    primaryRoomId: number,
     primaryRoom: RoomName,
     clueX: number,
     clueY: number,
@@ -536,11 +625,11 @@ export class BruteBrain {
     lightSwitch?: RoomLightSwitch,
     tuning?: BruteTuningNumbers
   ): void {
-    const primaryMem = this.roomMemory.get(primaryRoom);
+    const primaryMem = this.roomMemory.get(primaryRoomId);
     if (primaryMem) {
       primaryMem.suspicion = Math.min(1, primaryMem.suspicion + 0.85);
-      for (const adj of primaryMem.connectedRooms) {
-        const adjMem = this.roomMemory.get(adj);
+      for (const adjId of primaryMem.connectedRoomIds) {
+        const adjMem = this.roomMemory.get(adjId);
         if (adjMem) adjMem.suspicion = Math.min(1, adjMem.suspicion + 0.42);
       }
     }
@@ -553,48 +642,53 @@ export class BruteBrain {
       )
     );
 
-    // Build connected-room sweep trail: primary room first, then adjacent connected named rooms
-    const nextRooms: RoomName[] = [];
+    const nextRooms: Array<{ roomId: number; room: RoomName }> = [];
     if (primaryRoom !== 'Corridor' && primaryRoom !== 'Catwalk') {
-      nextRooms.push(primaryRoom);
+      nextRooms.push({ roomId: primaryRoomId, room: primaryRoom });
     }
 
-    const connected = (primaryMem?.connectedRooms ?? []).filter(
-      (r) => r !== 'Corridor' && r !== 'Catwalk' && r !== primaryRoom
-    );
-    connected.sort((a, b) => {
+    const connectedIds = (primaryMem?.connectedRoomIds ?? []).filter((id) => {
+      const m = this.roomMemory.get(id);
+      return m && m.room !== 'Corridor' && m.room !== 'Catwalk' && id !== primaryRoomId;
+    });
+    connectedIds.sort((a, b) => {
       const ma = this.roomMemory.get(a);
       const mb = this.roomMemory.get(b);
       return (ma?.lastClearedAt ?? 0) - (mb?.lastClearedAt ?? 0);
     });
-    for (const r of connected) {
+    for (const id of connectedIds) {
       if (nextRooms.length >= maxRooms) break;
-      if (!nextRooms.includes(r)) nextRooms.push(r);
+      const m = this.roomMemory.get(id);
+      if (m && !nextRooms.some((nr) => nr.roomId === id)) {
+        nextRooms.push({ roomId: id, room: m.room });
+      }
     }
 
     if (nextRooms.length < maxRooms) {
       const originX = primaryMem?.centerWorld.x ?? clueX;
       const originY = primaryMem?.centerWorld.y ?? clueY;
       const nearby = this.findNearestNamedRooms(originX, originY, maxRooms + 1);
-      for (const r of nearby) {
+      for (const nr of nearby) {
         if (nextRooms.length >= maxRooms) break;
-        if (!nextRooms.includes(r)) nextRooms.push(r);
+        if (!nextRooms.some((x) => x.roomId === nr.roomId)) {
+          nextRooms.push(nr);
+        }
       }
     }
 
-    // If a room light was left ON, march directly to the breaker switch to kill it first!
     if (reason === 'LIGHT_LEFT_ON' && lightSwitch) {
       this.stalkTarget = {
         x: lightSwitch.x,
         y: lightSwitch.y,
         room: lightSwitch.room,
+        roomId: lightSwitch.roomId,
         reason: 'LIGHT_LEFT_ON',
         sweepHidingOnArrival: true,
         killSwitchId: lightSwitch.id,
       };
       this.stalkRoomQueue = nextRooms
-        .filter((r) => r !== lightSwitch.room)
-        .map((room) => ({ room, sweepHidingOnArrival: true }));
+        .filter((r) => r.roomId !== lightSwitch.roomId)
+        .map((r) => ({ roomId: r.roomId, room: r.room, sweepHidingOnArrival: true }));
       return;
     }
 
@@ -602,45 +696,42 @@ export class BruteBrain {
     const crossDeckEntries =
       stairScanRange >= 75 ? this.findCrossDeckStairEntries(clueX, clueY, 240) : [];
 
-    // Set immediate Stalker target & queue connected rooms
     if (primaryRoom === 'Corridor' || primaryRoom === 'Catwalk') {
       this.stalkTarget = {
         x: clueX,
         y: clueY,
         room: primaryRoom,
+        roomId: primaryRoomId,
         reason,
         sweepHidingOnArrival: false,
       };
       this.stalkRoomQueue = [
         ...crossDeckEntries,
-        ...nextRooms.map((room) => ({ room, sweepHidingOnArrival: true })),
+        ...nextRooms.map((r) => ({ roomId: r.roomId, room: r.room, sweepHidingOnArrival: true })),
       ].slice(0, maxRooms);
     } else {
-      const targetSpot = this.pickRoomSweepPoint(primaryRoom, nowSec);
+      const targetSpot = this.pickRoomSweepPoint(primaryRoomId, nowSec);
       this.stalkTarget = {
         x: targetSpot.x,
         y: targetSpot.y,
         room: primaryRoom,
+        roomId: primaryRoomId,
         reason,
         sweepHidingOnArrival: true,
       };
       this.stalkRoomQueue = [
         ...nextRooms
-          .filter((r) => r !== primaryRoom)
-          .map((room) => ({ room, sweepHidingOnArrival: true })),
+          .filter((r) => r.roomId !== primaryRoomId)
+          .map((r) => ({ roomId: r.roomId, room: r.room, sweepHidingOnArrival: true })),
         ...crossDeckEntries,
       ].slice(0, maxRooms);
     }
   }
 
-  /**
-   * Queues an aggressive multi-room follow-up sweep after breaking line of sight and finishing
-   * momentum overshoot, driven strictly by observed arrival topology (zero player cheats).
-   */
   public initiateChaseLossSweep(
     originX: number,
     originY: number,
-    originRoom: RoomName,
+    originRoomId: number,
     _nowSec: number,
     intelligence: DifficultyLevel,
     tuning?: BruteTuningNumbers
@@ -649,11 +740,10 @@ export class BruteBrain {
       tuning?.clueRoomDepth ??
       (intelligence === 'HIGH' || intelligence === 'EXTREME' ? 4 : intelligence === 'MEDIUM' ? 3 : 1);
     const maxFollowups = Math.max(1, Math.round(rawDepth >= 4 ? 3 : rawDepth >= 2 ? 2 : 1));
-    const primaryMem = this.roomMemory.get(originRoom);
+    const primaryMem = this.roomMemory.get(originRoomId);
     const queue: StalkQueueEntry[] = [];
-    const seenRooms = new Set<RoomName>([originRoom]);
+    const seenRoomIds = new Set<number>([originRoomId]);
 
-    // Check if sight broke near a companionway — queue the opposite-deck landing & adjacent room!
     const stairScanRange = tuning?.stairPursuitRange ?? (intelligence === 'LOW' ? 56 : 110);
     if (stairScanRange >= 75) {
       const crossEntries = this.findCrossDeckStairEntries(originX, originY, 260);
@@ -661,33 +751,35 @@ export class BruteBrain {
         if (queue.length >= maxFollowups) break;
         queue.push(ce);
         if (ce.room !== 'Corridor' && ce.room !== 'Catwalk') {
-          seenRooms.add(ce.room);
+          seenRoomIds.add(ce.roomId);
         }
       }
     }
 
-    const connected = (primaryMem?.connectedRooms ?? []).filter(
-      (r) => r !== 'Corridor' && r !== 'Catwalk' && !seenRooms.has(r)
-    );
-    for (const r of connected) {
+    const connectedIds = (primaryMem?.connectedRoomIds ?? []).filter((id) => {
+      const m = this.roomMemory.get(id);
+      return m && m.room !== 'Corridor' && m.room !== 'Catwalk' && !seenRoomIds.has(id);
+    });
+    for (const id of connectedIds) {
       if (queue.length >= maxFollowups) break;
-      seenRooms.add(r);
-      queue.push({ room: r, sweepHidingOnArrival: true });
+      const m = this.roomMemory.get(id)!;
+      seenRoomIds.add(id);
+      queue.push({ roomId: id, room: m.room, sweepHidingOnArrival: true });
     }
 
     if (queue.length < maxFollowups) {
       const nearby = this.findNearestNamedRooms(originX, originY, maxFollowups + 2);
-      for (const r of nearby) {
+      for (const nr of nearby) {
         if (queue.length >= maxFollowups) break;
-        if (!seenRooms.has(r)) {
-          seenRooms.add(r);
-          queue.push({ room: r, sweepHidingOnArrival: true });
+        if (!seenRoomIds.has(nr.roomId)) {
+          seenRoomIds.add(nr.roomId);
+          queue.push({ roomId: nr.roomId, room: nr.room, sweepHidingOnArrival: true });
         }
       }
     }
 
     for (const entry of queue) {
-      const mem = this.roomMemory.get(entry.room);
+      const mem = this.roomMemory.get(entry.roomId);
       if (mem) mem.suspicion = Math.min(1, mem.suspicion + 0.7);
     }
     this.stalkRoomQueue = queue;
@@ -699,8 +791,7 @@ export class BruteBrain {
     wy: number,
     maxRange: number
   ): StalkQueueEntry[] {
-    const deckSplitY = 29 * this.map.tileSize;
-    const originDeck = wy > deckSplitY ? 'LOWER' : 'MAIN';
+    const originDeck = this.getDeckAtWorld(wx, wy);
     const entries: Array<{ dist: number; entry: StalkQueueEntry }> = [];
 
     for (const st of this.map.stairwells) {
@@ -712,6 +803,7 @@ export class BruteBrain {
       entries.push({
         dist: d,
         entry: {
+          roomId: dest.roomId,
           room: dest.room,
           x: dest.x,
           y: dest.y,
@@ -724,11 +816,15 @@ export class BruteBrain {
     return entries.map((e) => e.entry);
   }
 
-  private findNearestNamedRooms(wx: number, wy: number, count: number): RoomName[] {
-    const deckSplitY = 29 * this.map.tileSize;
-    const originLower = wy > deckSplitY;
+  private findNearestNamedRooms(
+    wx: number,
+    wy: number,
+    count: number
+  ): Array<{ roomId: number; room: RoomName }> {
+    const originDeck = this.getDeckAtWorld(wx, wy);
+    const originDeckIdx = getDeckIndex(originDeck);
     const nearStair = this.map.stairwells.some(
-      (s) => (s.deck === 'LOWER') === originLower && Math.hypot(s.x - wx, s.y - wy) <= 240
+      (s) => s.deck === originDeck && Math.hypot(s.x - wx, s.y - wy) <= 240
     );
     const deckPenalty = nearStair ? 260 : 750;
 
@@ -737,18 +833,18 @@ export class BruteBrain {
       .sort((a, b) => {
         const da =
           Math.hypot(a.centerWorld.x - wx, a.centerWorld.y - wy) +
-          ((a.centerWorld.y > deckSplitY) !== originLower ? deckPenalty : 0);
+          Math.abs(getDeckIndex(a.deck) - originDeckIdx) * deckPenalty;
         const db =
           Math.hypot(b.centerWorld.x - wx, b.centerWorld.y - wy) +
-          ((b.centerWorld.y > deckSplitY) !== originLower ? deckPenalty : 0);
+          Math.abs(getDeckIndex(b.deck) - originDeckIdx) * deckPenalty;
         return da - db;
       })
       .slice(0, count)
-      .map((m) => m.room);
+      .map((m) => ({ roomId: m.roomId, room: m.room }));
   }
 
-  public pickRoomSweepPoint(room: RoomName, _nowSec: number): { x: number; y: number } {
-    const mem = this.roomMemory.get(room);
+  public pickRoomSweepPoint(roomId: number, _nowSec: number): { x: number; y: number } {
+    const mem = this.roomMemory.get(roomId);
     if (!mem || mem.walkableTiles.length === 0) {
       return { x: this.map.playerSpawn.x, y: this.map.playerSpawn.y };
     }
@@ -768,11 +864,12 @@ export class BruteBrain {
     const pt =
       nextEntry.x !== undefined && nextEntry.y !== undefined
         ? { x: nextEntry.x, y: nextEntry.y }
-        : this.pickRoomSweepPoint(nextEntry.room, nowSec);
+        : this.pickRoomSweepPoint(nextEntry.roomId, nowSec);
     this.stalkTarget = {
       x: pt.x,
       y: pt.y,
       room: nextEntry.room,
+      roomId: nextEntry.roomId,
       reason: 'CONNECTED_SWEEP',
       sweepHidingOnArrival: nextEntry.sweepHidingOnArrival ?? true,
     };
@@ -780,40 +877,40 @@ export class BruteBrain {
   }
 
   /**
-   * Recency-weighted UN-LEASHED random patrol picker with sight-based escape-route patrol bias.
-   * Zero reference to player position or unseen repairs — only biases toward Helideck & Lifeboat Davit
-   * based on progress the Brute has actually spotted in person.
+   * Recency-weighted random patrol picker with sight-based escape-route patrol bias across all 3 decks.
    */
   public pickRecencyWeightedRoamTarget(nowSec: number): {
     tx: number;
     ty: number;
     room: RoomName;
+    roomId: number;
   } {
     const rooms = Array.from(this.roomMemory.values()).filter((m) => m.walkableTiles.length > 0);
     if (rooms.length === 0) {
-      return { tx: 10, ty: 16, room: 'Corridor' };
+      return { tx: 10, ty: 16, room: 'Corridor', roomId: 0 };
     }
 
     const heliRepairs = this.observedHeliRepairs;
     const heliActive = this.observedHeliActive ? 1.1 : 0;
     const lifeRepairs = this.observedLifeboatRepairs;
     const lifeActive = this.observedLifeboatActive ? 1.1 : 0;
+    const subRepairs = this.observedSubRepairs;
+    const subActive = this.observedSubActive ? 1.15 : 0;
 
     let totalWeight = 0;
     const weights = rooms.map((m) => {
       const age = Math.max(0, nowSec - m.lastClearedAt);
-      // Named compartments & container bays get richer exploration weight than generic corridors,
-      // and recently cleared rooms drop to 0.15x so he naturally covers the whole vessel.
-      const recencyFactor = Math.min(2.6, Math.max(0.15, age / 38));
-      const roomBias = m.room === 'Corridor' || m.room === 'Catwalk' ? 0.55 : 1.15;
+      const recencyFactor = Math.min(2.6, Math.max(0.15, age / 42));
+      const roomBias = m.room === 'Corridor' || m.room === 'Catwalk' ? 0.52 : 1.18;
       const suspicionBoost = 1 + m.suspicion * 1.4;
 
-      // Subtle baseline escape-route interest that scales noticeably as each route is visually observed repaired/activated
       let escapeBias = 1.0;
       if (m.room === 'Helideck') {
         escapeBias = 1.25 + heliRepairs * 0.5 + heliActive;
       } else if (m.room === 'Lifeboat Davit') {
         escapeBias = 1.25 + lifeRepairs * 0.5 + lifeActive;
+      } else if (m.room === 'Submarine Bay') {
+        escapeBias = 1.25 + subRepairs * 0.5 + subActive;
       }
 
       const w = recencyFactor * roomBias * suspicionBoost * escapeBias;
@@ -832,12 +929,9 @@ export class BruteBrain {
     }
 
     const tile = chosen.walkableTiles[Math.floor(Math.random() * chosen.walkableTiles.length)];
-    return { tx: tile.tx, ty: tile.ty, room: chosen.room };
+    return { tx: tile.tx, ty: tile.ty, room: chosen.room, roomId: chosen.roomId };
   }
 
-  /**
-   * Continuous Utility AI Scorer with hysteresis.
-   */
   public evaluateUtilityGoal(
     dt: number,
     brute: BruteState,

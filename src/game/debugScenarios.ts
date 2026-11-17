@@ -1,6 +1,6 @@
 import type { MonstrumGameEngine } from './engine';
 import { isTileWalkable } from './mapGen';
-import { DebugScenarioId, Door, HidingSpot, RoomLightSwitch, RoomName } from './types';
+import { DebugScenarioId, Door, HidingSpot, RoomLightSwitch } from './types';
 import { hasLineOfSight } from './visibility';
 
 export interface DebugScenarioMetadata {
@@ -145,7 +145,7 @@ function findWallSeparatedPair(engine: MonstrumGameEngine): {
   };
 }
 
-function isRoomSealedByDoors(engine: MonstrumGameEngine, room: RoomName): boolean {
+function isRoomSealedByDoors(engine: MonstrumGameEngine, roomId: number): boolean {
   const { map } = engine;
   const dirs = [
     [1, 0],
@@ -155,13 +155,13 @@ function isRoomSealedByDoors(engine: MonstrumGameEngine, room: RoomName): boolea
   ];
   for (let y = 1; y < map.height - 1; y++) {
     for (let x = 1; x < map.width - 1; x++) {
-      if (map.roomGrid[y][x] !== room || !isTileWalkable(map.tiles[y][x])) continue;
+      if (map.roomIdGrid[y][x] !== roomId || !isTileWalkable(map.tiles[y][x])) continue;
       if (engine.doorsByTile.has(y * map.width + x)) continue;
       for (const [dx, dy] of dirs) {
         const nx = x + dx;
         const ny = y + dy;
         if (!isTileWalkable(map.tiles[ny][nx])) continue;
-        if (map.roomGrid[ny][nx] !== room && !engine.doorsByTile.has(ny * map.width + nx)) {
+        if (map.roomIdGrid[ny][nx] !== roomId && !engine.doorsByTile.has(ny * map.width + nx)) {
           return false;
         }
       }
@@ -184,8 +184,8 @@ function findSwitchDoorPair(engine: MonstrumGameEngine): {
 
   // Prefer rooms that are completely enclosed by walls & doors so closed-door scenarios have zero open gaps
   const switches = [...map.lightSwitches].sort((a, b) => {
-    const aSealed = isRoomSealedByDoors(engine, a.room) ? 0 : 1;
-    const bSealed = isRoomSealedByDoors(engine, b.room) ? 0 : 1;
+    const aSealed = isRoomSealedByDoors(engine, a.roomId) ? 0 : 1;
+    const bSealed = isRoomSealedByDoors(engine, b.roomId) ? 0 : 1;
     return aSealed - bSealed;
   });
 
@@ -204,10 +204,10 @@ function findSwitchDoorPair(engine: MonstrumGameEngine): {
             ];
 
       const inRoom = sides.find(
-        (s) => isTileWalkable(map.tiles[s.ty]?.[s.tx] ?? 'VOID') && map.roomGrid[s.ty][s.tx] === sw.room
+        (s) => isTileWalkable(map.tiles[s.ty]?.[s.tx] ?? 'VOID') && map.roomIdGrid[s.ty][s.tx] === sw.roomId
       );
       const outRoom = sides.find(
-        (s) => isTileWalkable(map.tiles[s.ty]?.[s.tx] ?? 'VOID') && map.roomGrid[s.ty][s.tx] !== sw.room
+        (s) => isTileWalkable(map.tiles[s.ty]?.[s.tx] ?? 'VOID') && map.roomIdGrid[s.ty][s.tx] !== sw.roomId
       );
       if (!inRoom || !outRoom) continue;
 
@@ -237,12 +237,12 @@ function findSwitchDoorPair(engine: MonstrumGameEngine): {
       const standPt = tileCenter(standTx, standTy, ts);
       const offPt = tileCenter(offsetTx, offsetTy, ts);
 
-      // Find a nearby walkable tile inside sw.room occluded from offsetStand by a wall (guaranteed on-screen)
+      // Find a nearby walkable tile inside sw.roomId occluded from offsetStand by a wall (guaranteed on-screen)
       let hiddenRoomPt = tileCenter(inRoom.tx, inRoom.ty, ts);
       let bestHiddenScore = Infinity;
       for (let ry = 0; ry < map.height; ry++) {
         for (let rx = 0; rx < map.width; rx++) {
-          if (map.roomGrid[ry][rx] !== sw.room || !isTileWalkable(map.tiles[ry][rx])) continue;
+          if (map.roomIdGrid[ry][rx] !== sw.roomId || !isTileWalkable(map.tiles[ry][rx])) continue;
           const distFromDoor = Math.hypot(rx - d.tx, ry - d.ty);
           if (distFromDoor < 1.8 || distFromDoor > 6.5) continue;
           const pt = tileCenter(rx, ry, ts);
@@ -490,6 +490,10 @@ export function applyDebugScenarioToEngine(
   p.preHidePos = null;
   p.climbingStairId = null;
   p.climbProgress = 0;
+  p.steamStaggerTimer = 0;
+  p.steamFogAlpha = 0;
+  p.openPaperMapDeck = null;
+  p.openPaperMapStandPos = null;
   p.crouching = false;
   p.sprinting = false;
   p.isMoving = false;
@@ -503,14 +507,19 @@ export function applyDebugScenarioToEngine(
   engine.escape = {
     lifeboatParts: [],
     heliParts: [],
+    submarineParts: [],
     lifeboatPartProgress: 0,
     heliPartProgress: 0,
+    submarinePartProgress: 0,
     lifeboatActivatingHold: 0,
     heliActivatingHold: 0,
+    submarineActivatingHold: 0,
     lifeboatState: 'IDLE',
     heliState: 'IDLE',
+    submarineState: 'IDLE',
     lifeboatActivationProgress: 0,
     heliActivationProgress: 0,
+    submarineActivationProgress: 0,
   };
   engine.zoom = 1.25;
   engine.targetZoom = 1.25;
@@ -576,12 +585,12 @@ export function applyDebugScenarioToEngine(
       // Close all doors bordering this room so zero light leaks out
       for (const d of engine.map.doors) {
         const adj = [
-          engine.map.roomGrid[d.ty - 1]?.[d.tx],
-          engine.map.roomGrid[d.ty + 1]?.[d.tx],
-          engine.map.roomGrid[d.ty]?.[d.tx - 1],
-          engine.map.roomGrid[d.ty]?.[d.tx + 1],
+          engine.map.roomIdGrid[d.ty - 1]?.[d.tx],
+          engine.map.roomIdGrid[d.ty + 1]?.[d.tx],
+          engine.map.roomIdGrid[d.ty]?.[d.tx - 1],
+          engine.map.roomIdGrid[d.ty]?.[d.tx + 1],
         ];
-        if (adj.includes(setup.sw.room)) {
+        if (adj.includes(setup.sw.roomId)) {
           d.isOpen = false;
           d.openProgress = 0;
         }
@@ -762,7 +771,7 @@ export function applyDebugScenarioToEngine(
     for (const sw of map.lightSwitches) {
       for (let ry = 1; ry < map.height - 1; ry++) {
         for (let rx = 1; rx < map.width - 1; rx++) {
-          if (map.roomGrid[ry][rx] !== sw.room || !isTileWalkable(map.tiles[ry][rx])) continue;
+          if (map.roomIdGrid[ry][rx] !== sw.roomId || !isTileWalkable(map.tiles[ry][rx])) continue;
           const wx = (rx + 0.5) * ts;
           const wy = (ry + 0.5) * ts;
           const minObjDist = Math.min(
@@ -860,7 +869,7 @@ export function applyDebugScenarioToEngine(
       id: 9102,
       x: hx + 44,
       y: hy - 34,
-      deck: 'MAIN',
+      deck: 'DECK_3',
       item: 'BATTERY_PACK',
     });
     engine.zoom = 1.3;
@@ -887,7 +896,7 @@ export function applyDebugScenarioToEngine(
       id: 9201,
       x: p.x + 56,
       y: standY + (voidNorth ? 6 : -6),
-      deck: 'MAIN',
+      deck: 'DECK_2',
       item: 'BACKPACK',
     });
     engine.zoom = 1.3;

@@ -405,35 +405,35 @@ export function getSensesProfile(
   switch (cfg.senses) {
     case 'LOW':
       return {
-        sightMult: 0.82,
-        halfFovDeg: 66,
-        peripheralBase: 76,
-        peripheralCrouch: 50,
-        hearingMult: 0.8,
+        sightMult: 0.9,
+        halfFovDeg: 70,
+        peripheralBase: 86,
+        peripheralCrouch: 56,
+        hearingMult: 0.9,
       };
     case 'EXTREME':
       return {
-        sightMult: 1.42,
-        halfFovDeg: 100,
-        peripheralBase: 140,
-        peripheralCrouch: 94,
-        hearingMult: 1.52,
+        sightMult: 1.54,
+        halfFovDeg: 105,
+        peripheralBase: 156,
+        peripheralCrouch: 105,
+        hearingMult: 1.68,
       };
     case 'HIGH':
       return {
-        sightMult: 1.18,
-        halfFovDeg: 84,
-        peripheralBase: 112,
-        peripheralCrouch: 74,
-        hearingMult: 1.25,
+        sightMult: 1.3,
+        halfFovDeg: 89,
+        peripheralBase: 126,
+        peripheralCrouch: 84,
+        hearingMult: 1.38,
       };
     default:
       return {
-        sightMult: 1.0,
-        halfFovDeg: 76,
-        peripheralBase: 95,
-        peripheralCrouch: 62,
-        hearingMult: 1.0,
+        sightMult: 1.1,
+        halfFovDeg: 80,
+        peripheralBase: 108,
+        peripheralCrouch: 70,
+        hearingMult: 1.12,
       };
   }
 }
@@ -455,8 +455,8 @@ export function canBruteSeePlayer(
 
   const pTx = Math.max(0, Math.min(map.width - 1, Math.floor(player.x / map.tileSize)));
   const pTy = Math.max(0, Math.min(map.height - 1, Math.floor(player.y / map.tileSize)));
-  const playerRoom = map.roomGrid[pTy][pTx];
-  const playerInLitRoom = map.lightSwitches.some((sw) => sw.room === playerRoom && sw.isOn);
+  const playerRoomId = map.roomIdGrid[pTy]?.[pTx] ?? 0;
+  const playerInLitRoom = map.lightSwitches.some((sw) => sw.roomId === playerRoomId && sw.isOn);
 
   const senses = getSensesProfile(difficulty, tuning);
   const baseRange =

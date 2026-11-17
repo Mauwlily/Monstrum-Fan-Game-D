@@ -105,7 +105,11 @@ export const EndModal: React.FC<EndModalProps> = ({
         <p className="mt-2 text-sm text-slate-300">
           {isVictory
             ? `Successfully launched the ${
-                stats.escapeMethod === 'HELICOPTER' ? 'stern helicopter' : 'bow lifeboat'
+                stats.escapeMethod === 'HELICOPTER'
+                  ? 'Deck 3 stern helicopter'
+                  : stats.escapeMethod === 'SUBMARINE'
+                    ? 'Deck 1 moonpool submarine'
+                    : 'Deck 2 bow lifeboat'
               } into the dark sea.`
             : stats.deathReason ?? 'The Brute tore through your cover.'}
         </p>
@@ -120,7 +124,7 @@ export const EndModal: React.FC<EndModalProps> = ({
           <div>
             <div className="text-slate-400">Parts Installed</div>
             <div className="mt-0.5 font-mono-num text-sm font-semibold text-slate-100">
-              {stats.partsInstalled} / 6
+              {stats.partsInstalled} / 9
             </div>
           </div>
           <div>

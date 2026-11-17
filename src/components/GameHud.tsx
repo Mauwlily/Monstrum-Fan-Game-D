@@ -1,7 +1,7 @@
 import React from 'react';
-import { Backpack, BookOpen, Bug, Flashlight, PackageMinus, Pause, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, Backpack, BookOpen, Bug, Flashlight, PackageMinus, Pause, Volume2, VolumeX } from 'lucide-react';
 import { getRoomGuidanceLabel } from '../game/renderer';
-import { HudSnapshot, ITEM_CATALOG } from '../game/types';
+import { getDeckLabel, HudSnapshot, ITEM_CATALOG } from '../game/types';
 
 interface GameHudProps {
   hud: HudSnapshot;
@@ -49,20 +49,27 @@ export const GameHud: React.FC<GameHudProps> = ({
 
   const activeRouteAlert =
     hud.heliState === 'READY'
-      ? { label: 'Chopper READY — Press E at Stern Helideck', tone: 'text-emerald-300' }
+      ? { label: 'Chopper READY — Press E at Deck 3 Helideck', tone: 'text-emerald-300' }
       : hud.lifeboatState === 'READY'
-        ? { label: 'Lifeboat READY — Press E at Bow Davit', tone: 'text-emerald-300' }
-        : hud.heliState === 'ACTIVATING'
-          ? {
-              label: `Turbine Spinning Up (${Math.round(hud.heliActivationProgress * 100)}%)`,
-              tone: 'text-amber-300',
-            }
-          : hud.lifeboatState === 'ACTIVATING'
+        ? { label: 'Lifeboat READY — Press E at Deck 2 Davit', tone: 'text-emerald-300' }
+        : hud.submarineState === 'READY'
+          ? { label: 'Submarine READY — Press E at Deck 1 Moonpool', tone: 'text-emerald-300' }
+          : hud.heliState === 'ACTIVATING'
             ? {
-                label: `Davit Crane Lowering (${Math.round(hud.lifeboatActivationProgress * 100)}%)`,
-                tone: 'text-sky-300',
+                label: `Turbine Spinning Up (${Math.round(hud.heliActivationProgress * 100)}%)`,
+                tone: 'text-amber-300',
               }
-            : null;
+            : hud.lifeboatState === 'ACTIVATING'
+              ? {
+                  label: `Davit Crane Lowering (${Math.round(hud.lifeboatActivationProgress * 100)}%)`,
+                  tone: 'text-sky-300',
+                }
+              : hud.submarineState === 'ACTIVATING'
+                ? {
+                    label: `Floodgate Deluge (${Math.round(hud.submarineActivationProgress * 100)}%)`,
+                    tone: 'text-emerald-300',
+                  }
+                : null;
 
   const hasSelectedItem = Boolean(hud.inventory[hud.selectedSlot]);
 
@@ -77,7 +84,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         >
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] sm:text-xs">
             <span className="font-medium text-slate-400">
-              {hud.currentDeck === 'MAIN' ? 'Main Deck' : 'Lower Deck'}
+              {getDeckLabel(hud.currentDeck)}
             </span>
             <span className="text-slate-600" aria-hidden="true">
               ·
@@ -218,10 +225,22 @@ export const GameHud: React.FC<GameHudProps> = ({
           data-hud-panel="bottom-left"
           className="pointer-events-auto w-44 sm:w-60 rounded-md border border-slate-800/80 bg-[#090d14]/88 p-2.5 sm:p-3 backdrop-blur-sm space-y-2 sm:space-y-2.5 shrink-0"
         >
+          {hud.steamStaggered && (
+            <div className="flex items-center gap-1.5 rounded border border-rose-500/60 bg-rose-950/75 px-2 py-1 text-[10px] font-bold tracking-wide text-rose-200 uppercase">
+              <AlertTriangle className="h-3 w-3 shrink-0 text-rose-400" />
+              <span className="truncate">Steam Staggered · No Sprint</span>
+            </div>
+          )}
           <div>
             <div className="flex items-center justify-between text-[11px] mb-1">
               <span className="font-medium text-slate-300 truncate">
-                {hud.hiding ? 'Stamina (Hiding)' : hud.crouching ? 'Stamina (Sneak)' : 'Stamina'}
+                {hud.hiding
+                  ? 'Stamina (Hiding)'
+                  : hud.steamStaggered
+                    ? 'Stamina (Limping)'
+                    : hud.crouching
+                      ? 'Stamina (Sneak)'
+                      : 'Stamina'}
               </span>
               <span className="font-mono-num text-slate-300">{Math.round(hud.stamina)}%</span>
             </div>
@@ -264,7 +283,9 @@ export const GameHud: React.FC<GameHudProps> = ({
             const meta = itemId ? ITEM_CATALOG[itemId] : null;
             const selected = hud.selectedSlot === slotIdx;
             const isEscapePart =
-              meta?.category === 'LIFEBOAT_PART' || meta?.category === 'HELI_PART';
+              meta?.category === 'LIFEBOAT_PART' ||
+              meta?.category === 'HELI_PART' ||
+              meta?.category === 'SUBMARINE_PART';
 
             return (
               <button
