@@ -35,15 +35,6 @@ Next versions:
 -> Increase monster senses slightly for all difficulty levels to compensate
 
 0.2.1
--> Deck 2 is now guaranteed to have two long hallways, and has more 2-wide sub-hallways. Deck 3 meanwhile is about 1-wide claustrophobia
--> Hallways are no longer "fleshy", meaning they form clean L, tri-way, four-way shapes without fusing in weird organic ways
--> Deck 3 hallways are split up by watertight doors that are louder and slower to open.
--> After greedy generation is finished, and before item spawning, two-to-three rooms in deck 2 and 3 are replaced by hallways
--> More non-interactable environmental furniture
--> Procedural generation bug is fixed where rooms randomly have a hole in the wall
--> Rooms now have more entry points on average
-
-0.2.2
 -> Slightly larger radius when peeking into stairs
 -> Repairs are louder yet-again to compensate for larger ship size
 -> Peeking outside a hiding spot when room light is on does not drain flashlight battery, nor does it alert the monster
@@ -51,10 +42,13 @@ Next versions:
 -> New main menu, meant to look visually closer to Monstrum
 -> Zoom goes from 2.5x to 1x, instead of 1.8x to 0.9x
 
-0.2.3
+0.2.2
+-> Procedural generation is improved. Deck 2 is now guaranteed to have two long hallways, and in general has more space. Space-filling is now less greedy. Meanwhile Deck 3 now has more coherent hallways, but still short and mazey, and are split up by watertight doors that are louder and slower to open.
 -> One master fuse spawns in the map
 -> When you insert it, the deck's lights are permanently on
 -> Lower intelligence monsters go to the nearest lightswitch, try to turn it off repeatedly for a while. high intelligence monsters don't
+
+0.2.3
 -> Bolt cutters now make sense. The helicopter is chained by default, 6 chains. You have to cut each chain (takes 2 seconds per, plus a loud noise once they snap). And there now are rooms that only have locked doors, meaning you require the cutter to open them. Brute is guaranteed to not spawn in those rooms
 
 0.3.0
