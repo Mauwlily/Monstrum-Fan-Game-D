@@ -4016,7 +4016,7 @@ export class GameRenderer {
 
     const rawPortalX = viewCenterX + (st.x - engine.cameraX) * zoom;
     const rawPortalY = viewCenterY + (st.y - engine.cameraY) * zoom;
-    const portalRadius = Math.max(96, Math.min(185, Math.round(142 * zoom)));
+    const portalRadius = Math.max(130, Math.min(205, Math.round(160 * zoom)));
     const margin = portalRadius + 16;
     const portalX = Math.max(margin, Math.min(width - margin, rawPortalX));
     const portalY = Math.max(margin, Math.min(height - margin, rawPortalY));
