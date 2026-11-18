@@ -1643,6 +1643,7 @@ export class HorrorAudioEngine {
         node.stop();
       } catch {}
     };
+
     stopNode(this.droneOsc1);
     stopNode(this.droneOsc2);
     stopNode(this.turbineSource);
@@ -1653,9 +1654,16 @@ export class HorrorAudioEngine {
     stopNode(this.lightHumOsc2);
     stopNode(this.steamLoopSource);
     stopNode(this.flareLoopSource);
+
     if (this.ctx) {
-      this.ctx.close().catch(() => {});
+      try {
+        // Safe check so it doesn't throw if already closed
+        if (this.ctx.state !== 'closed') {
+          this.ctx.close().catch(() => {});
+        }
+      } catch {}
       this.ctx = null;
     }
+    
   }
 }

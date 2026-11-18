@@ -380,7 +380,13 @@ export default function App() {
   }, [renderImmediateFrame, syncDebugTelemetry]);
 
   const returnToTitle = useCallback(() => {
-    audioRef?.dispose();
+    try 
+    {
+      audioRef.current?.dispose();
+    } catch (err) 
+    {
+     console.warn('Audio dispose warning:', err) 
+    }
     audioRef.current = null;
 
     engineRef.current = null;
