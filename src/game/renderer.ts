@@ -4080,12 +4080,12 @@ export class GameRenderer {
 
     const rawPortalX = viewCenterX + (st.x - engine.cameraX) * zoom;
     const rawPortalY = viewCenterY + (st.y - engine.cameraY) * zoom;
-    const portalRadius = Math.max(160, Math.min(350, Math.round(240 * zoom)));
+    const portalRadius = Math.max(145, Math.min(280, Math.round(200 * zoom)));
     const margin = portalRadius + 16;
     const portalX = Math.max(margin, Math.min(width - margin, rawPortalX));
     const portalY = Math.max(margin, Math.min(height - margin, rawPortalY));
     const viewWorldRadius = portalRadius / zoom + 28;
-    const peekRange = Math.min(800, viewWorldRadius);
+    const peekRange = Math.min(600, viewWorldRadius);
 
     // Raycasted Line-of-Sight polygon from the destination landing (walls & closed doors strictly clip to #000000!)
     const destSightPoly = computeVisibilityPolygon(
