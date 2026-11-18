@@ -678,7 +678,7 @@ export class MonstrumGameEngine {
       }
     }
 
-    // If hiding, flashlight is off by default; holding Q turns it on to peek vents, releasing Q turns it off
+    // If hiding, flashlight is off by default; holding Q peeks vents (silent & no battery drain when room light is ON)
     if (p.hidingSpotId !== null) {
       p.sprinting = false;
       p.isMoving = false;
@@ -686,9 +686,17 @@ export class MonstrumGameEngine {
       p.peekingDoorId = null;
       p.peekingStairId = null;
 
+      const roomLit = this.isHidingSpotRoomLit(p.hidingSpotId);
       const wantsVentPeek = this.keys.has('KeyQ') || this.debugConfig.forceVentPeek;
       if (wantsVentPeek) {
-        if (p.battery > 0) {
+        if (roomLit) {
+          if (p.flashlightOn) {
+            p.flashlightOn = false;
+            this.audio.playFlashlightClick();
+          }
+          p.peekingSpotId = p.hidingSpotId;
+          this.peekNoBatteryToasted = false;
+        } else if (p.battery > 0) {
           if (p.peekingSpotId === null || !p.flashlightOn) {
             p.flashlightOn = true;
             this.audio.playFlashlightClick();
@@ -804,13 +812,36 @@ export class MonstrumGameEngine {
       if (bestStairId && (!bestDoorId || bestStairDist <= bestDoorDist || this.debugConfig.forceStairPeek)) {
         p.peekingStairId = bestStairId;
         p.peekingDoorId = null;
-      } else {
-        p.peekingDoorId = bestDoorId;
+        this.peekNoBatteryToasted = false;
+      } else if (bestDoorId) {
         p.peekingStairId = null;
+        if (p.battery > 0) {
+          p.peekingDoorId = bestDoorId;
+          this.peekNoBatteryToasted = false;
+          if (!p.flashlightOn) {
+            p.battery = Math.max(0, p.battery - dt * 1.35);
+            if (p.battery <= 0) {
+              p.peekingDoorId = null;
+              this.audio.playFlashlightClick();
+              this.showToast('Flashlight battery depleted.');
+            }
+          }
+        } else {
+          p.peekingDoorId = null;
+          if (!this.peekNoBatteryToasted) {
+            this.peekNoBatteryToasted = true;
+            this.showToast('Flashlight battery empty — cannot peek doors.');
+          }
+        }
+      } else {
+        p.peekingDoorId = null;
+        p.peekingStairId = null;
+        this.peekNoBatteryToasted = false;
       }
     } else {
       p.peekingDoorId = null;
       p.peekingStairId = null;
+      this.peekNoBatteryToasted = false;
     }
 
     const isStaggered = p.steamStaggerTimer > 0;
@@ -1585,6 +1616,125 @@ export class MonstrumGameEngine {
         alpha: 0.65,
         color: 'rgba(245, 158, 11, 0.65)',
       });
+    }
+
+    // 5b. Brute reacts to player's door-peek flashlight beam based on Intelligence tier
+    if (
+      p.peekingDoorId !== null &&
+      p.battery > 0 &&
+      p.hidingSpotId === null &&
+      this.difficulty.intelligence !== 'LOW'
+    ) {
+      const peekDoor = this.map.doors.find(
+        (d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken
+      );
+      if (peekDoor) {
+        const ts = this.map.tileSize;
+        const dcx = (peekDoor.tx + 0.5) * ts;
+        const dcy = (peekDoor.ty + 0.5) * ts;
+        const peekAngle = Math.atan2(dcy - p.y, dcx - p.x);
+        const crossSign =
+          peekDoor.orientation === 'H'
+            ? Math.sign(dcy - p.y) || 1
+            : Math.sign(dcx - p.x) || 1;
+        const farOx = peekDoor.orientation === 'H' ? dcx : dcx + crossSign * 14;
+        const farOy = peekDoor.orientation === 'H' ? dcy + crossSign * 14 : dcy;
+
+        const senses = getSensesProfile(this.difficulty, this.bruteTuning);
+        const sightRange = 460 * senses.sightMult;
+        let sawBeam = canBruteSeePoint(
+          b,
+          farOx,
+          farOy,
+          sightRange,
+          this.map,
+          this.doorsByTile,
+          senses.halfFovDeg
+        );
+
+        if (!sawBeam) {
+          for (const stepDist of [95, 190, 290]) {
+            const sx = farOx + Math.cos(peekAngle) * stepDist;
+            const sy = farOy + Math.sin(peekAngle) * stepDist;
+            if (!hasLineOfSight(this.map, this.doorsByTile, farOx, farOy, sx, sy)) break;
+            if (
+              canBruteSeePoint(
+                b,
+                sx,
+                sy,
+                sightRange,
+                this.map,
+                this.doorsByTile,
+                senses.halfFovDeg
+              )
+            ) {
+              sawBeam = true;
+              break;
+            }
+          }
+        }
+
+        if (sawBeam) {
+          if (this.difficulty.intelligence === 'MEDIUM') {
+            if (b.state !== 'CHASE') {
+              const beamClue = this.brain.reportDoorPeekBeam(
+                peekDoor,
+                p.x,
+                p.y,
+                b,
+                this.elapsedSeconds,
+                this.difficulty,
+                this.bruteTuning
+              );
+              if (beamClue) {
+                b.cluesSpottedTotal += 1;
+                const eff = this.getEffectiveBruteAudioDelta();
+                const occ = this.computeAcousticOcclusion(b.x, b.y, p.x, p.y);
+                this.audio.playBruteSuspicionGrowl(eff.dx, eff.dy, occ);
+                this.ripples.push({
+                  id: this.nextId++,
+                  x: beamClue.x,
+                  y: beamClue.y,
+                  radius: 6,
+                  maxRadius: 110,
+                  alpha: 0.65,
+                  color: 'rgba(245, 158, 11, 0.65)',
+                });
+              }
+            }
+          } else {
+            const wasChasing = b.state === 'CHASE';
+            if (!wasChasing) {
+              b.sightingsCount += 1;
+              this.spotFlashAlpha = 0.72;
+              this.screenShake = Math.max(this.screenShake, 10);
+              if (b.roarCooldown <= 0) {
+                const eff = this.getEffectiveBruteAudioDelta();
+                const occ = this.computeAcousticOcclusion(b.x, b.y, p.x, p.y);
+                this.audio.playBruteRoar(eff.dx, eff.dy, occ);
+                b.roarCooldown = 4.0;
+              }
+            }
+            b.lastKnownPlayerPos = { x: p.x, y: p.y };
+            b.chaseOvershootPos = null;
+            b.chaseAggroTimer = 5.8;
+            b.alertTimer = 6.0;
+            b.watchedPlayerHideSpotId = null;
+            this.brain.stalkTarget = null;
+            this.brain.stalkRoomQueue = [];
+            b.pathRecalcTimer = 0;
+
+            if (Math.hypot(dcx - b.x, dcy - b.y) < 42) {
+              b.state = 'SMASH_DOOR';
+              b.smashDoorId = peekDoor.id;
+              b.smashTimer = speeds.smashChase;
+              this.bruteStuckTimer = 0;
+              return;
+            }
+            b.state = 'CHASE';
+          }
+        }
+      }
     }
 
     // 6. Utility AI Goal Evaluation
@@ -2730,6 +2880,13 @@ export class MonstrumGameEngine {
     }
   }
 
+  public isHidingSpotRoomLit(spotId: string | null): boolean {
+    if (!spotId) return false;
+    const spot = this.map.hidingSpots.find((s) => s.id === spotId);
+    if (!spot) return false;
+    return this.map.lightSwitches.some((sw) => sw.roomId === spot.roomId && sw.isOn);
+  }
+
   // --- Player Actions ---
   public toggleCrouch(): void {
     if (this.ended || this.player.hidingSpotId !== null || this.player.climbingStairId !== null) return;
@@ -2741,7 +2898,11 @@ export class MonstrumGameEngine {
     if (this.ended) return;
     if (this.player.hidingSpotId !== null) {
       if (this.player.peekingSpotId === null) {
-        this.showToast('Hold Q to peek with flashlight.');
+        this.showToast(
+          this.isHidingSpotRoomLit(this.player.hidingSpotId)
+            ? 'Room light is ON — hold Q to peek silently.'
+            : 'Hold Q to peek with flashlight.'
+        );
       }
       return;
     }
@@ -3513,13 +3674,25 @@ export class MonstrumGameEngine {
         promptText = `Peeking ${getDeckLabel(dest.deck)} Landing — ${dest.room}`;
         promptSubtext = 'Release Q to step back · Press E to climb companionway.';
       }
+    } else if (this.player.peekingDoorId !== null) {
+      promptText = 'Peeking Through Door (Light ON) — Release Q to Step Back';
+      promptSubtext = 'Draining flashlight battery while shining beam past the door.';
     } else if (this.player.hidingSpotId !== null) {
-      if (this.player.battery <= 0) {
+      const roomLit = this.isHidingSpotRoomLit(this.player.hidingSpotId);
+      if (this.player.peekingSpotId) {
+        if (roomLit) {
+          promptText = 'Peeking Vents (Room Lit) — Release Q to Duck Back';
+          promptSubtext = 'Room light lets you peek silently without battery drain or alerting the Brute.';
+        } else {
+          promptText = 'Peeking Vents (Light ON) — Release Q to Duck Back';
+          promptSubtext = 'Draining flashlight battery while looking through the vents.';
+        }
+      } else if (roomLit) {
+        promptText = 'Hiding — Press E to Exit · Hold Q to Peek (Room Lit)';
+        promptSubtext = 'Room light is ON — peeking vents uses no battery and will not alert the Brute.';
+      } else if (this.player.battery <= 0) {
         promptText = 'Hiding — Press E to Exit · Battery Empty';
-        promptSubtext = 'Cannot peek vents without flashlight battery. Wait for the Brute to pass.';
-      } else if (this.player.peekingSpotId) {
-        promptText = 'Peeking Vents (Light ON) — Release Q to Duck Back';
-        promptSubtext = 'Draining flashlight battery while looking through the vents.';
+        promptSubtext = 'Cannot peek vents in a dark room without flashlight battery. Wait for the Brute to pass.';
       } else {
         promptText = 'Hiding — Press E to Exit · Hold Q to Peek';
         promptSubtext = 'Holding Q turns on your flashlight and drains battery to see out.';

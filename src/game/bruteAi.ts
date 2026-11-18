@@ -53,6 +53,7 @@ export interface StalkTarget {
     | 'CUT_LOCK'
     | 'LOOTED_CONTAINER'
     | 'LIGHT_LEFT_ON'
+    | 'DOOR_PEEK_BEAM'
     | 'CONNECTED_SWEEP';
   sweepHidingOnArrival: boolean;
   killSwitchId?: string;
@@ -63,7 +64,7 @@ export interface ClueDetectionEvent {
   y: number;
   room: RoomName;
   roomId: number;
-  reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON';
+  reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON' | 'DOOR_PEEK_BEAM';
 }
 
 export interface StalkQueueEntry {
@@ -99,6 +100,7 @@ export class BruteBrain {
 
   private map: ShipMap;
   private recentlyCheckedSpots: Map<string, number> = new Map();
+  private doorPeekCooldowns: Map<string, number> = new Map();
   private clueScanTimer = 0;
   private evalTimer = 0;
 
@@ -582,6 +584,59 @@ export class BruteBrain {
     return events;
   }
 
+  public reportDoorPeekBeam(
+    door: Door,
+    playerX: number,
+    playerY: number,
+    brute: BruteState,
+    nowSec: number,
+    difficulty: DifficultyConfig,
+    tuning?: BruteTuningNumbers
+  ): ClueDetectionEvent | null {
+    if (nowSec < (this.doorPeekCooldowns.get(door.id) ?? 0)) {
+      return null;
+    }
+    this.doorPeekCooldowns.set(door.id, nowSec + 10);
+
+    const ts = this.map.tileSize;
+    const doorX = (door.tx + 0.5) * ts;
+    const doorY = (door.ty + 0.5) * ts;
+
+    // Target the compartment on the player's side of the door (where the beam originated)
+    const pTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(playerX / ts)));
+    const pTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(playerY / ts)));
+    const playerRoomId = this.map.roomIdGrid[pTy]?.[pTx] ?? 0;
+    const playerRoom = this.map.roomGrid[pTy]?.[pTx] ?? 'Corridor';
+    const sides = this.doorSides.get(door.id);
+
+    let targetRoomId = playerRoomId;
+    let targetRoom: RoomName = playerRoom;
+    if (sides && sides.sideAId !== playerRoomId && sides.sideBId !== playerRoomId) {
+      const far = this.pickFarRoomFromDoor(door, brute);
+      targetRoomId = far.roomId;
+      targetRoom = far.room;
+    }
+
+    this.triggerClueReaction(
+      targetRoomId,
+      targetRoom,
+      doorX,
+      doorY,
+      'DOOR_PEEK_BEAM',
+      nowSec,
+      difficulty.intelligence,
+      undefined,
+      tuning
+    );
+    return {
+      x: doorX,
+      y: doorY,
+      room: targetRoom,
+      roomId: targetRoomId,
+      reason: 'DOOR_PEEK_BEAM',
+    };
+  }
+
   private pickFarRoomFromDoor(
     door: Door,
     brute: BruteState
@@ -619,12 +674,13 @@ export class BruteBrain {
     primaryRoom: RoomName,
     clueX: number,
     clueY: number,
-    reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON',
+    reason: 'OPEN_DOOR' | 'CUT_LOCK' | 'LOOTED_CONTAINER' | 'LIGHT_LEFT_ON' | 'DOOR_PEEK_BEAM',
     nowSec: number,
     intelligence: DifficultyLevel,
     lightSwitch?: RoomLightSwitch,
     tuning?: BruteTuningNumbers
   ): void {
+    this.evalTimer = 0;
     const primaryMem = this.roomMemory.get(primaryRoomId);
     if (primaryMem) {
       primaryMem.suspicion = Math.min(1, primaryMem.suspicion + 0.85);

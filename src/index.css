@@ -3,13 +3,14 @@
 @layer base {
   :root {
     --font-display: 'Barlow Condensed', ui-sans-serif, system-ui, sans-serif;
+    --font-serif-crt: 'Cinzel', Georgia, 'Times New Roman', serif;
     --font-sans: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   }
 
   body {
     font-family: var(--font-sans);
-    background-color: #07090c;
+    background-color: #040607;
     color: #e2e8f0;
     margin: 0;
     padding: 0;
@@ -21,9 +22,38 @@
   font-family: var(--font-display);
 }
 
+.font-serif-crt {
+  font-family: var(--font-serif-crt);
+}
+
 .font-mono-num {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.crt-scanlines {
+  background-image:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(6, 22, 15, 0) 0px,
+      rgba(6, 22, 15, 0) 2px,
+      rgba(2, 10, 7, 0.42) 3px,
+      rgba(2, 10, 7, 0.42) 4px
+    );
+}
+
+.monstrum-wall-text {
+  background: linear-gradient(
+    180deg,
+    #f6d49b 0%,
+    #e5a35d 44%,
+    #9f5a2c 88%,
+    #693718 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 5px 8px rgba(0, 0, 0, 0.88)) drop-shadow(-2px 0 10px rgba(34, 197, 94, 0.14));
 }
 
 @media (prefers-reduced-motion: reduce) {

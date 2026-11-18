@@ -1,4 +1,4 @@
-export const GAME_VERSION = '0.2.1';
+export const GAME_VERSION = '0.2.2';
 
 export const REFERENCE_VIEWPORT_WIDTH = 1440;
 export const REFERENCE_VIEWPORT_HEIGHT = 900;

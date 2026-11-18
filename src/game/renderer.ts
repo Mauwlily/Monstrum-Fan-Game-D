@@ -38,6 +38,13 @@ interface StairGlowData {
   poly: Array<{ x: number; y: number }>;
 }
 
+interface DoorPeekBeamData {
+  ox: number;
+  oy: number;
+  range: number;
+  poly: Array<{ x: number; y: number }>;
+}
+
 function traceRoundedRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -130,11 +137,12 @@ export class GameRenderer {
 
     this.drawBrute(ctx, engine, timeSec);
 
-    // Precompute lit room, Brute searchlight beam, and stairwell shaft spill polygons
+    // Precompute lit room, Brute searchlight beam, stairwell shaft spill, and door keyhole beam polygons
     const litRoomPolys = this.computeLitRoomPolygons(engine, timeSec);
     const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec);
     const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec);
-    this.drawWarmLightingTints(ctx, engine, litRoomPolys, bruteBeam, stairGlow, timeSec);
+    const doorPeekData = this.computeDoorPeekBeam(engine);
+    this.drawWarmLightingTints(ctx, engine, litRoomPolys, bruteBeam, stairGlow, doorPeekData, timeSec);
 
     ctx.restore();
 
@@ -149,7 +157,8 @@ export class GameRenderer {
       timeSec,
       litRoomPolys,
       bruteBeam,
-      stairGlow
+      stairGlow,
+      doorPeekData
     );
     ctx.drawImage(this.lightCanvas, 0, 0);
 
@@ -3166,12 +3175,45 @@ export class GameRenderer {
     return { x: st.x, y: st.y, range, intensity, poly };
   }
 
+  private computeDoorPeekBeam(engine: MonstrumGameEngine): DoorPeekBeamData | null {
+    const p = engine.player;
+    if (!p.peekingDoorId || p.hidingSpotId !== null || p.battery <= 0) return null;
+    const door = engine.map.doors.find(
+      (d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken
+    );
+    if (!door) return null;
+
+    const ts = engine.map.tileSize;
+    const dcx = (door.tx + 0.5) * ts;
+    const dcy = (door.ty + 0.5) * ts;
+    const peekAngle = Math.atan2(dcy - p.y, dcx - p.x);
+    const crossSign =
+      door.orientation === 'H' ? Math.sign(dcy - p.y) || 1 : Math.sign(dcx - p.x) || 1;
+    const ox = door.orientation === 'H' ? dcx : dcx + crossSign * 10;
+    const oy = door.orientation === 'H' ? dcy + crossSign * 10 : dcy;
+    const coneWidth = (40 * Math.PI) / 180;
+    const range = 440;
+    const poly = computeVisibilityPolygon(
+      engine.map,
+      engine.doorsByTile,
+      ox,
+      oy,
+      peekAngle - coneWidth / 2,
+      coneWidth,
+      range,
+      44,
+      door.ty * engine.map.width + door.tx
+    );
+    return { ox, oy, range, poly: [{ x: ox, y: oy }, ...poly] };
+  }
+
   private drawWarmLightingTints(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null,
     stairGlow: StairGlowData | null,
+    doorPeekData: DoorPeekBeamData | null,
     timeSec: number
   ): void {
     for (const lp of litRoomPolys) {
@@ -3240,6 +3282,29 @@ export class GameRenderer {
       ctx.fill();
     }
 
+    // Focused flashlight beam projecting past closed door during Q keyhole peek
+    if (doorPeekData && doorPeekData.poly.length >= 3) {
+      const g = ctx.createRadialGradient(
+        doorPeekData.ox,
+        doorPeekData.oy,
+        6,
+        doorPeekData.ox,
+        doorPeekData.oy,
+        doorPeekData.range
+      );
+      g.addColorStop(0, 'rgba(254, 249, 224, 0.22)');
+      g.addColorStop(0.55, 'rgba(226, 232, 240, 0.09)');
+      g.addColorStop(1, 'rgba(226, 232, 240, 0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(doorPeekData.poly[0].x, doorPeekData.poly[0].y);
+      for (let i = 1; i < doorPeekData.poly.length; i++) {
+        ctx.lineTo(doorPeekData.poly[i].x, doorPeekData.poly[i].y);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
     for (const l of engine.droppedLights) {
       const r = l.type === 'FLARE' ? 220 + Math.sin(timeSec * 22) * 14 : 140;
       const poly = computeVisibilityPolygon(
@@ -3284,7 +3349,8 @@ export class GameRenderer {
     timeSec: number,
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null,
-    stairGlow: StairGlowData | null
+    stairGlow: StairGlowData | null,
+    doorPeekData: DoorPeekBeamData | null
   ): void {
     const lctx = this.lightCtx;
     lctx.globalCompositeOperation = 'source-over';
@@ -3300,7 +3366,6 @@ export class GameRenderer {
     lctx.translate(-engine.cameraX, -engine.cameraY);
 
     const p = engine.player;
-    const ts = engine.map.tileSize;
     const isHiding = p.hidingSpotId !== null;
     const isPeekingSpot = p.peekingSpotId !== null;
 
@@ -3366,39 +3431,9 @@ export class GameRenderer {
       );
     }
 
-    // Add keyhole peek polygon when peeking a closed door
-    let doorPeekData: {
-      ox: number;
-      oy: number;
-      range: number;
-      poly: Array<{ x: number; y: number }>;
-    } | null = null;
-    if (p.peekingDoorId && !isHiding) {
-      const door = engine.map.doors.find(
-        (d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken
-      );
-      if (door) {
-        const dcx = (door.tx + 0.5) * ts;
-        const dcy = (door.ty + 0.5) * ts;
-        const peekAngle = Math.atan2(dcy - p.y, dcx - p.x);
-        const ox = dcx + Math.cos(peekAngle) * 10;
-        const oy = dcy + Math.sin(peekAngle) * 10;
-        const coneWidth = (40 * Math.PI) / 180;
-        const range = 440;
-        const poly = computeVisibilityPolygon(
-          engine.map,
-          engine.doorsByTile,
-          ox,
-          oy,
-          peekAngle - coneWidth / 2,
-          coneWidth,
-          range,
-          44,
-          door.ty * engine.map.width + door.tx
-        );
-        doorPeekData = { ox, oy, range, poly: [{ x: ox, y: oy }, ...poly] };
-        sightPolys.push(doorPeekData.poly);
-      }
+    // Add keyhole peek polygon when peeking a closed door (requires flashlight battery > 0)
+    if (doorPeekData) {
+      sightPolys.push(doorPeekData.poly);
     }
 
     this.lastPlayerSightPolys = sightPolys;
@@ -3429,7 +3464,7 @@ export class GameRenderer {
     lctx.arc(p.x, p.y, ambientRadius, 0, Math.PI * 2);
     lctx.fill();
 
-    // 2. Raycast Flashlight Cone (active outside hiding, or inside hiding ONLY while Q-peeking)
+    // 2. Raycast Flashlight Cone (or silent ambient vent-peek cutout when hiding in a lit room)
     if (p.flashlightOn && p.battery > 0 && (!isHiding || isPeekingSpot)) {
       const range = isPeekingSpot ? 460 : 520;
       const coneWidth = ((isPeekingSpot ? 54 : 82) * Math.PI) / 180;
@@ -3452,6 +3487,35 @@ export class GameRenderer {
       coneGrad.addColorStop(1, 'rgba(0,0,0,0)');
 
       lctx.fillStyle = coneGrad;
+      lctx.beginPath();
+      lctx.moveTo(p.x, p.y);
+      for (const pt of conePoly) lctx.lineTo(pt.x, pt.y);
+      lctx.closePath();
+      lctx.fill();
+    } else if (
+      isHiding &&
+      isPeekingSpot &&
+      !p.flashlightOn &&
+      engine.isHidingSpotRoomLit(p.hidingSpotId)
+    ) {
+      const range = 420;
+      const coneWidth = (54 * Math.PI) / 180;
+      const conePoly = computeVisibilityPolygon(
+        engine.map,
+        engine.doorsByTile,
+        p.x,
+        p.y,
+        p.angle - coneWidth / 2,
+        coneWidth,
+        range,
+        56
+      );
+      const ventGrad = lctx.createRadialGradient(p.x, p.y, 12, p.x, p.y, range);
+      ventGrad.addColorStop(0, 'rgba(0,0,0,0.74)');
+      ventGrad.addColorStop(0.65, 'rgba(0,0,0,0.48)');
+      ventGrad.addColorStop(1, 'rgba(0,0,0,0)');
+
+      lctx.fillStyle = ventGrad;
       lctx.beginPath();
       lctx.moveTo(p.x, p.y);
       for (const pt of conePoly) lctx.lineTo(pt.x, pt.y);
@@ -4100,7 +4164,7 @@ export class GameRenderer {
         bruteBeam && Math.hypot(bruteBeam.ox - dest.x, bruteBeam.oy - dest.y) < bruteBeam.range + peekRange
           ? bruteBeam
           : null;
-      this.drawWarmLightingTints(ctx, engine, destLitPolys, destBeam, null, timeSec);
+      this.drawWarmLightingTints(ctx, engine, destLitPolys, destBeam, null, null, timeSec);
 
       // Shadowed landing visibility falloff (brighter when flashlight ON or destination room lit)
       const hasTorch = engine.player.flashlightOn && engine.player.battery > 0;

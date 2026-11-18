@@ -29,7 +29,7 @@ export const DEBUG_SCENARIOS: Array<{ id: DebugScenarioId; label: string; summar
   {
     id: 'HIDING_FLASHLIGHT_PEEK',
     label: 'Hide & Peek',
-    summary: 'Player enters hiding spot (flashlight OFF); Q-peek toggles light ON/OFF.',
+    summary: 'Player enters hiding spot (flashlight OFF); Q-peek uses flashlight in dark rooms or silent ambient light in lit rooms.',
   },
   {
     id: 'BRUTE_HIDING_KILL',
@@ -665,6 +665,7 @@ export function applyDebugScenarioToEngine(
       p.y = dcy + outDirY * 32;
       p.angle = Math.atan2(dcy - p.y, dcx - p.x);
       p.flashlightOn = false;
+      p.battery = p.maxBattery;
       p.peekingDoorId = setup.door.id;
       engine.debugConfig.forceDoorPeek = true;
 
