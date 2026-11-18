@@ -259,7 +259,7 @@ export class MonstrumGameEngine {
 
   public adjustZoom(deltaY: number): void {
     const step = deltaY > 0 ? -0.1 : 0.1;
-    this.targetZoom = Math.max(0.9, Math.min(1.8, Math.round((this.targetZoom + step) * 100) / 100));
+    this.targetZoom = Math.max(1.0, Math.min(2.5, Math.round((this.targetZoom + step) * 100) / 100));
   }
 
   public applyDebugScenario(scenarioId: DebugScenarioId): DebugScenarioMetadata {
@@ -911,7 +911,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            880,
+            1100,
             'rgba(56, 189, 248, 0.52)',
             true,
             0.88
@@ -942,7 +942,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            960,
+            1200,
             'rgba(56, 189, 248, 0.65)',
             true,
             0.94
@@ -965,7 +965,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.lifeboatPos.x,
             this.map.lifeboatPos.y,
-            960,
+            1500,
             'rgba(56, 189, 248, 0.72)',
             true,
             0.98
@@ -994,7 +994,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.heliPos.x,
             this.map.heliPos.y,
-            900,
+            1100,
             'rgba(251, 191, 36, 0.52)',
             true,
             0.88
@@ -1025,7 +1025,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.heliPos.x,
             this.map.heliPos.y,
-            980,
+            1200,
             'rgba(251, 191, 36, 0.65)',
             true,
             0.94
@@ -1048,7 +1048,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.heliPos.x,
             this.map.heliPos.y,
-            960,
+            1500,
             'rgba(251, 191, 36, 0.72)',
             true,
             0.98
@@ -1080,7 +1080,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.submarinePos.x,
             this.map.submarinePos.y,
-            880,
+            1100,
             'rgba(45, 212, 191, 0.52)',
             true,
             0.88
@@ -1111,7 +1111,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.submarinePos.x,
             this.map.submarinePos.y,
-            960,
+            1200,
             'rgba(45, 212, 191, 0.65)',
             true,
             0.94
@@ -1135,7 +1135,7 @@ export class MonstrumGameEngine {
           this.emitNoise(
             this.map.submarinePos.leverX,
             this.map.submarinePos.leverY,
-            960,
+            1500,
             'rgba(45, 212, 191, 0.72)',
             true,
             0.98
@@ -1182,7 +1182,7 @@ export class MonstrumGameEngine {
         this.emitNoise(
           this.map.lifeboatPos.x,
           this.map.lifeboatPos.y,
-          900,
+          1500,
           'rgba(56, 189, 248, 0.58)',
           true,
           0.95
@@ -1211,7 +1211,7 @@ export class MonstrumGameEngine {
         this.emitNoise(
           this.map.heliPos.x,
           this.map.heliPos.y,
-          960,
+          1500,
           'rgba(251, 191, 36, 0.62)',
           true,
           0.96
@@ -1248,7 +1248,7 @@ export class MonstrumGameEngine {
         this.emitNoise(
           this.map.submarinePos.x,
           this.map.submarinePos.y,
-          960,
+          1500,
           'rgba(45, 212, 191, 0.62)',
           true,
           0.96
