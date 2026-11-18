@@ -42,7 +42,7 @@ roadmap
 -> Slightly larger radius when peeking into stairs
 -> Repairs are louder yet-again to compensate for larger ship size
 -> Peeking outside a hiding spot when room light is on does not drain flashlight battery, nor does it alert the monster
--> Door peeking removed.
+-> Door peeking changes: Drains battery now. Low Int monster ignores the beam. Med Int monster treats it as a clue. High Int monster charges through the door.
 -> New main menu, meant to look visually closer to Monstrum
 -> Zoom goes from 2.5x to 1x, instead of 1.8x to 0.9x
 
@@ -54,11 +54,18 @@ roadmap
 
 0.3.0
 -> Unified Three.js + WebGPU rendering (TSL + Node-based materials/post-processing)
--> Two modes: Top-down 2.5D, First-Person 3D, not allowed to switch mid-game
--> HDR support
+-> Graphically conservative for this version, mostly to get the renderer there
 
 0.3.1
--> To fix whatever 0.3.0 will cause
+-> 3D assets, with 2D internal logic kept
+-> Generally a plethora of graphical improvements
+-> Graphics settings
+-> HDR support
+
+0.3.2
+-> Two modes: Top-down, First-Person, not allowed to switch mid-game
+-> Decks (other than Deck 1) have ceilings in First-Person mode
+-> Even though internal logic is 2D, we can force objects to only be clickable if three.js determines them to be, meaning we get a verticality enhancements for these interactions
 
 0.4.0
 -> Another major upgrade to Brute's AI. With functionality that is enabled for higher intelligence settings
