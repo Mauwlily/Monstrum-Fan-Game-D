@@ -200,6 +200,9 @@ export default function App() {
 
   const startNewRun = useCallback(
     (overrideRandomSeed = false, forcedSeed?: number, openDebugAfter = false) => {
+      audioRef.current?.dispose();
+      audioRef.current = null;
+
       const audio = getAudio();
       audio.init();
       audio.setMuted(muted);
@@ -377,6 +380,9 @@ export default function App() {
   }, [renderImmediateFrame, syncDebugTelemetry]);
 
   const returnToTitle = useCallback(() => {
+    audioRef?.dispose();
+    audioRef.current = null;
+
     engineRef.current = null;
     setHud(null);
     setDebugOpen(false);
