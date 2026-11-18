@@ -968,14 +968,60 @@ export class HorrorAudioEngine {
     silent = false,
     effectiveDist = 0,
     occlusion = 0,
-    dx = 0
+    dx = 0,
+    watertight = false
   ): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
-    const maxHear = silent ? 280 : 980;
+    const maxHear = watertight ? (silent ? 560 : 1450) : silent ? 280 : 980;
     if (effectiveDist > maxHear) return;
-    const atten = effectiveDist <= 0 ? 1 : Math.pow(1 - effectiveDist / maxHear, 1.35);
+    const atten = effectiveDist <= 0 ? 1 : Math.pow(1 - effectiveDist / maxHear, 1.3);
     const occ = this.computeOcclusionParams(occlusion, false);
     const now = this.ctx.currentTime;
+
+    if (watertight) {
+      // Heavy watertight bulkhead: metallic wheel unlatch + hydraulic pneumatic hiss + deep clunk
+      const thud = this.ctx.createOscillator();
+      const thudGain = this.ctx.createGain();
+      thud.type = 'sawtooth';
+      thud.frequency.setValueAtTime(open ? 128 : 96, now);
+      thud.frequency.exponentialRampToValueAtTime(open ? 64 : 42, now + 0.34);
+      thudGain.gain.setValueAtTime(safeGain((silent ? 0.11 : 0.24) * atten * occ.gainMult), now);
+      thudGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+      thud.connect(thudGain);
+      this.routeSpatialNode(thudGain, dx, occlusion, false);
+      thud.start(now);
+      thud.stop(now + 0.38);
+
+      const grind = this.ctx.createOscillator();
+      const grindGain = this.ctx.createGain();
+      grind.type = 'triangle';
+      grind.frequency.setValueAtTime(open ? 240 : 190, now + 0.05);
+      grind.frequency.linearRampToValueAtTime(open ? 320 : 110, now + 0.48);
+      grindGain.gain.setValueAtTime(safeGain((silent ? 0.055 : 0.12) * atten * occ.gainMult), now + 0.05);
+      grindGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+      grind.connect(grindGain);
+      this.routeSpatialNode(grindGain, dx, occlusion, false);
+      grind.start(now + 0.05);
+      grind.stop(now + 0.52);
+
+      if (this.shortWhiteNoise) {
+        const hiss = this.ctx.createBufferSource();
+        hiss.buffer = this.shortWhiteNoise;
+        const filter = this.ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.setValueAtTime(1450, now);
+        filter.Q.value = 1.6;
+        const hissGain = this.ctx.createGain();
+        hissGain.gain.setValueAtTime(safeGain((silent ? 0.05 : 0.14) * atten * occ.gainMult), now);
+        hissGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.32);
+        hiss.connect(filter);
+        filter.connect(hissGain);
+        this.routeSpatialNode(hissGain, dx, occlusion, false);
+        hiss.start(now);
+        hiss.stop(now + 0.35);
+      }
+      return;
+    }
 
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();

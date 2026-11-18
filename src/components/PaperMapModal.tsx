@@ -118,11 +118,12 @@ export const PaperMapModal: React.FC<PaperMapModalProps> = ({
       if (d.ty < startY || d.ty > endY) continue;
       const cx = toCanvasX(d.tx);
       const cy = toCanvasY(d.ty);
-      ctx.fillStyle = d.isLocked ? '#f59e0b' : '#cbd5e1';
+      ctx.fillStyle = d.isLocked ? '#f59e0b' : d.isWatertight ? '#22d3ee' : '#cbd5e1';
+      const thickness = d.isWatertight ? Math.max(2.2, cellSize * 0.45) : Math.max(1.5, cellSize * 0.3);
       if (d.orientation === 'H') {
-        ctx.fillRect(cx + cellSize * 0.1, cy + cellSize * 0.35, cellSize * 0.8, Math.max(1.5, cellSize * 0.3));
+        ctx.fillRect(cx + cellSize * 0.08, cy + (cellSize - thickness) * 0.5, cellSize * 0.84, thickness);
       } else {
-        ctx.fillRect(cx + cellSize * 0.35, cy + cellSize * 0.1, Math.max(1.5, cellSize * 0.3), cellSize * 0.8);
+        ctx.fillRect(cx + (cellSize - thickness) * 0.5, cy + cellSize * 0.08, thickness, cellSize * 0.84);
       }
     }
 
@@ -394,10 +395,16 @@ export const PaperMapModal: React.FC<PaperMapModalProps> = ({
               <span>Stairs Down (▼)</span>
             </span>
             {effectiveDeck === 'DECK_1' && (
-              <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2.5 w-2.5 rounded-full bg-orange-400/90" />
-                <span>Steam Pipe Nozzle</span>
-              </span>
+              <>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-orange-400/90" />
+                  <span>Steam Pipe Nozzle</span>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 bg-cyan-400" />
+                  <span>Watertight Door</span>
+                </span>
+              </>
             )}
           </div>
           <span className="text-slate-500">

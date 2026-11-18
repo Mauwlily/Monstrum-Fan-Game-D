@@ -1341,11 +1341,11 @@ export class MonstrumGameEngine {
       const dist = Math.hypot(dcx - b.x, dcy - b.y);
       if (dist >= 48) {
         door.isOpen = false;
-        door.swingSpeed = b.state === 'CHASE' ? 6.2 : 4.5;
+        door.swingSpeed = door.isWatertight ? (b.state === 'CHASE' ? 2.8 : 1.7) : b.state === 'CHASE' ? 6.2 : 4.5;
         this.brain.noteBruteDoorAction(door, this.elapsedSeconds);
         const effDist = this.getEffectiveNoiseDistance(dcx, dcy, p.x, p.y);
         const occ = this.computeAcousticOcclusion(dcx, dcy, p.x, p.y);
-        this.audio.playDoorToggle(false, false, effDist, occ, dcx - p.x);
+        this.audio.playDoorToggle(false, false, effDist, occ, dcx - p.x, Boolean(door.isWatertight));
         this.brutePassThroughDoors.delete(doorId);
       }
     }
@@ -2062,12 +2062,12 @@ export class MonstrumGameEngine {
         } else {
           // Brute pushes unlocked door open during patrol/stalk & marks it to close behind him!
           door.isOpen = true;
-          door.swingSpeed = 5.5;
+          door.swingSpeed = door.isWatertight ? 2.1 : 5.5;
           this.brain.noteBruteDoorAction(door, this.elapsedSeconds);
           this.brutePassThroughDoors.add(door.id);
           const effDist = this.getEffectiveNoiseDistance(dcx, dcy, this.player.x, this.player.y);
           const occ = this.computeAcousticOcclusion(dcx, dcy, this.player.x, this.player.y);
-          this.audio.playDoorToggle(true, false, effDist, occ, dcx - this.player.x);
+          this.audio.playDoorToggle(true, false, effDist, occ, dcx - this.player.x, Boolean(door.isWatertight));
         }
       } else if (door.isOpen && !door.isLocked && distToDoor < 30) {
         this.brutePassThroughDoors.add(door.id);
@@ -3031,13 +3031,13 @@ export class MonstrumGameEngine {
           d.isLocked = false;
           d.lockCut = true;
           d.isOpen = true;
-          d.swingSpeed = 6.5;
+          d.swingSpeed = d.isWatertight ? 1.9 : 6.5;
           this.audio.playBoltCuttersSnap();
-          this.audio.playDoorToggle(true, false);
+          this.audio.playDoorToggle(true, false, 0, 0, 0, Boolean(d.isWatertight));
           this.emitNoise(
             (d.tx + 0.5) * this.map.tileSize,
             (d.ty + 0.5) * this.map.tileSize,
-            290,
+            d.isWatertight ? 480 : 290,
             'rgba(226, 232, 240, 0.4)',
             true,
             0.5
@@ -3047,18 +3047,29 @@ export class MonstrumGameEngine {
           this.showToast('Padlocked bulkhead — requires Bolt Cutters.');
         }
       } else if (!cuttersOnly) {
-        // Walking or sprinting slams doors loudly; sneaking (C) or standing still opens/closes slowly & silently
+        // Walking or sprinting slams doors loudly; sneaking (C) or standing still opens/closes slower
+        // Watertight Deck 1 doors are always heavier, slower to swing, and significantly louder
         const slam = p.isMoving && !p.crouching;
         const silent = !slam;
+        const wt = Boolean(d.isWatertight);
         d.isOpen = !d.isOpen;
-        d.swingSpeed = silent ? 1.55 : 8.5;
+        d.swingSpeed = wt ? (silent ? 0.92 : 1.75) : silent ? 1.55 : 8.5;
         if (!d.isOpen) {
           this.resolveSingleDoorPush(p, d, 0.016, false, true);
         }
-        this.audio.playDoorToggle(d.isOpen, silent);
+        this.audio.playDoorToggle(d.isOpen, silent, 0, 0, 0, wt);
         const dx = (d.tx + 0.5) * this.map.tileSize;
         const dy = (d.ty + 0.5) * this.map.tileSize;
-        if (silent) {
+        if (wt) {
+          this.emitNoise(
+            dx,
+            dy,
+            silent ? 230 : 540,
+            silent ? 'rgba(56, 189, 248, 0.34)' : 'rgba(251, 146, 60, 0.55)',
+            true,
+            silent ? 0.42 : 0.9
+          );
+        } else if (silent) {
           this.emitNoise(dx, dy, 52, 'rgba(148, 163, 184, 0.16)', false);
         } else {
           this.emitNoise(dx, dy, 340, 'rgba(148, 163, 184, 0.45)', true, 0.6);
@@ -3385,6 +3396,7 @@ export class MonstrumGameEngine {
       ) {
         bestDist = effectiveScore;
         const slam = p.isMoving && !p.crouching;
+        const wt = Boolean(d.isWatertight);
         best = {
           kind: 'DOOR',
           door: d,
@@ -3393,18 +3405,24 @@ export class MonstrumGameEngine {
             ? p.inventory.includes('BOLT_CUTTERS')
               ? 'Press E to Cut Padlock'
               : 'Locked Bulkhead'
-            : d.isOpen
-              ? slam
-                ? 'Press E to Slam Door Shut (Loud)'
-                : 'Press E to Close Door Slowly (Silent)'
-              : slam
-                ? 'Press E to Slam Door Open (Loud)'
-                : 'Press E to Open Door Slowly (Silent)',
+            : wt
+              ? d.isOpen
+                ? 'Press E to Seal Watertight Door (Slow & Loud)'
+                : 'Press E to Crank Watertight Door (Slow & Loud)'
+              : d.isOpen
+                ? slam
+                  ? 'Press E to Slam Door Shut (Loud)'
+                  : 'Press E to Close Door Slowly (Silent)'
+                : slam
+                  ? 'Press E to Slam Door Open (Loud)'
+                  : 'Press E to Open Door Slowly (Silent)',
           sub: d.isLocked
             ? 'Requires Bolt Cutters'
-            : d.isOpen
-              ? 'Sneak (C) or stand still to close silently · Walking/Sprinting slams'
-              : 'Hold Q to Peek · Sneak (C) or stand still for silent swing',
+            : wt
+              ? 'Heavy Deck 1 bulkhead · Slow swing & loud hydraulic clank'
+              : d.isOpen
+                ? 'Sneak (C) or stand still to close silently · Walking/Sprinting slams'
+                : 'Hold Q to Peek · Sneak (C) or stand still for silent swing',
         };
       }
     }

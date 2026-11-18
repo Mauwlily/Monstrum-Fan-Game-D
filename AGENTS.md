@@ -152,13 +152,3 @@ Two repo scripts exist, **both authored during `0.1.x` and needing updates if yo
 
 5. **Smooth Resolution Scaling**:
    - `getViewportResolutionScale(w, h)` (`Math.sqrt(areaRatio)` clamped `0.45..3.0` around `1440x900`) preserves identical visible world area across small and 4K windows. Always apply zoom changes through `engine.getEffectiveZoom(w, h)` so raycast checks, camera, and mouse aim stay aligned.
-
----
-
-## 5. Upcoming Roadmap Context (`README.md`)
-
-`README.md` outlines planned versions after `0.2.0` (do **not** break existing debug hooks when implementing them):
-- **`0.2.1`**: Larger stair peek radius; louder escape repairs; hiding vent-peek no longer drains battery or alerts Brute when that room's light is ON; **door peeking removed** (`peekingDoorId` / `forceDoorPeek` will need cleanup in `engine.ts`, `DebugPanel.tsx`, and `DOOR_KEYHOLE_AND_FLARE`); new Monstrum-styled main menu; zoom range `2.5x–1.0x` (instead of `1.8x–0.9x`).
-- **`0.2.2`**: Deck 2 guaranteed two long hallways + less greedy space-filling; Deck 3 short/mazey hallways split by loud, slow watertight doors; 1 **Master Fuse** powering deck lights permanently; low-intelligence Brutes repeatedly try to shut off nearby lightswitches while high-intelligence Brutes ignore them.
-- **`0.2.3`**: 6 chains on the Helicopter (`BOLT_CUTTERS`, 2s cut + loud snap); locked-only rooms requiring Bolt Cutters (Brute spawn excluded from those rooms).
-- **`0.3.0`–`0.4.0`**: Migration to unified **Three.js + WebGPU (`TSL` + node materials/post-processing)** supporting Top-down 2.5D and First-Person 3D (locked per run) + HDR, followed by `0.3.1` stabilization and `0.4.0` high-intelligence Brute AI upgrades. Note when moving to Three.js/WebGPU: `probeBehindWallPixels()` (`ctx.getImageData`) and `captureCanvasDataUrl()` (`canvas.toDataURL`) in `src/App.tsx` will need WebGPU/readback equivalents to keep `window.__monstrumDebug` working.

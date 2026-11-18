@@ -1,4 +1,4 @@
-export const GAME_VERSION = '0.2.0';
+export const GAME_VERSION = '0.2.1';
 
 export const REFERENCE_VIEWPORT_WIDTH = 1440;
 export const REFERENCE_VIEWPORT_HEIGHT = 900;
@@ -421,6 +421,7 @@ export interface Door {
   swingSpeed: number;   // fast (~8.5) when moving, slow (~1.55) when standing still
   isBroken: boolean;
   isLocked: boolean;
+  isWatertight?: boolean;
   lockCut?: boolean;
 }
 
@@ -469,7 +470,23 @@ export type ShipPropKind =
   | 'SUBMARINE_HULL'
   | 'FLOODGATE_LEVER'
   | 'PUMP_UNIT'
-  | 'SWITCHGEAR';
+  | 'SWITCHGEAR'
+  // 0.2.1 Non-interactable deck-appropriate furniture (blocking centerpieces & walkable floor clutter)
+  | 'CABIN_WARDROBE'
+  | 'GALLEY_FRIDGE'
+  | 'DINING_BOOTH'
+  | 'MED_CART'
+  | 'CARGO_RACK'
+  | 'GENERATOR_SKID'
+  | 'VALVE_MANIFOLD'
+  | 'COMPRESSED_AIR_TANK'
+  | 'DIVE_GEAR_RACK'
+  | 'RUBBER_RUNNER'
+  | 'FLOOR_GRATE'
+  | 'CABLE_COIL'
+  | 'CAUTION_MAT'
+  | 'OIL_DRIP_TRAY'
+  | 'RUG_MAT';
 
 export interface ShipProp {
   id: string;

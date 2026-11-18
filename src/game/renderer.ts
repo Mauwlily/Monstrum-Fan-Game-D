@@ -693,7 +693,13 @@ export class GameRenderer {
     const minY = camY - halfH;
     const maxY = camY + halfH;
 
-    for (const prop of engine.map.props) {
+    // Two-pass order: walkable floor clutter first (flush on deck), then blocking centerpieces
+    const sortedProps = [
+      ...engine.map.props.filter((p) => !p.blocking),
+      ...engine.map.props.filter((p) => Boolean(p.blocking)),
+    ];
+
+    for (const prop of sortedProps) {
       if (prop.kind === 'SUBMARINE_HULL') continue; // Rendered with moonpool detail in drawEscapeZones
       const px = prop.tx * ts;
       const py = prop.ty * ts;
@@ -991,6 +997,210 @@ export class GameRenderer {
           ctx.fillStyle = sx % 36 < 18 ? '#f59e0b' : '#34d399';
           ctx.fillRect(sx, py + 12, 4, 4);
         }
+      } else if (prop.kind === 'CABIN_WARDROBE') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 2);
+        ctx.fill();
+        ctx.fillStyle = '#3f2e22';
+        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 2);
+        ctx.fill();
+        ctx.strokeStyle = '#785a3a';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(px + pw / 2 - 0.8, py + 7, 1.6, ph - 14);
+      } else if (prop.kind === 'GALLEY_FRIDGE') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
+        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#64748b';
+        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(px + 9, py + ph - 11, pw - 18, 3);
+      } else if (prop.kind === 'DINING_BOOTH') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
+        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#7f1d1d';
+        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, 8, 2);
+        ctx.fill();
+        traceRoundedRect(ctx, px + 3, py + ph - 13, pw - 6, 8, 2);
+        ctx.fill();
+        ctx.fillStyle = '#cbd5e1';
+        traceRoundedRect(ctx, px + 6, py + ph / 2 - 5, pw - 12, 10, 2);
+        ctx.fill();
+      } else if (prop.kind === 'MED_CART') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
+        traceRoundedRect(ctx, px + 8, py + 8, pw - 12, ph - 12, 3);
+        ctx.fill();
+        ctx.fillStyle = '#cbd5e1';
+        traceRoundedRect(ctx, px + 6, py + 6, pw - 12, ph - 12, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+        ctx.fillStyle = '#dc2626';
+        ctx.fillRect(px + pw / 2 - 4, py + ph / 2 - 1.5, 8, 3);
+        ctx.fillRect(px + pw / 2 - 1.5, py + ph / 2 - 4, 3, 8);
+      } else if (prop.kind === 'CARGO_RACK') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
+        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 2);
+        ctx.fill();
+        ctx.fillStyle = '#334155';
+        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, ph - 10, 2);
+        ctx.fill();
+        ctx.strokeStyle = '#d97706';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.fillStyle = '#57422a';
+        ctx.fillRect(px + 8, py + 9, pw / 2 - 10, ph - 18);
+        ctx.fillStyle = '#1e3a5f';
+        ctx.fillRect(px + pw / 2 + 2, py + 9, pw / 2 - 10, ph - 18);
+      } else if (prop.kind === 'GENERATOR_SKID') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
+        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 4);
+        ctx.fill();
+        ctx.fillStyle = '#1f2937';
+        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, ph - 10, 4);
+        ctx.fill();
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#991b1b';
+        traceRoundedRect(ctx, px + 10, py + 10, pw - 20, ph - 20, 3);
+        ctx.fill();
+        ctx.fillStyle = '#334155';
+        for (let gx = px + 14; gx < px + pw - 14; gx += 7) {
+          ctx.fillRect(gx, py + 12, 3, ph - 24);
+        }
+      } else if (prop.kind === 'VALVE_MANIFOLD') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
+        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.fillStyle = '#334155';
+        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#9a3412';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(px + 7, py + ph / 2);
+        ctx.lineTo(px + pw - 7, py + ph / 2);
+        ctx.stroke();
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(px + pw / 2, py + ph / 2, 7, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (prop.kind === 'COMPRESSED_AIR_TANK') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
+        ctx.beginPath();
+        ctx.arc(px + pw / 2 + 2, py + ph / 2 + 2, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#0f766e';
+        ctx.beginPath();
+        ctx.arc(px + pw / 2, py + ph / 2, 12, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#99f6e4';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.fillStyle = '#cbd5e1';
+        ctx.beginPath();
+        ctx.arc(px + pw / 2, py + ph / 2, 4, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (prop.kind === 'DIVE_GEAR_RACK') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 12, 3);
+        ctx.fill();
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 12, 3);
+        ctx.fill();
+        ctx.strokeStyle = '#2dd4bf';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+        for (let tx = px + 11; tx < px + pw - 10; tx += 11) {
+          ctx.fillStyle = '#f59e0b';
+          ctx.beginPath();
+          ctx.arc(tx, py + ph / 2, 3.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (prop.kind === 'RUBBER_RUNNER') {
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.58)';
+        traceRoundedRect(ctx, px + 4, py + 8, pw - 8, ph - 16, 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(100, 116, 139, 0.35)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+        for (let rx = px + 10; rx < px + pw - 8; rx += 8) {
+          ctx.beginPath();
+          ctx.moveTo(rx, py + 11);
+          ctx.lineTo(rx, py + ph - 11);
+          ctx.stroke();
+        }
+      } else if (prop.kind === 'FLOOR_GRATE') {
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.5)';
+        ctx.fillRect(px + 5, py + 5, pw - 10, ph - 10);
+        ctx.strokeStyle = 'rgba(100, 116, 139, 0.45)';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(px + 5, py + 5, pw - 10, ph - 10);
+        for (let gx = px + 10; gx < px + pw - 6; gx += 6) {
+          ctx.beginPath();
+          ctx.moveTo(gx, py + 6);
+          ctx.lineTo(gx, py + ph - 6);
+          ctx.stroke();
+        }
+      } else if (prop.kind === 'CABLE_COIL') {
+        const cx = px + pw / 2;
+        const cy = py + ph / 2;
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.7)';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 11, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.strokeStyle = prop.color ?? '#b45309';
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 11, 0, Math.PI * 1.85);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx + 1, cy - 1, 7.2, 0.4, Math.PI * 2.1);
+        ctx.stroke();
+      } else if (prop.kind === 'CAUTION_MAT') {
+        ctx.fillStyle = 'rgba(24, 24, 27, 0.72)';
+        ctx.fillRect(px + 4, py + 8, pw - 8, ph - 16);
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(px + 4, py + 8, pw - 8, ph - 16);
+        ctx.strokeStyle = 'rgba(245, 158, 11, 0.36)';
+        ctx.lineWidth = 2;
+        for (let sx = px + 8; sx < px + pw - 10; sx += 9) {
+          ctx.beginPath();
+          ctx.moveTo(sx, py + ph - 10);
+          ctx.lineTo(sx + 5, py + 10);
+          ctx.stroke();
+        }
+      } else if (prop.kind === 'OIL_DRIP_TRAY') {
+        ctx.fillStyle = 'rgba(30, 41, 59, 0.65)';
+        ctx.fillRect(px + 7, py + 9, pw - 14, ph - 18);
+        ctx.strokeStyle = 'rgba(100, 116, 139, 0.55)';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(px + 7, py + 9, pw - 14, ph - 18);
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.85)';
+        ctx.beginPath();
+        ctx.ellipse(px + pw / 2, py + ph / 2, pw * 0.25, ph * 0.2, 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (prop.kind === 'RUG_MAT') {
+        ctx.fillStyle = prop.color ?? 'rgba(127, 29, 29, 0.48)';
+        traceRoundedRect(ctx, px + 5, py + 7, pw - 10, ph - 14, 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(217, 119, 6, 0.35)';
+        ctx.lineWidth = 1.2;
+        traceRoundedRect(ctx, px + 8, py + 10, pw - 16, ph - 20, 1);
+        ctx.stroke();
       }
       ctx.restore();
     }
@@ -2323,27 +2533,53 @@ export class GameRenderer {
         ctx.translate(-ts / 2 + 4, 0);
         ctx.rotate(-d.openProgress * 1.38);
         ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, 1, -2, ts - 8, 7, 2);
+        traceRoundedRect(ctx, 1, -2, ts - 8, d.isWatertight ? 9 : 7, 2);
         ctx.fill();
-        ctx.fillStyle = d.isLocked ? '#7f1d1d' : '#526075';
-        traceRoundedRect(ctx, 0, -3.5, ts - 8, 7, 2);
+        ctx.fillStyle = d.isLocked ? '#7f1d1d' : d.isWatertight ? '#1e3a4c' : '#526075';
+        traceRoundedRect(ctx, 0, d.isWatertight ? -4.5 : -3.5, ts - 8, d.isWatertight ? 9 : 7, 2);
         ctx.fill();
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1.1;
+        ctx.strokeStyle = d.isWatertight ? '#22d3ee' : '#94a3b8';
+        ctx.lineWidth = d.isWatertight ? 1.5 : 1.1;
         ctx.stroke();
+        if (d.isWatertight) {
+          // Brass dogging wheel on swung watertight leaf
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc((ts - 8) * 0.5, 0, 3.8, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       } else {
+        const wt = Boolean(d.isWatertight);
         ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, -ts / 2 + 3, -3, ts - 4, 9, 2);
+        traceRoundedRect(ctx, -ts / 2 + 3, -3, ts - 4, wt ? 11 : 9, 2);
         ctx.fill();
-        ctx.fillStyle = d.isLocked ? '#7f1d1d' : '#475569';
-        traceRoundedRect(ctx, -ts / 2 + 2, -4.5, ts - 4, 9, 2);
+        ctx.fillStyle = d.isLocked ? '#7f1d1d' : wt ? '#1e3a4c' : '#475569';
+        traceRoundedRect(ctx, -ts / 2 + 2, wt ? -5.5 : -4.5, ts - 4, wt ? 11 : 9, 2);
         ctx.fill();
-        ctx.strokeStyle = d.isLocked ? '#ef4444' : '#94a3b8';
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = d.isLocked ? '#ef4444' : wt ? '#22d3ee' : '#94a3b8';
+        ctx.lineWidth = wt ? 1.9 : 1.5;
         ctx.stroke();
         // Porthole / reinforcement bar
         ctx.fillStyle = '#1e293b';
         ctx.fillRect(-8, -2, 16, 4);
+        if (wt && !d.isLocked) {
+          // Heavy brass dogging handwheel + bolted ribs
+          ctx.fillStyle = '#f59e0b';
+          ctx.fillRect(-ts / 2 + 4, -4, 3, 8);
+          ctx.fillRect(ts / 2 - 7, -4, 3, 8);
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.arc(0, 0, 4.4, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(-4, 0);
+          ctx.lineTo(4, 0);
+          ctx.moveTo(0, -4);
+          ctx.lineTo(0, 4);
+          ctx.stroke();
+        }
         if (d.isLocked) {
           ctx.fillStyle = '#ef4444';
           ctx.beginPath();
