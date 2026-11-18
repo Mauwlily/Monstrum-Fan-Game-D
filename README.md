@@ -1,4 +1,6 @@
 roadmap
+
+The intial public releases:
 0.1.0.1
 -> Security MD, License MD. Mainly to make that Reddit github-repo security-check bot happy
 -> Is not, and will not be its own release
@@ -20,6 +22,7 @@ roadmap
 -> Reduce chance of Brute getting stuck
 -> Scale smoothly with window resolution
 
+Big ship, and refinements:
 0.2.0
 -> 4.5x larger ship (1.5x more floors, 2x longer, 1.5x wider)
 -> More room types!
@@ -49,11 +52,14 @@ roadmap
 -> New main menu, meant to look visually closer to Monstrum
 
 0.2.3
+-> Door peeking also doesn't alert or drain if the light is active on the side you are peeking into
 -> One master fuse spawns in the map
--> When you insert it, the deck's lights are permanently on
--> Lower intelligence monsters go to the nearest lightswitch, try to turn it off repeatedly for a while. high intelligence monsters don't
+-> When you insert it (the slot is in its dedicated room), the deck's lights are permanently on. Including the hallways! (Which are normally always dark)
+-> Lower intelligence monsters go to the nearest lightswitch (10s for Low, 3s for Med) to try to turn it off repeatedly for a while. high intelligence monsters do it better (High requires just 1 lightswitch click to know ; Extreme finally has something over High, where the Brute realises only the master fuse is able to turn on hallways light, so it continues as if nothing happened)
+-> Low intelligence sometimes even forgets lightswitches don't do anything with the master fuse inserted, and tries to click one for a bit again. Med and above don't, and will ignore all lightswitches for that deck.
 -> Bolt cutters now make sense. The helicopter is chained by default, 6 chains. You have to cut each chain (takes 2 seconds per, plus a loud noise once they snap). And there now are rooms that only have locked doors, meaning you require the cutter to open them. Brute is guaranteed to not spawn in those rooms
 
+The 3D series:
 0.3.0
 -> Unified Three.js + WebGPU rendering (TSL + Node-based materials/post-processing)
 -> Graphically conservative for this version, mostly to get the renderer there
@@ -66,8 +72,10 @@ roadmap
 
 0.3.2
 -> Two modes: Top-down, First-Person, not allowed to switch mid-game
--> Decks (other than Deck 1) have ceilings in First-Person mode
+-> Decks (other than Deck 3) have ceilings in First-Person mode
 -> Even though internal logic is 2D, we can force objects to only be clickable if three.js determines them to be, meaning we get a verticality enhancements for these interactions
 
-0.4.0
--> Another major upgrade to Brute's AI. With functionality that is enabled for higher intelligence settings
+Brutey-balls get more brainz (details are rough for now):
+0.4.0 -> Search overhaul
+0.4.1 -> Chase overhaul
+0.4.2 -> Stalk/Investigate overhaul
