@@ -89,9 +89,11 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
       ? 'Rotors at full RPM — Press E at Stern Helideck to Escape'
       : hud.heliState === 'ACTIVATING'
         ? `Turbine Spinning Up (${Math.round(hud.heliActivationProgress * 100)}%) — Hold out until 100%`
-        : hud.heliParts.length === 3
-          ? 'All 3 parts fitted — Hold E at Chopper to Start Spin-Up'
-          : `Install each held part one by one (Hold E · ~5s each) — ${hud.heliParts.length}/3 fitted`;
+        : hud.heliParts.length === 3 && hud.heliChainsRemaining === 0
+          ? 'All 3 parts fitted & chains cut — Hold E at Chopper to Spin Up'
+          : hud.heliParts.length === 3
+            ? `All 3 parts fitted — Cut ${hud.heliChainsRemaining} remaining steel chains (Hold E w/ Bolt Cutters)`
+            : `Fit 3 parts (~5s each) & cut 6 chains w/ Bolt Cutters (2s each) — ${hud.heliParts.length}/3 fitted`;
 
   const boatStatusText =
     hud.lifeboatState === 'READY'
@@ -157,7 +159,17 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
                 {hud.heliParts.length}/3
               </span>
             </div>
-            <p className="mt-1 text-[11px] text-slate-400">{heliStatusText}</p>
+            <div className="mt-1.5 flex items-center justify-between gap-2 rounded border border-slate-800/90 bg-slate-950/80 px-2.5 py-1 text-[11px]">
+              <span className="text-slate-400">Steel Chains Cut</span>
+              <span
+                className={`font-mono-num font-semibold ${
+                  hud.heliChainsRemaining === 0 ? 'text-emerald-300' : 'text-amber-300'
+                }`}
+              >
+                {6 - hud.heliChainsRemaining}/6
+              </span>
+            </div>
+            <p className="mt-1.5 text-[11px] text-slate-400">{heliStatusText}</p>
             <div className="mt-3 space-y-2">
               {HELI_PARTS.map((p) => renderPartRow(p, hud.heliParts))}
             </div>
@@ -215,8 +227,8 @@ export const EscapeJournalModal: React.FC<EscapeJournalModalProps> = ({ hud, onC
             </div>
           </div>
           <span className="text-[11px] text-slate-400">
-            Press <span className="font-semibold text-slate-200">[G]</span> to drop held items
-            onto the deck without using them.
+            <span className="font-semibold text-slate-200">Bolt Cutters</span> are reusable on padlocked vaults &amp; chopper chains ·{' '}
+            <span className="font-semibold text-slate-200">[G]</span> drops held item.
           </span>
         </div>
       </div>

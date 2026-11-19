@@ -16,6 +16,7 @@ import {
   DroppedLight,
   EscapeProgress,
   FloorMaterial,
+  FuseSocket,
   getDeckIndex,
   getDeckLabel,
   getViewportResolutionScale,
@@ -101,6 +102,11 @@ export class MonstrumGameEngine {
   private activeRepairProgress = 0;
   public maxEmittedAcousticRadius = 0;
   private bruteStuckTimer = 0;
+  public poweredDecks: Record<ShipDeck, boolean> = {
+    DECK_3: false,
+    DECK_2: false,
+    DECK_1: false,
+  };
 
   public debugConfig: DebugOverlayConfig = {
     enabled: false,
@@ -209,6 +215,9 @@ export class MonstrumGameEngine {
       stairDestId: null,
       pursuitStairId: null,
       walkPhase: 0,
+      fiddleSwitchId: null,
+      fiddleSwitchTimer: 0,
+      fiddleClickTimer: 0,
     };
 
     this.escape = {
@@ -227,6 +236,8 @@ export class MonstrumGameEngine {
       lifeboatActivationProgress: 0,
       heliActivationProgress: 0,
       submarineActivationProgress: 0,
+      heliChainsRemaining: 6,
+      heliChainCutProgress: 0,
     };
 
     this.cameraX = this.player.x;
@@ -273,6 +284,7 @@ export class MonstrumGameEngine {
     this.lastCheckHidingDist = Infinity;
     this.bruteStuckTimer = 0;
     this.maxEmittedAcousticRadius = 0;
+    this.poweredDecks = { DECK_3: false, DECK_2: false, DECK_1: false };
     const meta = applyDebugScenarioToEngine(this, scenarioId);
     return meta;
   }
@@ -628,7 +640,17 @@ export class MonstrumGameEngine {
           this.emitNoise(st.x, st.y, 240, 'rgba(148, 163, 184, 0.3)', true, 0.65);
         }
 
-        if (canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning)) {
+        if (
+          canBruteSeePlayer(
+            this.brute,
+            p,
+            this.map,
+            this.doorsByTile,
+            this.difficulty,
+            this.bruteTuning,
+            this.poweredDecks
+          )
+        ) {
           this.brute.pursuitStairId = dest.id;
           this.brute.lastKnownPlayerPos = { x: st.x, y: st.y };
           this.brute.chaseAggroTimer = Math.max(this.brute.chaseAggroTimer, 5.8);
@@ -815,7 +837,12 @@ export class MonstrumGameEngine {
         this.peekNoBatteryToasted = false;
       } else if (bestDoorId) {
         p.peekingStairId = null;
-        if (p.battery > 0) {
+        const doorObj = this.map.doors.find((d) => d.id === bestDoorId);
+        const farLit = doorObj ? this.isDoorFarSideLit(doorObj, p.x, p.y) : false;
+        if (farLit) {
+          p.peekingDoorId = bestDoorId;
+          this.peekNoBatteryToasted = false;
+        } else if (p.battery > 0) {
           p.peekingDoorId = bestDoorId;
           this.peekNoBatteryToasted = false;
           if (!p.flashlightOn) {
@@ -830,7 +857,7 @@ export class MonstrumGameEngine {
           p.peekingDoorId = null;
           if (!this.peekNoBatteryToasted) {
             this.peekNoBatteryToasted = true;
-            this.showToast('Flashlight battery empty — cannot peek doors.');
+            this.showToast('Flashlight battery empty — cannot peek dark doors.');
           }
         }
       } else {
@@ -1010,10 +1037,79 @@ export class MonstrumGameEngine {
       this.escape.lifeboatActivatingHold = Math.max(0, this.escape.lifeboatActivatingHold - dt * 1.4);
     }
 
-    // 2. Helicopter partial repair or turbine starter hold
+    // 2. Helicopter chains, partial repair, or turbine starter hold
     const heldHeliPart = this.getHeldPartForRoute('HELI');
+    const hasCutters = p.inventory.includes('BOLT_CUTTERS');
+    const selectedItem = p.inventory[p.selectedSlot];
+    const selectedIsHeliPart = selectedItem
+      ? ITEM_CATALOG[selectedItem].category === 'HELI_PART' &&
+        !this.escape.heliParts.includes(selectedItem)
+      : false;
+    const shouldCutHeliChain =
+      this.escape.heliChainsRemaining > 0 &&
+      hasCutters &&
+      (selectedItem === 'BOLT_CUTTERS' || !selectedIsHeliPart || !heldHeliPart);
+
+    let heliCutting = false;
+    let heliRepairing = false;
+    let heliStarting = false;
+
     if (this.holdingInteract && distHeli < 78 && this.escape.heliState === 'IDLE') {
-      if (this.escape.heliParts.length < 3 && heldHeliPart) {
+      if (shouldCutHeliChain) {
+        heliCutting = true;
+        this.escape.heliChainCutProgress = Math.min(1, this.escape.heliChainCutProgress + dt / 2.0);
+        const cutNumber = 6 - this.escape.heliChainsRemaining + 1;
+        label = `Cutting Helicopter Chain (${cutNumber}/6)...`;
+        progress = this.escape.heliChainCutProgress;
+
+        if (Math.random() < 0.28) {
+          this.particles.push({
+            x: this.map.heliPos.x + (Math.random() - 0.5) * 32,
+            y: this.map.heliPos.y + (Math.random() - 0.5) * 24,
+            vx: (Math.random() - 0.5) * 90,
+            vy: (Math.random() - 0.5) * 90,
+            life: 0.25,
+            maxLife: 0.25,
+            size: 2,
+            color: '#fbbf24',
+          });
+        }
+
+        if (this.escape.heliChainCutProgress >= 1) {
+          this.escape.heliChainCutProgress = 0;
+          this.escape.heliChainsRemaining = Math.max(0, this.escape.heliChainsRemaining - 1);
+          this.audio.playHeliChainSnap();
+          this.emitNoise(
+            this.map.heliPos.x,
+            this.map.heliPos.y,
+            950,
+            'rgba(251, 191, 36, 0.72)',
+            true,
+            0.92
+          );
+          for (let i = 0; i < 10; i++) {
+            this.particles.push({
+              x: this.map.heliPos.x + (Math.random() - 0.5) * 30,
+              y: this.map.heliPos.y + (Math.random() - 0.5) * 22,
+              vx: (Math.random() - 0.5) * 150,
+              vy: (Math.random() - 0.5) * 150,
+              life: 0.42,
+              maxLife: 0.42,
+              size: 2.6,
+              color: i % 2 === 0 ? '#fde047' : '#cbd5e1',
+            });
+          }
+          if (this.escape.heliChainsRemaining === 0) {
+            this.showToast('All 6 Helicopter chains cut free!');
+          } else {
+            this.showToast(
+              `Helicopter chain snapped (${6 - this.escape.heliChainsRemaining}/6) — ${this.escape.heliChainsRemaining} remaining!`
+            );
+          }
+          this.emitHud();
+        }
+      } else if (this.escape.heliParts.length < 3 && heldHeliPart) {
+        heliRepairing = true;
         this.escape.heliPartProgress = Math.min(1, this.escape.heliPartProgress + dt / 5.0);
         label = `Installing ${ITEM_CATALOG[heldHeliPart].name}...`;
         progress = this.escape.heliPartProgress;
@@ -1066,7 +1162,8 @@ export class MonstrumGameEngine {
           );
           this.emitHud();
         }
-      } else if (this.escape.heliParts.length === 3) {
+      } else if (this.escape.heliParts.length === 3 && this.escape.heliChainsRemaining === 0) {
+        heliStarting = true;
         this.escape.heliActivatingHold = Math.min(1, this.escape.heliActivatingHold + dt / 1.4);
         label = 'Starting Helicopter Turbine...';
         progress = this.escape.heliActivatingHold;
@@ -1088,8 +1185,14 @@ export class MonstrumGameEngine {
           this.emitHud();
         }
       }
-    } else {
+    }
+    if (!heliCutting) {
+      this.escape.heliChainCutProgress = Math.max(0, this.escape.heliChainCutProgress - dt * 0.18);
+    }
+    if (!heliRepairing) {
       this.escape.heliPartProgress = Math.max(0, this.escape.heliPartProgress - dt * 0.14);
+    }
+    if (!heliStarting) {
       this.escape.heliActivatingHold = Math.max(0, this.escape.heliActivatingHold - dt * 1.4);
     }
 
@@ -1419,6 +1522,7 @@ export class MonstrumGameEngine {
 
     if (b.roarCooldown > 0) b.roarCooldown -= dt;
     this.brain.decaySuspicion(dt);
+    this.brain.updateFuseMemory(dt, this.poweredDecks, this.difficulty.intelligence);
 
     const bTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(b.x / this.map.tileSize)));
     const bTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(b.y / this.map.tileSize)));
@@ -1460,7 +1564,15 @@ export class MonstrumGameEngine {
     this.updateBruteDoorClosing();
 
     // 2. Check wide non-gamey FoV vision for Player!
-    const seesPlayer = canBruteSeePlayer(b, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning);
+    const seesPlayer = canBruteSeePlayer(
+      b,
+      p,
+      this.map,
+      this.doorsByTile,
+      this.difficulty,
+      this.bruteTuning,
+      this.poweredDecks
+    );
     if (seesPlayer) {
       const wasChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
       if (this.lastObservedPlayerPos && dt > 0.001) {
@@ -1600,7 +1712,8 @@ export class MonstrumGameEngine {
       this.doorsByTile,
       this.difficulty,
       this.bruteTuning,
-      this.escape
+      this.escape,
+      this.poweredDecks
     );
     if (clueEvents.length > 0) {
       b.cluesSpottedTotal += clueEvents.length;
@@ -1618,17 +1731,20 @@ export class MonstrumGameEngine {
       });
     }
 
-    // 5b. Brute reacts to player's door-peek flashlight beam based on Intelligence tier
+    // 5b. Brute reacts to player's dark-side door-peek flashlight beam based on Intelligence tier
+    const activePeekDoor =
+      p.peekingDoorId !== null
+        ? this.map.doors.find((d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken)
+        : undefined;
     if (
-      p.peekingDoorId !== null &&
+      activePeekDoor &&
+      !this.isDoorFarSideLit(activePeekDoor, p.x, p.y) &&
       p.battery > 0 &&
       p.hidingSpotId === null &&
       this.difficulty.intelligence !== 'LOW'
     ) {
-      const peekDoor = this.map.doors.find(
-        (d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken
-      );
-      if (peekDoor) {
+      const peekDoor = activePeekDoor;
+      {
         const ts = this.map.tileSize;
         const dcx = (peekDoor.tx + 0.5) * ts;
         const dcy = (peekDoor.ty + 0.5) * ts;
@@ -1744,8 +1860,59 @@ export class MonstrumGameEngine {
       p,
       this.doorsByTile,
       this.difficulty,
-      this.bruteTuning
+      this.bruteTuning,
+      this.poweredDecks
     );
+
+    // 6b. Master Fuse futile light-switch fiddling (Low: 10s, Med: 3s; interruptible by pursuit/loud noise)
+    if (b.fiddleSwitchId) {
+      const interrupted =
+        goal === 'PURSUIT' ||
+        goal === 'CHECK_HIDING' ||
+        goal === 'SMASH_DOOR' ||
+        (goal === 'INVESTIGATE_NOISE' && (b.investigateTarget?.urgency ?? 0) >= 0.45);
+      const sw = this.map.lightSwitches.find((s) => s.id === b.fiddleSwitchId);
+      if (interrupted || !sw) {
+        b.fiddleSwitchId = null;
+        b.fiddleSwitchTimer = 0;
+        b.fiddleClickTimer = 0;
+      } else {
+        b.state = 'STALK';
+        b.targetAngle = Math.atan2(sw.y - b.y, sw.x - b.x);
+        this.turnBruteTowardTarget(dt, 8);
+        b.fiddleClickTimer -= dt;
+        if (b.fiddleClickTimer <= 0) {
+          b.fiddleClickTimer = 0.55;
+          const effDist = this.getEffectiveNoiseDistance(sw.x, sw.y, p.x, p.y);
+          const occ = this.computeAcousticOcclusion(sw.x, sw.y, p.x, p.y);
+          this.audio.playBreakerSwitch(false, effDist, occ, sw.x - p.x);
+          this.particles.push({
+            x: sw.x + (Math.random() - 0.5) * 6,
+            y: sw.y + (Math.random() - 0.5) * 6,
+            vx: (Math.random() - 0.5) * 35,
+            vy: (Math.random() - 0.5) * 35,
+            life: 0.25,
+            maxLife: 0.25,
+            size: 2,
+            color: '#fbbf24',
+          });
+        }
+        b.fiddleSwitchTimer -= dt;
+        if (b.fiddleSwitchTimer <= 0) {
+          const swDeck = this.brain.getSwitchDeck(sw);
+          this.brain.markFuseDeckKnown(swDeck, this.difficulty.intelligence);
+          b.fiddleSwitchId = null;
+          b.fiddleSwitchTimer = 0;
+          b.fiddleClickTimer = 0;
+          if (this.brain.stalkTarget) {
+            this.brain.markRoomCleared(this.brain.stalkTarget.roomId, this.elapsedSeconds);
+            this.brain.stalkTarget = null;
+          }
+          this.brain.advanceStalkQueue(this.elapsedSeconds);
+        }
+        return;
+      }
+    }
 
     // Goal: PURSUIT (Active chase to last known spot + stair follow-through + momentum overshoot!)
     if (goal === 'PURSUIT') {
@@ -1912,11 +2079,31 @@ export class MonstrumGameEngine {
       } else {
         if (st.killSwitchId) {
           const sw = this.map.lightSwitches.find((s) => s.id === st.killSwitchId);
-          if (sw && sw.isOn) {
-            sw.isOn = false;
-            this.brain.rememberedLights.set(sw.id, false);
-            this.audio.playBreakerSwitch(false);
-            this.emitNoise(sw.x, sw.y, 165, 'rgba(245, 158, 11, 0.35)', false);
+          if (sw) {
+            const swDeck = this.brain.getSwitchDeck(sw);
+            if (this.poweredDecks[swDeck]) {
+              const effDist = this.getEffectiveNoiseDistance(sw.x, sw.y, p.x, p.y);
+              const occ = this.computeAcousticOcclusion(sw.x, sw.y, p.x, p.y);
+              if (this.difficulty.intelligence === 'EXTREME') {
+                this.brain.markFuseDeckKnown(swDeck, 'EXTREME');
+              } else if (this.difficulty.intelligence === 'HIGH') {
+                this.audio.playBreakerSwitch(false, effDist, occ, sw.x - p.x);
+                this.brain.markFuseDeckKnown(swDeck, 'HIGH');
+              } else {
+                this.audio.playBreakerSwitch(false, effDist, occ, sw.x - p.x);
+                b.fiddleSwitchId = sw.id;
+                b.fiddleSwitchTimer = this.difficulty.intelligence === 'MEDIUM' ? 3.0 : 10.0;
+                b.fiddleClickTimer = 0.55;
+                return;
+              }
+            } else if (sw.isOn) {
+              sw.isOn = false;
+              this.brain.rememberedLights.set(sw.id, false);
+              const effDist = this.getEffectiveNoiseDistance(sw.x, sw.y, p.x, p.y);
+              const occ = this.computeAcousticOcclusion(sw.x, sw.y, p.x, p.y);
+              this.audio.playBreakerSwitch(false, effDist, occ, sw.x - p.x);
+              this.emitNoise(sw.x, sw.y, 165, 'rgba(245, 158, 11, 0.35)', false);
+            }
           }
         }
         const arrivalRoomId = st.roomId;
@@ -2202,14 +2389,14 @@ export class MonstrumGameEngine {
       const dcy = (door.ty + 0.5) * ts;
       const distToDoor = Math.hypot(dcx - b.x, dcy - b.y);
       if (!door.isOpen && distToDoor < 38) {
-        if (aggressiveChase || door.isLocked) {
+        if (aggressiveChase) {
           const speeds = this.getSpeedProfile();
           b.state = 'SMASH_DOOR';
           b.smashDoorId = door.id;
-          b.smashTimer = aggressiveChase ? speeds.smashChase : speeds.smashPatrol;
+          b.smashTimer = speeds.smashChase;
           this.bruteStuckTimer = 0;
           return;
-        } else {
+        } else if (!door.isLocked) {
           // Brute pushes unlocked door open during patrol/stalk & marks it to close behind him!
           door.isOpen = true;
           door.swingSpeed = door.isWatertight ? 2.1 : 5.5;
@@ -2812,8 +2999,13 @@ export class MonstrumGameEngine {
       if (d < nearestLightDist) {
         nearestLightDist = d;
         nearestLightOcclusion = this.computeAcousticOcclusion(sw.x, sw.y, p.x, p.y);
-        const bruteToSw = Math.hypot(b.x - sw.x, b.y - sw.y);
-        nearestLightSputter = getRoomLightFlicker(sw.id, this.elapsedSeconds, bruteToSw).sputterAmount;
+        const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+        if (this.poweredDecks[swDeck]) {
+          nearestLightSputter = 0;
+        } else {
+          const bruteToSw = Math.hypot(b.x - sw.x, b.y - sw.y);
+          nearestLightSputter = getRoomLightFlicker(sw.id, this.elapsedSeconds, bruteToSw).sputterAmount;
+        }
       }
     }
 
@@ -2884,7 +3076,29 @@ export class MonstrumGameEngine {
     if (!spotId) return false;
     const spot = this.map.hidingSpots.find((s) => s.id === spotId);
     if (!spot) return false;
+    if (this.poweredDecks[spot.deck]) return true;
     return this.map.lightSwitches.some((sw) => sw.roomId === spot.roomId && sw.isOn);
+  }
+
+  public isDoorFarSideLit(door: Door, fromX: number, fromY: number): boolean {
+    const ts = this.map.tileSize;
+    const dcx = (door.tx + 0.5) * ts;
+    const dcy = (door.ty + 0.5) * ts;
+    const crossSign =
+      door.orientation === 'H' ? Math.sign(dcy - fromY) || 1 : Math.sign(dcx - fromX) || 1;
+    const farTx = Math.max(
+      0,
+      Math.min(this.map.width - 1, door.tx + (door.orientation === 'V' ? crossSign : 0))
+    );
+    const farTy = Math.max(
+      0,
+      Math.min(this.map.height - 1, door.ty + (door.orientation === 'H' ? crossSign : 0))
+    );
+    const farDeck = this.map.deckGrid[farTy]?.[farTx];
+    if (farDeck && this.poweredDecks[farDeck]) return true;
+    const farRoomId = this.map.roomIdGrid[farTy]?.[farTx];
+    if (!farRoomId) return false;
+    return this.map.lightSwitches.some((sw) => sw.roomId === farRoomId && sw.isOn);
   }
 
   // --- Player Actions ---
@@ -3063,7 +3277,19 @@ export class MonstrumGameEngine {
         this.showToast('CO2 discharged.');
       }
     } else if (itemId === 'BOLT_CUTTERS') {
-      this.tryInteract(true);
+      if (
+        this.escape.heliChainsRemaining > 0 &&
+        this.escape.heliState === 'IDLE' &&
+        Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y) < 78
+      ) {
+        this.showToast(
+          `Hold E at the Helicopter to cut heavy chains (${this.escape.heliChainsRemaining} remaining, 2s each).`
+        );
+      } else {
+        this.tryInteract(true);
+      }
+    } else if (itemId === 'MASTER_FUSE') {
+      this.showToast('Take the Master Fuse to any deck’s Fuse Control panel and press E.');
     }
 
     if (p.selectedSlot >= p.inventory.length) {
@@ -3177,12 +3403,54 @@ export class MonstrumGameEngine {
           0.65
         );
       }
+    } else if (nearest.kind === 'FUSE_SOCKET' && !cuttersOnly) {
+      const socket = nearest.fuseSocket;
+      if (socket.hasFuse) {
+        this.showToast(`${getDeckLabel(socket.deck)} Master Fuse active — lights locked ON.`);
+      } else {
+        const fuseIdx = p.inventory.indexOf('MASTER_FUSE');
+        if (fuseIdx !== -1) {
+          p.inventory.splice(fuseIdx, 1);
+          if (p.selectedSlot >= p.inventory.length) {
+            p.selectedSlot = Math.max(0, p.inventory.length - 1);
+          }
+          socket.hasFuse = true;
+          this.poweredDecks[socket.deck] = true;
+          for (const sw of this.map.lightSwitches) {
+            const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+            if (swDeck === socket.deck) {
+              sw.isOn = true;
+            }
+          }
+          this.audio.playMasterFuseInsert();
+          this.emitNoise(
+            socket.x,
+            socket.y,
+            650,
+            'rgba(251, 191, 36, 0.68)',
+            true,
+            0.72
+          );
+          this.showToast(
+            `Master Fuse engaged — all ${getDeckLabel(socket.deck)} rooms & corridors permanently lit!`
+          );
+        } else {
+          this.showToast('Master Fuse socket empty — find the Master Fuse aboard the vessel.');
+        }
+      }
     } else if (nearest.kind === 'LIGHT_SWITCH' && !cuttersOnly) {
       const sw = nearest.lightSwitch;
-      sw.isOn = !sw.isOn;
-      this.audio.playBreakerSwitch(sw.isOn);
-      this.emitNoise(sw.x, sw.y, 180, 'rgba(253, 224, 71, 0.38)', true, 0.28);
-      this.showToast(`${sw.room} overhead lights ${sw.isOn ? 'ON' : 'OFF'}.`);
+      const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      if (this.poweredDecks[swDeck]) {
+        sw.isOn = true;
+        this.audio.playBreakerSwitch(true);
+        this.showToast('Circuit locked ON by Deck Master Fuse.');
+      } else {
+        sw.isOn = !sw.isOn;
+        this.audio.playBreakerSwitch(sw.isOn);
+        this.emitNoise(sw.x, sw.y, 180, 'rgba(253, 224, 71, 0.38)', true, 0.28);
+        this.showToast(`${sw.room} overhead lights ${sw.isOn ? 'ON' : 'OFF'}.`);
+      }
     } else if (nearest.kind === 'DOOR') {
       const d = nearest.door;
       if (d.isBroken) return;
@@ -3274,7 +3542,15 @@ export class MonstrumGameEngine {
       const spot = nearest.spot;
       // Check if Brute currently sees player or is actively chasing nearby with clear LoS
       const bruteSawHide =
-        canBruteSeePlayer(this.brute, p, this.map, this.doorsByTile, this.difficulty, this.bruteTuning) ||
+        canBruteSeePlayer(
+          this.brute,
+          p,
+          this.map,
+          this.doorsByTile,
+          this.difficulty,
+          this.bruteTuning,
+          this.poweredDecks
+        ) ||
         ((this.brute.state === 'CHASE' || this.brute.state === 'SMASH_DOOR') &&
           Math.hypot(this.brute.x - p.x, this.brute.y - p.y) <= 320 &&
           hasLineOfSight(this.map, this.doorsByTile, this.brute.x, this.brute.y, p.x, p.y));
@@ -3309,6 +3585,7 @@ export class MonstrumGameEngine {
   public findNearestInteractable():
     | { kind: 'DOOR'; door: Door; dist: number; prompt: string; sub: string }
     | { kind: 'STAIRWELL'; stairwell: Stairwell; dist: number; prompt: string; sub: string }
+    | { kind: 'FUSE_SOCKET'; fuseSocket: FuseSocket; dist: number; prompt: string; sub: string }
     | { kind: 'LIGHT_SWITCH'; lightSwitch: RoomLightSwitch; dist: number; prompt: string; sub: string }
     | { kind: 'CONTAINER'; container: Container; dist: number; prompt: string; sub: string }
     | { kind: 'PICKUP'; pickup: WorldPickup; dist: number; prompt: string; sub: string }
@@ -3358,8 +3635,21 @@ export class MonstrumGameEngine {
     const dHeli = Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y);
     if (dHeli < 78 && dHeli < bestDist) {
       const heldHeli = this.getHeldPartForRoute('HELI');
-      let prompt = `Stern Helideck (${this.escape.heliParts.length}/3)`;
-      let sub = 'Press J to view required Helicopter parts in your Field Journal.';
+      const chains = this.escape.heliChainsRemaining;
+      const hasCutters = p.inventory.includes('BOLT_CUTTERS');
+      const selectedItem = p.inventory[p.selectedSlot];
+      const selectedIsHeliPart = selectedItem
+        ? ITEM_CATALOG[selectedItem].category === 'HELI_PART' &&
+          !this.escape.heliParts.includes(selectedItem)
+        : false;
+      const preferCut =
+        chains > 0 && hasCutters && (selectedItem === 'BOLT_CUTTERS' || !selectedIsHeliPart || !heldHeli);
+
+      let prompt = `Stern Helideck (${this.escape.heliParts.length}/3 Parts · ${chains}/6 Chains)`;
+      let sub =
+        chains > 0
+          ? 'Cut 6 heavy deck chains with Bolt Cutters (~2s each) & install 3 parts.'
+          : 'Press J to view required Helicopter parts in your Field Journal.';
       if (this.escape.heliState === 'READY') {
         prompt = 'Press E to Board Helicopter & Escape!';
         sub = 'Rotors at full flight RPM — press E now to lift off!';
@@ -3367,12 +3657,21 @@ export class MonstrumGameEngine {
         const pct = Math.round(this.escape.heliActivationProgress * 100);
         prompt = `Helicopter Turbine Spinning Up (${pct}%)`;
         sub = 'Deafening engine spool — survive until 100%, then Press E!';
-      } else if (this.escape.heliParts.length === 3) {
-        prompt = 'Hold E to Start Helicopter Turbine';
-        sub = 'All 3 parts installed — loud spin-up alerts the Brute!';
+      } else if (preferCut) {
+        prompt = `Hold E to Cut Helicopter Chain (${6 - chains + 1}/6)`;
+        sub = `Takes 2s per chain · Loud snap attracts Brute · ${chains} remaining.`;
       } else if (heldHeli) {
         prompt = `Hold E to Install ${ITEM_CATALOG[heldHeli].name} (${this.escape.heliParts.length}/3)`;
-        sub = 'Slow mechanical repair (~5s) — noise attracts the Brute.';
+        sub =
+          chains > 0
+            ? `Slow mechanical repair (~5s) · ${chains} deck chains still need Bolt Cutters.`
+            : 'Slow mechanical repair (~5s) — noise attracts the Brute.';
+      } else if (this.escape.heliParts.length === 3 && chains === 0) {
+        prompt = 'Hold E to Start Helicopter Turbine';
+        sub = 'All 3 parts installed & chains cleared — loud spin-up alerts the Brute!';
+      } else if (this.escape.heliParts.length === 3 && chains > 0) {
+        prompt = `Chopper Chained (${chains}/6 Chains Remaining)`;
+        sub = 'All 3 parts fitted — find Bolt Cutters to sever chains before turbine spin-up.';
       }
       best = {
         kind: 'ESCAPE_HELI',
@@ -3500,6 +3799,34 @@ export class MonstrumGameEngine {
       }
     }
 
+    for (const fs of this.map.fuseSockets) {
+      if (fs.deck !== pDeck) continue;
+      const dist = Math.hypot(fs.x - p.x, fs.y - p.y);
+      if (
+        dist < 52 &&
+        dist < bestDist &&
+        hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, fs.x, fs.y)
+      ) {
+        bestDist = dist;
+        const hasFuseItem = p.inventory.includes('MASTER_FUSE');
+        best = {
+          kind: 'FUSE_SOCKET',
+          fuseSocket: fs,
+          dist,
+          prompt: fs.hasFuse
+            ? `Master Fuse Active (${getDeckLabel(fs.deck)})`
+            : hasFuseItem
+              ? `Press E to Insert Master Fuse (Power ${getDeckLabel(fs.deck)})`
+              : `Master Fuse Socket Empty (${getDeckLabel(fs.deck)})`,
+          sub: fs.hasFuse
+            ? 'All compartments and hallways on this deck are permanently lit.'
+            : hasFuseItem
+              ? 'Permanently illuminates every room and corridor on this deck (consumes fuse).'
+              : 'Locate the single Master Fuse on board to power this deck.',
+        };
+      }
+    }
+
     for (const sw of this.map.lightSwitches) {
       const dist = Math.hypot(sw.x - p.x, sw.y - p.y);
       if (
@@ -3508,16 +3835,22 @@ export class MonstrumGameEngine {
         hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, sw.x, sw.y)
       ) {
         bestDist = dist;
+        const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+        const deckLocked = this.poweredDecks[swDeck];
         best = {
           kind: 'LIGHT_SWITCH',
           lightSwitch: sw,
           dist,
-          prompt: sw.isOn
-            ? `Press E to Turn OFF ${sw.room} Lights`
-            : `Press E to Turn ON ${sw.room} Lights`,
-          sub: sw.isOn
-            ? 'Lit compartments extend Brute sight & trigger Stalker Mode'
-            : 'Illuminates room without draining flashlight battery',
+          prompt: deckLocked
+            ? 'Breaker Locked ON (Master Fuse)'
+            : sw.isOn
+              ? `Press E to Turn OFF ${sw.room} Lights`
+              : `Press E to Turn ON ${sw.room} Lights`,
+          sub: deckLocked
+            ? `Master Fuse powers all rooms and hallways across ${getDeckLabel(swDeck)}.`
+            : sw.isOn
+              ? 'Lit compartments extend Brute sight & trigger Stalker Mode'
+              : 'Illuminates room without draining flashlight battery',
         };
       }
     }
@@ -3675,8 +4008,15 @@ export class MonstrumGameEngine {
         promptSubtext = 'Release Q to step back · Press E to climb companionway.';
       }
     } else if (this.player.peekingDoorId !== null) {
-      promptText = 'Peeking Through Door (Light ON) — Release Q to Step Back';
-      promptSubtext = 'Draining flashlight battery while shining beam past the door.';
+      const peekDoor = this.map.doors.find((d) => d.id === this.player.peekingDoorId);
+      const farLit = peekDoor ? this.isDoorFarSideLit(peekDoor, this.player.x, this.player.y) : false;
+      if (farLit) {
+        promptText = 'Peeking Through Door (Lit Ahead) — Release Q to Step Back';
+        promptSubtext = 'Far side is illuminated — zero battery drain and will not alert the Brute.';
+      } else {
+        promptText = 'Peeking Through Door (Light ON) — Release Q to Step Back';
+        promptSubtext = 'Draining flashlight battery while shining beam past the door.';
+      }
     } else if (this.player.hidingSpotId !== null) {
       const roomLit = this.isHidingSpotRoomLit(this.player.hidingSpotId);
       if (this.player.peekingSpotId) {
@@ -3735,12 +4075,14 @@ export class MonstrumGameEngine {
       lifeboatParts: [...this.escape.lifeboatParts],
       heliParts: [...this.escape.heliParts],
       submarineParts: [...this.escape.submarineParts],
+      heliChainsRemaining: this.escape.heliChainsRemaining,
       lifeboatState: this.escape.lifeboatState,
       heliState: this.escape.heliState,
       submarineState: this.escape.submarineState,
       lifeboatActivationProgress: this.escape.lifeboatActivationProgress,
       heliActivationProgress: this.escape.heliActivationProgress,
       submarineActivationProgress: this.escape.submarineActivationProgress,
+      poweredDecks: { ...this.poweredDecks },
       promptText,
       promptSubtext,
       bruteState: this.brute.state,

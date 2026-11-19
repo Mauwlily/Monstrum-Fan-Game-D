@@ -1050,18 +1050,30 @@ export class HorrorAudioEngine {
     }
   }
 
-  public playBreakerSwitch(on: boolean): void {
+  public playBreakerSwitch(
+    on: boolean,
+    effectiveDist = 0,
+    occlusion = 0,
+    dx = 0
+  ): void {
     if (!this.ctx || !this.masterGain || this.muted) return;
+    if (effectiveDist > 750) return;
     const now = this.ctx.currentTime;
+    const atten = effectiveDist > 0 ? clamp(1 - effectiveDist / 750, 0.08, 1) : 1;
+    const occ = this.computeOcclusionParams(occlusion, false);
     const osc = this.ctx.createOscillator();
     const gain = this.ctx.createGain();
     osc.type = 'square';
     osc.frequency.setValueAtTime(on ? 340 : 220, now);
     osc.frequency.exponentialRampToValueAtTime(on ? 680 : 105, now + 0.06);
-    gain.gain.setValueAtTime(0.11, now);
+    gain.gain.setValueAtTime(safeGain(0.11 * atten * occ.gainMult), now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
     osc.connect(gain);
-    gain.connect(this.masterGain);
+    if (effectiveDist > 0) {
+      this.routeSpatialNode(gain, dx, occlusion, false);
+    } else {
+      gain.connect(this.masterGain);
+    }
     osc.start(now);
     osc.stop(now + 0.085);
   }
@@ -1201,6 +1213,77 @@ export class HorrorAudioEngine {
     }
     osc.start(now);
     osc.stop(now + 0.1);
+  }
+
+  public playMasterFuseInsert(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Heavy breaker handle throw clunk
+    const thump = this.ctx.createOscillator();
+    const thumpGain = this.ctx.createGain();
+    thump.type = 'triangle';
+    thump.frequency.setValueAtTime(145, now);
+    thump.frequency.exponentialRampToValueAtTime(48, now + 0.14);
+    thumpGain.gain.setValueAtTime(0.28, now);
+    thumpGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+    thump.connect(thumpGain);
+    thumpGain.connect(this.masterGain);
+    thump.start(now);
+    thump.stop(now + 0.18);
+
+    // Rising deck power transformer bus surge
+    const hum = this.ctx.createOscillator();
+    const humGain = this.ctx.createGain();
+    hum.type = 'sawtooth';
+    hum.frequency.setValueAtTime(58, now + 0.05);
+    hum.frequency.exponentialRampToValueAtTime(120, now + 0.48);
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 640;
+    humGain.gain.setValueAtTime(0.0001, now + 0.05);
+    humGain.gain.linearRampToValueAtTime(0.18, now + 0.14);
+    humGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.65);
+    hum.connect(filter);
+    filter.connect(humGain);
+    humGain.connect(this.masterGain);
+    if (this.reverbSendGain) {
+      const send = this.ctx.createGain();
+      send.gain.value = 0.35;
+      humGain.connect(send);
+      send.connect(this.reverbSendGain);
+    }
+    hum.start(now + 0.05);
+    hum.stop(now + 0.68);
+  }
+
+  public playHeliChainSnap(): void {
+    this.playBoltCuttersSnap();
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // Resonant steel chain-link drop clatter across helideck
+    [0.06, 0.14, 0.21].forEach((offset, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'square';
+      const baseFreq = 690 - idx * 115;
+      osc.frequency.setValueAtTime(baseFreq, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * 0.42, now + offset + 0.09);
+      gain.gain.setValueAtTime(0.14 - idx * 0.025, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.11);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      if (this.reverbSendGain) {
+        const send = this.ctx.createGain();
+        send.gain.value = 0.28;
+        gain.connect(send);
+        send.connect(this.reverbSendGain);
+      }
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.12);
+    });
   }
 
   public playFlareIgnite(dx = 0): void {

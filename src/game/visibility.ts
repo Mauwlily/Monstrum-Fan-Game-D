@@ -5,6 +5,7 @@ import {
   DifficultyConfig,
   Door,
   PlayerState,
+  ShipDeck,
   ShipMap,
 } from './types';
 
@@ -444,7 +445,8 @@ export function canBruteSeePlayer(
   map: ShipMap,
   doorsByTile: Map<number, Door>,
   difficulty: DifficultyConfig,
-  tuning?: BruteTuningNumbers
+  tuning?: BruteTuningNumbers,
+  poweredDecks?: Record<ShipDeck, boolean>
 ): boolean {
   if (brute.state === 'STUNNED') return false;
   if (player.hidingSpotId !== null) return false;
@@ -456,7 +458,10 @@ export function canBruteSeePlayer(
   const pTx = Math.max(0, Math.min(map.width - 1, Math.floor(player.x / map.tileSize)));
   const pTy = Math.max(0, Math.min(map.height - 1, Math.floor(player.y / map.tileSize)));
   const playerRoomId = map.roomIdGrid[pTy]?.[pTx] ?? 0;
-  const playerInLitRoom = map.lightSwitches.some((sw) => sw.roomId === playerRoomId && sw.isOn);
+  const playerDeck = map.deckGrid[pTy]?.[pTx];
+  const playerInLitRoom =
+    Boolean(poweredDecks && playerDeck && poweredDecks[playerDeck]) ||
+    map.lightSwitches.some((sw) => sw.roomId === playerRoomId && sw.isOn);
 
   const senses = getSensesProfile(difficulty, tuning);
   const baseRange =

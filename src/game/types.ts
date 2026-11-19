@@ -1,4 +1,4 @@
-export const GAME_VERSION = '0.2.2';
+export const GAME_VERSION = '0.2.3';
 
 export const REFERENCE_VIEWPORT_WIDTH = 1440;
 export const REFERENCE_VIEWPORT_HEIGHT = 900;
@@ -231,6 +231,7 @@ export type RoomName =
   | 'Workshop'
   | 'Electrical Room'
   | 'Maintenance Bay'
+  | 'Fuse Control'
   // Circulation
   | 'Corridor'
   | 'Catwalk';
@@ -258,6 +259,7 @@ export const ROOM_CATEGORIES: Record<RoomName, RoomCategory> = {
   Workshop: 'GENERIC',
   'Electrical Room': 'GENERIC',
   'Maintenance Bay': 'GENERIC',
+  'Fuse Control': 'GENERIC',
   Corridor: 'CIRCULATION',
   Catwalk: 'CIRCULATION',
 };
@@ -277,6 +279,7 @@ export type ItemId =
   | 'FLARE'
   | 'FIRE_EXTINGUISHER'
   | 'BOLT_CUTTERS'
+  | 'MASTER_FUSE'
   | 'BACKPACK';
 
 export interface ItemMeta {
@@ -398,8 +401,16 @@ export const ITEM_CATALOG: Record<ItemId, ItemMeta> = {
     name: 'Bolt Cutters',
     shortName: 'Cutters',
     category: 'TOOL',
-    description: 'Cuts padlocked bulkhead doors.',
+    description: 'Cuts padlocked doors and Helicopter deck chains.',
     color: '#cbd5e1',
+  },
+  MASTER_FUSE: {
+    id: 'MASTER_FUSE',
+    name: 'Master Fuse',
+    shortName: 'M-Fuse',
+    category: 'TOOL',
+    description: 'Slot into a deck Fuse Control panel to permanently power all lights & hallways on that deck.',
+    color: '#f59e0b',
   },
   BACKPACK: {
     id: 'BACKPACK',
@@ -434,6 +445,28 @@ export interface RoomLightSwitch {
   x: number;
   y: number;
   isOn: boolean;
+}
+
+export interface FuseSocket {
+  id: string;
+  deck: ShipDeck;
+  roomId: number;
+  room: RoomName;
+  tx: number;
+  ty: number;
+  x: number;
+  y: number;
+  hasFuse: boolean;
+}
+
+export interface CorridorLightFixture {
+  id: string;
+  deck: ShipDeck;
+  tx: number;
+  ty: number;
+  x: number;
+  y: number;
+  range: number;
 }
 
 export interface Stairwell {
@@ -609,6 +642,9 @@ export interface ShipMap {
   steamPipes: SteamPipe[];
   paperMaps: PaperMapStand[];
   lightSwitches: RoomLightSwitch[];
+  fuseSockets: FuseSocket[];
+  corridorLights: CorridorLightFixture[];
+  lockedOnlyRoomIds: number[];
   bloodStreaks: BloodStreak[];
   playerSpawn: { x: number; y: number };
   bruteSpawn: { x: number; y: number };
@@ -705,6 +741,9 @@ export interface BruteState {
   stairClimbTimer: number;
   stairDestId: string | null;
   pursuitStairId: string | null;
+  fiddleSwitchId: string | null;
+  fiddleSwitchTimer: number;
+  fiddleClickTimer: number;
   walkPhase: number;
 }
 
@@ -754,6 +793,8 @@ export interface EscapeProgress {
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
   submarineParts: ItemId[];
+  heliChainsRemaining: number;
+  heliChainCutProgress: number;
   lifeboatPartProgress: number;
   heliPartProgress: number;
   submarinePartProgress: number;
@@ -804,6 +845,8 @@ export interface HudSnapshot {
   lifeboatParts: ItemId[];
   heliParts: ItemId[];
   submarineParts: ItemId[];
+  heliChainsRemaining: number;
+  poweredDecks: Record<ShipDeck, boolean>;
   lifeboatState: EscapeActivationState;
   heliState: EscapeActivationState;
   submarineState: EscapeActivationState;

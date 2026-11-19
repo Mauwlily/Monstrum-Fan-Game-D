@@ -520,7 +520,10 @@ export function applyDebugScenarioToEngine(
     lifeboatActivationProgress: 0,
     heliActivationProgress: 0,
     submarineActivationProgress: 0,
+    heliChainsRemaining: 6,
+    heliChainCutProgress: 0,
   };
+  engine.poweredDecks = { DECK_3: false, DECK_2: false, DECK_1: false };
   engine.zoom = 1.25;
   engine.targetZoom = 1.25;
   engine.debugConfig.enabled = true;
@@ -542,9 +545,18 @@ export function applyDebugScenarioToEngine(
   b.smashDoorId = null;
   b.inspectTimer = 0;
   b.walkPhase = 0;
+  b.fiddleSwitchId = null;
+  b.fiddleSwitchTimer = 0;
+  b.fiddleClickTimer = 0;
+  engine.brain.knownFuseDecks.clear();
+  engine.brain.lowForgetTimers = {};
+  engine.brain.fuseDeckScanCooldowns = {};
 
   for (const sw of engine.map.lightSwitches) {
     sw.isOn = false;
+  }
+  for (const fs of engine.map.fuseSockets) {
+    fs.hasFuse = false;
   }
 
   let probePoints: Array<{ x: number; y: number; label: string }> = [];
@@ -853,6 +865,8 @@ export function applyDebugScenarioToEngine(
     p.maxInventorySlots = 6;
     p.inventory = ['IGNITION_KEY', 'FLARE', 'GLOWSTICK', 'BOLT_CUTTERS'];
     engine.escape.heliParts = ['AVIATION_FUEL', 'ROTOR_FUSE'];
+    engine.escape.heliChainsRemaining = 4;
+    engine.escape.heliChainCutProgress = 0;
     engine.escape.heliState = 'IDLE';
     engine.escape.heliActivationProgress = 0;
     engine.escape.lifeboatParts = ['HULL_PATCH'];

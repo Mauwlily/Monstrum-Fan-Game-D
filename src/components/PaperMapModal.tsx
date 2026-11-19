@@ -217,7 +217,7 @@ export const PaperMapModal: React.FC<PaperMapModalProps> = ({
       ctx.fillText(room.name, cx, cy);
     }
 
-    // 7. Stationary Paper Map Stand icons on this deck
+    // 7. Stationary Paper Map Stand & Fuse Control Panel icons on this deck
     for (const pm of map.paperMaps) {
       if (pm.deck !== effectiveDeck) continue;
       const mx = toCanvasX(pm.x / ts);
@@ -227,6 +227,20 @@ export const PaperMapModal: React.FC<PaperMapModalProps> = ({
       ctx.lineWidth = 1.2;
       ctx.fillRect(mx - 4, my - 3, 8, 6);
       ctx.strokeRect(mx - 4, my - 3, 8, 6);
+    }
+
+    for (const fs of map.fuseSockets) {
+      if (fs.deck !== effectiveDeck) continue;
+      const fx = toCanvasX(fs.x / ts);
+      const fy = toCanvasY(fs.y / ts);
+      ctx.fillStyle = fs.hasFuse ? '#10b981' : '#78350f';
+      ctx.strokeStyle = fs.hasFuse ? '#6ee7b7' : '#fbbf24';
+      ctx.lineWidth = 1.4;
+      ctx.fillRect(fx - 5, fy - 5, 10, 10);
+      ctx.strokeRect(fx - 5, fy - 5, 10, 10);
+      ctx.fillStyle = fs.hasFuse ? '#ecfdf5' : '#fef3c7';
+      ctx.font = 'bold 8px ui-monospace, SFMono-Regular, monospace';
+      ctx.fillText('F', fx, fy + 0.5);
     }
 
     // 8. "YOU ARE HERE" fixed pin (only when inspecting the deck where this paper map stand sits)
@@ -393,6 +407,12 @@ export const PaperMapModal: React.FC<PaperMapModalProps> = ({
             <span className="flex items-center gap-1.5">
               <span className="inline-block h-2.5 w-2.5 border border-orange-400 bg-slate-900" />
               <span>Stairs Down (▼)</span>
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-flex h-3 w-3 items-center justify-center border border-amber-400 bg-amber-950 text-[8px] font-bold text-amber-200">
+                F
+              </span>
+              <span>Fuse Control Panel</span>
             </span>
             {effectiveDeck === 'DECK_1' && (
               <>

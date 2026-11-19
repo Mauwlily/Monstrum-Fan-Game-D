@@ -1003,26 +1003,37 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4 space-y-2.5">
                   <div className="flex items-center gap-2 text-sm font-semibold text-emerald-300">
                     <BookOpen className="h-4 w-4" />
-                    <span>Peeking &amp; Light Stealth (v{GAME_VERSION})</span>
+                    <span>Peeking, Master Fuse &amp; Bolt Cutters (v{GAME_VERSION})</span>
                   </div>
                   <ul className="space-y-2 text-slate-300 list-disc pl-4">
                     <li>
-                      <span className="font-semibold text-slate-100">Lit-Room Hiding Peek:</span>{' '}
-                      When hiding inside a locker or bunk in a compartment with its overhead light
-                      ON, holding <span className="font-mono-num text-amber-300">Q</span> peeks
-                      silently using room light—zero flashlight battery drain and no glint to alert
-                      the Brute.
+                      <span className="font-semibold text-slate-100">Lit-Side Stealth Peeking:</span>{' '}
+                      When peeking out of a locker in a lit room OR peeking through a closed door
+                      into an illuminated room or powered hallway, holding{' '}
+                      <span className="font-mono-num text-amber-300">Q</span> uses ambient light—zero
+                      battery drain, works even at 0% battery, and never alerts the Brute.
                     </li>
                     <li>
-                      <span className="font-semibold text-slate-100">Dark-Room Hiding Peek:</span>{' '}
-                      In dark rooms, peeking vents switches on your flashlight, drains battery, and
-                      exposes you if the Brute is looking toward your locker.
+                      <span className="font-semibold text-slate-100">Dark-Side Peeking:</span>{' '}
+                      Peeking into darkness shines your flashlight beam (requires &gt;0% battery,
+                      drains power, and exposes you to sharper Brutes).
                     </li>
                     <li>
-                      <span className="font-semibold text-slate-100">Door Keyhole Peek:</span>{' '}
-                      Holding <span className="font-mono-num text-amber-300">Q</span> at a closed
-                      door shines your flashlight beam through to scout ahead—draining battery and
-                      risking attention from sharper Brutes.
+                      <span className="font-semibold text-slate-100">Master Fuse &amp; Deck Power:</span>{' '}
+                      One <span className="text-amber-200 font-medium">Master Fuse</span> spawns
+                      aboard the vessel. Insert it into any deck&apos;s{' '}
+                      <span className="text-slate-100">Fuse Control</span> room panel to permanently
+                      lock ON all compartment and corridor lights across that entire deck.
+                    </li>
+                    <li>
+                      <span className="font-semibold text-slate-100">
+                        Reusable Bolt Cutters &amp; Chained Chopper:
+                      </span>{' '}
+                      Bolt Cutters never break on use. Cut open{' '}
+                      <span className="text-amber-200 font-medium">padlocked vault rooms</span>{' '}
+                      packed with high-value salvage, and sever the{' '}
+                      <span className="text-amber-200 font-medium">6 heavy steel chains</span>{' '}
+                      (2s each, loud snap) binding the Stern Helicopter before turbine spin-up.
                     </li>
                   </ul>
                 </div>
@@ -1040,8 +1051,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                     </p>
                     <p className="mt-0.5 text-slate-400">
                       No rubber-banding director. The Brute freely sweeps all three decks via
-                      companionway stairs, shuts unlocked doors behind himself, and biases patrols
-                      toward escape craft only after hearing repairs or visually spotting your work.
+                      companionway stairs, only smashes padlocked vault doors when actively chasing
+                      you, and biases patrols toward escape craft only after hearing repairs, chain
+                      snaps, or visually spotting your work.
                     </p>
                   </div>
                 </div>
@@ -1050,20 +1062,28 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                   <Eye className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
                   <div>
                     <p className="font-semibold text-slate-100">
-                      Door-Peek Beam Reactions by Intelligence
+                      Master Fuse &amp; Dark Door-Peek AI by Intelligence
                     </p>
                     <div className="mt-1.5 space-y-1 text-slate-400">
                       <p>
                         <span className="font-semibold text-slate-200">Low Intelligence:</span>{' '}
-                        Ignores flashlight beams peeking through closed doors.
+                        Ignores dark door-peek beams. On a Master-Fuse powered deck, fiddles with a
+                        wall switch for 10s before giving up—and periodically forgets and tries again.
                       </p>
                       <p>
                         <span className="font-semibold text-amber-300">Medium Intelligence:</span>{' '}
-                        Treats the door-peek beam as an environmental clue and stalks your doorway.
+                        Stalks dark door-peek beams as clues. Fiddles with a powered-deck switch for
+                        3s before permanently learning that deck&apos;s switches are overridden.
                       </p>
                       <p>
-                        <span className="font-semibold text-red-400">High / Extreme:</span> Immediately
-                        roars, charges straight through the door, smashes it open, and pursues you.
+                        <span className="font-semibold text-orange-400">High Intelligence:</span>{' '}
+                        Charges and smashes dark door peeks. Clicks a powered-deck switch once to
+                        deduce the override and ignores all switches on that deck thereafter.
+                      </p>
+                      <p>
+                        <span className="font-semibold text-red-400">Extreme Intelligence:</span>{' '}
+                        Charges dark door peeks, AND instantly recognizes hallway illumination means
+                        a Master Fuse is inserted—never wasting a step on lightswitches.
                       </p>
                     </div>
                   </div>
@@ -1076,9 +1096,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                       Clue Memory &amp; Locker Sweeps
                     </p>
                     <p className="mt-0.5 text-slate-400">
-                      Propped doors, cut padlocks, looted containers, and lights left ON trigger
-                      Stalker Mode across adjacent rooms and methodical locker checks. Use{' '}
-                      <span className="text-slate-200">Flares</span> as audio/light lures or{' '}
+                      Propped doors, cut padlocks, looted containers, and dark-room lights left ON
+                      trigger Stalker Mode across adjacent rooms and methodical locker checks. Use{' '}
+                      <span className="text-slate-200">Flares</span> as lures or{' '}
                       <span className="text-slate-200">CO2 Extinguishers</span> to blind him.
                     </p>
                   </div>
@@ -1105,12 +1125,12 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4 space-y-1.5 text-slate-400">
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
                     <ShieldAlert className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>v{GAME_VERSION} Highlights</span>
+                    <span>v{GAME_VERSION} Highlights (Final 0.2.x Build)</span>
                   </div>
-                  <p>• Monstrum-inspired security desk console with live green-phosphor CCTV feeds.</p>
-                  <p>• Lit-room silent locker vent peeking with zero battery drain or Brute alerts.</p>
-                  <p>• Battery-consuming door keyhole peeking with Low/Med/High Brute AI tiers.</p>
-                  <p>• Expanded stair-peek radius, 1.0x–2.5x zoom range, and louder escape machinery.</p>
+                  <p>• Master Fuse spawning &amp; per-deck Fuse Control panels lighting rooms &amp; hallways.</p>
+                  <p>• Tiered Low / Medium / High / Extreme Brute lightswitch-confusion &amp; deduction AI.</p>
+                  <p>• Reusable Bolt Cutters, 6-chain bound Helicopter &amp; padlocked-only vault rooms.</p>
+                  <p>• Lit-side silent door peeking + Monstrum-inspired security desk main menu.</p>
                 </div>
               </div>
             )}

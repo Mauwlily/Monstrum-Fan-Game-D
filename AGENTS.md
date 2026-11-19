@@ -1,7 +1,7 @@
-# AGENTS.md — Developer & Agent Handoff Guide
+# AGENTS.md — Developer & Agent Handoff Guide (0.2.x → 0.3.x)
 
-Welcome to **Monstrum Fan Game :D** (currently `GAME_VERSION = '0.2.0'` in `src/game/types.ts`).  
-This guide explains the **debug tools**, **how to run and test the game**, **architecture & invariants**, and **known pitfalls** so you can pick up development smoothly.
+Welcome to **Monstrum Fan Game :D** (currently `GAME_VERSION = '0.2.3'`, the final **0.2.x** 2D top-down milestone in `src/game/types.ts`).  
+This guide summarizes the **completed 0.2.x architecture**, **debug tools**, **invariants**, **gameplay systems**, and **known script caveats** so the `0.3.x` agent can pick up seamlessly.
 
 ---
 
@@ -12,8 +12,8 @@ This guide explains the **debug tools**, **how to run and test the game**, **arc
   - `npm run dev` — Vite dev server on port `3000` (`--host=0.0.0.0`).
   - `npm run build` — Production Vite bundle (`dist/`).
   - `npm run lint` — TypeScript typecheck (`tsc --noEmit`).
-  - `npm run debug:screenshots` — Headless Playwright Chromium suite (`scripts/captureVisionDebug.ts`). *See Section 2.5 for `0.2.0` staleness caveats before trusting its assertions.*
-  - `npx tsx scripts/inspectShips.ts` — 100-seed procedural ship audit + PNG blueprint renderer (`src/game/shipAnalyzer.ts`). *Also pre-`0.2.0`; see Section 2.5.*
+  - `npm run debug:screenshots` — Legacy `0.1.2` Playwright suite (`scripts/captureVisionDebug.ts`). *Stale for `0.2.x`; see Section 2.5 before running.*
+  - `npx tsx scripts/inspectShips.ts` — Legacy `0.1.x` 100-seed ship audit (`src/game/shipAnalyzer.ts`). *Also pre-`0.2.0`; see Section 2.5.*
 
 ---
 
@@ -25,130 +25,99 @@ Append `?debug=1` to the app URL (e.g. `http://127.0.0.1:3000/?debug=1`). In `sr
 - Auto-starts a deterministic run with **seed `100000`** on `STANDARD` difficulty.
 - Opens the right-hand **`DebugPanel`** (`debugOpen = true`) and activates `engine.debugConfig.enabled = true`.
 
-### 2.2 Secret Unlocks on the Title Menu (`src/components/TitleMenu.tsx`)
-When starting normally from `/`:
-- **Unlock Dev Mode**: Click the `:D` smiley face (`aria-label="happy face"`) **3 consecutive times** (clicking anything else resets the streak).
-  - Reveals the **Dev Mode: Internal Brute Numbers** panel (`BruteTuningNumbers`: `#dev-roamSpeed`, `#dev-chaseSpeed`, `#dev-halfFovDeg`, `#dev-sightMult`, `#dev-hearingMult`, `#dev-sweepCoverage`, etc.) with live edits (`customBruteTuning = true`) and a reset button.
+### 2.2 Title Menu & Secret Unlocks (`src/components/TitleMenu.tsx`)
+In `0.2.2+`, `TitleMenu` is a **Monstrum-inspired security booth** with a 2×2 quad-array of live green-phosphor Canvas CCTV monitors (`NEW GAME`, `OPTIONS`, `FIELD GUIDE`, `BRUTE INTEL`) and a vintage desk CRT (`CREDITS`).
+- Clicking **`NEW GAME`** opens the **Expedition Setup Dossier**, which houses presets, the 3×3 Brute matrix, ship seed (`#ship-seed`), and Start Game.
+- **Unlock Dev Mode**: Click the `:D` smiley face (`aria-label="happy face"`, present inside the Setup Dossier header or `aria-label="dev mode accent"` next to `MONSTRUM` wall sign) **3 consecutive times** (clicking anything else resets the streak).
+  - Reveals **Dev Mode: Internal Brute Numbers** (`BruteTuningNumbers`: `#dev-roamSpeed`, `#dev-chaseSpeed`, `#dev-halfFovDeg`, `#dev-sightMult`, `#dev-hearingMult`, `#dev-sweepCoverage`, etc.) with live edits (`customBruteTuning = true`) and a reset button.
   - Reveals the in-game HUD **Debug** toggle button (`aria-label="Toggle debug panel"`).
   - Enables **`F9`** and **`` ` ``** (`Backquote`) hotkeys during `'PLAYING'` to toggle `DebugPanel`.
   - Unlocks **all-deck switcher tabs** inside `PaperMapModal` (`devModeUnlocked ? viewDeck : standPos.deck`). Normally, Paper Maps only display the deck the stand sits on.
 - **Unlock Extreme Difficulty**:
-  - Click **`High`** **3 times** on any single axis (`data-testid="axis-intelligence-high"`, `axis-senses-high`, `axis-speed-high`) to flip that axis to `Extreme`.
+  - Inside the Setup Dossier, click **`High`** **3 times** on any single axis (`data-testid="axis-intelligence-high"`, `axis-senses-high`, `axis-speed-high`) to flip that axis to `Extreme`.
   - Or click **`Nightmare`** (`data-testid="preset-nightmare"`) **3 times** to flip all three axes to `EXTREME`.
   - Clicking an `Extreme` axis/preset once reverts it to `High` / `Nightmare`.
-  - Note: In `buildBruteTuningFromDifficulty` (`src/game/types.ts`), `EXTREME` Intelligence intentionally matches `HIGH` (`sweepCoverage: 1.0`, `overshootDist: 250`, `clueRoomDepth: 4`), whereas `EXTREME` Speed and Senses escalate sharply.
+  - Note: Numerical `BruteTuningNumbers` for `EXTREME` Intelligence match `HIGH` (`sweepCoverage: 1.0`, `overshootDist: 250`, `clueRoomDepth: 4`), while behavioral AI (`bruteAi.ts` / `engine.ts`) gives `EXTREME` instant Master-Fuse hallway-power deduction (`0` switch clicks).
 
 ### 2.3 Live Debug Drawer (`src/components/DebugPanel.tsx`)
 Toggle in-game with **`F9`**, **`` ` ``**, or the HUD Debug button (when Dev Mode is unlocked):
-1. **Dummy Player Scenarios (`DEBUG_SCENARIOS` in `src/game/debugScenarios.ts`)** — 12 instant test rigs that reposition the player, Brute, doors, room lights, items, and `debugProbePoints`:
-   - `WALL_OCCLUSION` — Flashlight aimed across a multi-tile bulkhead; Brute behind wall (OLED `#000000` test).
-   - `LIT_ROOM_DOOR_SPILL` — Room light ON, door OPEN; checks warm corridor spill cone.
-   - `LIT_ROOM_CLOSED_DOOR` — Room light ON behind closed door; checks interior stays `#000000`.
-   - `HIDING_FLASHLIGHT_PEEK` — Player inside hiding spot with flashlight OFF; toggles Q vent-peek.
-   - `BRUTE_HIDING_KILL` — Brute observes hide event, charges spot, executes rip-open kill.
-   - `DOOR_KEYHOLE_AND_FLARE` — Closed-door peek into room with raycasted flare shadows & Brute.
-   - `BRUTE_BEAM_CORNER` — Brute orange searchlight spilling around an open corner.
-   - `STAIR_BRUTE_GLOW` — Brute climbing companionway hatch; stairwell warning glow.
-   - `STAIR_PEEK` — Circular raycasted landing portal (`Q` / `forceStairPeek`) looking into target deck.
-   - `FLICKER_AND_SURVIVOR` — Player silhouette inside a flickering lit compartment.
-   - `ESCAPE_HELI_OVERHAUL` — Stern Helideck (`Deck 3`) with partial repairs + 6-slot Backpack.
-   - `ESCAPE_LIFEBOAT_CRANE` — Bow Lifeboat Davit (`Deck 2`) swung over rail + floor Backpack pickup.
-   - *(Note: Deck 1 Submarine and Deck 1 Steam Pipes currently do not have dedicated entries in `DEBUG_SCENARIOS`; test them via `window.__monstrumDebug` or headless engine runs.)*
-2. **Simulation Controls**:
-   - `Freeze AI` / `Resume AI` (`debugConfig.freezeAi`) — freezes Brute updates while allowing inspection.
-   - `Step 50ms` — temporarily unfreezes AI for one `0.05s` simulation tick, re-renders, and refreshes telemetry.
-   - Peek overrides: `forceVentPeek`, `forceDoorPeek`, `forceStairPeek`.
-3. **Vision Overlays**:
-   - `showPlayerLos` — draws player raycasted line-of-sight polygon.
-   - `showBruteFov` — draws Brute vision cone + peripheral sensing circle.
-   - `showWallSegments` — outlines raycast occluder segments.
-   - `showBlackProbes` — draws crosshair markers for `engine.debugProbePoints`.
-4. **Live Telemetry & Behind-Wall OLED Black Probe**:
-   - Shows player coords, flashlight/battery, hiding/peek state, Brute AI state/goal (`engine.brain.activeGoal`), watched hide spot, inspect spot/timer.
-   - **Sample Pixels** calls `probeBehindWallPixels()` (`ctx.getImageData` in `src/App.tsx`) at each `debugProbePoints` world coordinate and verifies `rgb(0,0,0)` (`#000000` vs `LEAK`).
-5. **Capture Screenshot PNG**:
-   - Captures `canvas.toDataURL('image/png')`, shows an inline preview, and triggers a browser download (`monstrum_debug_<scenario>_<timestamp>.png`).
+1. **Dummy Player Scenarios (`DEBUG_SCENARIOS` in `src/game/debugScenarios.ts`)** — 12 instant test rigs:
+   - `WALL_OCCLUSION`, `LIT_ROOM_DOOR_SPILL`, `LIT_ROOM_CLOSED_DOOR`, `HIDING_FLASHLIGHT_PEEK`, `BRUTE_HIDING_KILL`, `DOOR_KEYHOLE_AND_FLARE`, `BRUTE_BEAM_CORNER`, `STAIR_BRUTE_GLOW`, `STAIR_PEEK`, `FLICKER_AND_SURVIVOR`, `ESCAPE_HELI_OVERHAUL` (now spawns with 2/3 parts + `heliChainsRemaining: 4` + reusable `BOLT_CUTTERS`), and `ESCAPE_LIFEBOAT_CRANE`.
+   - *(Deck 1 Submarine, Deck 1 Steam Pipes, Master Fuse panels, and Locked-Only Vaults are tested via `window.__monstrumDebug` or headless engine runs.)*
+2. **Simulation Controls**: `Freeze AI` / `Resume AI`, `Step 50ms`, and `forceVentPeek` / `forceDoorPeek` / `forceStairPeek`.
+3. **Vision Overlays**: `showPlayerLos`, `showBruteFov`, `showWallSegments`, `showBlackProbes`.
+4. **Live Telemetry & Behind-Wall OLED Black Probe**: `Sample Pixels` calls `probeBehindWallPixels()` (`ctx.getImageData` in `src/App.tsx`) to verify exact `rgb(0,0,0)` occlusion behind walls/closed doors.
+5. **Capture Screenshot PNG**: Captures `canvas.toDataURL('image/png')`, previews inline, and downloads PNG.
 
 ### 2.4 Browser / Playwright Automation Bridge (`window.__monstrumDebug`)
-Exposed globally by `src/App.tsx` whenever mounted, allowing DevTools console scripts or Playwright tests to drive and inspect the engine deterministically:
+Exposed globally by `src/App.tsx` whenever mounted:
+- `loadScenario(id)`, `setOverlays(patch)`, `step(dtSec = 0.05)`, `tryInteract()`, `holdInteract(holding)`
+- `toggleFlashlight()`, `toggleJournal()`, `dropSelectedItem()`, `selectSlot(idx)`
+- `setPlayerPose(x, y)`, `setBrutePose(x, y, angle?)`, `testPositionInNearestDoor(offsetFromCenterPx = 6)`
+- `getEscapeInfo()` — returns `heliPos`, `lifeboatPos`, `submarinePos` (with floodgate `lever*`), `tileDist`, `inventory`, `maxInventorySlots`, `hasBackpack`, `journalOpen`, `openPaperMapDeck`, `worldPickupsCount`, `heliParts`, `lifeboatParts`, `submarineParts`, `heliState`, `lifeboatState`, `submarineState`, `heliChainsRemaining`, `poweredDecks`, and `fuseSockets`.
+- `getRuntimeDetails()` — returns `bruteTuning`, `customBruteTuning`, `difficulty`, `effectiveZoom`, `baseZoom` (1.0x–2.5x zoom range), `bloodStreakCount`, `steamPipesCount`, `paperMapsCount`, `playerX/Y`, `steamStaggerTimer`, `peekingStairId`, `bruteState`, `brutePos`, `brutePathLength`, `investigateTarget`, `observedEscape`, `activeNoiseRipples`, `maxAcousticRadius`, `lockedOnlyRoomIds`, `poweredDecks`, `bruteKnownFuseDecks`, `bruteFiddleSwitchId`, and `nearestDoor`.
+- `getTelemetry()`, `getStatus()`, `probePixels()`, `captureCanvasDataUrl()`.
 
-- `loadScenario(id: DebugScenarioId)` — calls `engine.applyDebugScenario(id)`, renders frame, syncs telemetry.
-- `setOverlays(patch: Partial<DebugOverlayConfig>)` — updates overlay/freeze/peek flags, steps `0.016s`, renders.
-- `step(dtSec = 0.05)` — advances `engine.update(dtSec, window.innerWidth, window.innerHeight)` and renders.
-- `tryInteract()` — triggers `engine.tryInteract()`, steps `0.016s`, renders.
-- `holdInteract(holding: boolean)` — sets `engine.holdingInteract` (loop with `step(0.05)` to complete held repairs, locker searches, cut padlocks, or launches).
-- `toggleFlashlight()`, `toggleJournal()`, `dropSelectedItem()`, `selectSlot(idx)` — direct player actions.
-- `setPlayerPose(x, y)` / `setBrutePose(x, y, angle?)` — teleport player/camera or Brute (clears Brute path).
-- `testPositionInNearestDoor(offsetFromCenterPx = 6)` — places player inside nearest unlocked door to verify smooth doorway push-through.
-- `getEscapeInfo()` — returns `heliPos`, `lifeboatPos`, `submarinePos` (including floodgate `leverTx`/`leverTy`/`leverX`/`leverY`), `tileDist`, inventory, `journalOpen`, `openPaperMapDeck`, installed parts & states (`heliState`, `lifeboatState`, `submarineState`).
-- `getRuntimeDetails()` — returns `bruteTuning`, `customBruteTuning`, `difficulty`, `effectiveZoom`, `baseZoom`, `bloodStreakCount`, `steamPipesCount`, `paperMapsCount`, player/Brute coords, `steamStaggerTimer`, `peekingStairId`, `bruteState`, `brutePathLength`, `investigateTarget`, `observedEscape`, `activeNoiseRipples`, `maxAcousticRadius`, `nearestDoor`.
-- `getTelemetry()` / `getStatus()` — current `DebugTelemetry` snapshot / `GameStatus`.
-- `probePixels()` — renders and returns `ProbeReading[]` for `debugProbePoints`.
-- `captureCanvasDataUrl()` — renders and returns canvas PNG data URL.
-
-### 2.5 CLI Audit & Screenshot Scripts (and What Is Stale in `0.2.0`)
-Two repo scripts exist, **both authored during `0.1.x` and needing updates if you want them green for `0.2.0+`**:
-
-1. **`scripts/captureVisionDebug.ts` (`npm run debug:screenshots`)**:
-   - Launches headless Playwright Chromium (`/ms-playwright/chrome-headless-shell-linux64/chrome-headless-shell`), attaches to `:3000` (or spawns Vite on `:3099`), runs menu + `window.__monstrumDebug` assertions, and saves PNGs to `.aistudio/artifacts/brain/bfb3d133-521f-43d5-bdad-af2c75633220/vision_debug/`.
-   - **Stale checks to update**:
-     - Asserts `'v0.1.2'` in the Title Menu (now `'v0.2.0'`).
-     - Asserts `0.1.2` `EXTREME` senses (`sightMult === 1.42`, `halfFovDeg === 100`, `hearingMult === 1.52`); in `0.2.0`, senses were buffed across all tiers (`EXTREME` is `sightMult: 1.54`, `halfFovDeg: 105`, `hearingMult: 1.68`).
-     - Does not yet cover Deck 1 Submarine, Deck 1 Steam Pipes, or Paper Maps.
-2. **`scripts/inspectShips.ts` + `src/game/shipAnalyzer.ts`**:
-   - Samples 100 seeds, prints ASCII maps and door/stub/reachability stats, and renders raw RGBA PNG blueprints to `.aistudio/artifacts/brain/e5cc8ba5-d298-4762-80a7-fcddc0bf69d0/ship_snapshots`.
-   - **Stale checks**: `shipAnalyzer.ts` predates `0.2.0` (`submarinePos`, `SUBMARINE_PART` items, `paperMaps`, `steamPipes`, and Deck 1 thick-wall checks are absent).
-3. **Recommended headless map/engine smoke check** (fast pattern using `npx tsx -e`):
-   - Call `generateCargoShip(seed)` across multiple seeds to assert `0` enclosed walkable components via BFS across `stairwells` (`findPath(map, startTx, startTy, goalTx, goalTy, map.doors, true)`), `0` `3x3` `WALL` slabs on `DECK_1`, `stairwells.length === 12` (3 connections per deck transition = 6 endpoints on `DECK_2`, 3 on `DECK_3`, 3 on `DECK_1`), `paperMaps.length === 3` (1 per deck), and `steamPipes.length > 0` on `DECK_1`.
-   - Note signatures carefully: `findPath` takes **tile** coordinates `(map, startTx, startTy, goalTx, goalTy, map.doors, canSmashLocked)`, `generateCargoShip` is in `src/game/mapGen.ts`, and `MonstrumGameEngine` takes `onHudUpdate` in its callbacks.
+### 2.5 CLI Audit & Screenshot Scripts (Staleness Caveats + Fast Smoke Check)
+1. **`scripts/captureVisionDebug.ts` (`npm run debug:screenshots`)** and **`scripts/inspectShips.ts` + `src/game/shipAnalyzer.ts`** both date back to `0.1.x`:
+   - `captureVisionDebug.ts` asserts old `'v0.1.2'` text, pre-`0.2.2` button layout on the title screen, and old `0.1.2` `EXTREME` senses tuning (`sightMult: 1.42` vs current `1.54`).
+   - `shipAnalyzer.ts` omits `0.2.x` `submarinePos`, `steamPipes`, `paperMaps`, `fuseSockets`, `lockedOnlyRoomIds`, and Deck 1 thick-wall checks.
+2. **Recommended headless `0.2.3` audit (`npx tsx -e`)**:
+   - Across 30+ seeds via `generateCargoShip(seed)`: assert `map.fuseSockets.length === 3` (1 unlocked `'Fuse Control'` per deck), `map.lockedOnlyRoomIds.length` in `2..4` (all border doors `isLocked`, player/Brute never spawn inside), `1` `MASTER_FUSE` + `>=3` `BOLT_CUTTERS` + `1` `BACKPACK` strictly in unlocked containers, `stairwells.length === 12` (all walkable), `0` interior `3x3 WALL` slabs on `DECK_1` (excluding outer hull `VOID`-border within 2 tiles), and `0` isolated non-vault walkable tiles via `runReachabilityBfs`-style unlocked BFS.
+   - Note: `Container` holds its loot in `container.item` (not `.loot`).
+   - Note: `RoomLightSwitch` stores `tx/ty` without `.deck`; resolve deck via `map.deckGrid[sw.ty][sw.tx]`.
 
 ---
 
-## 3. Codebase Map
+## 3. Codebase Map (End of 0.2.x)
 
 | File | Responsibility |
 | :--- | :--- |
-| `src/main.tsx` | Mounts React app + global `F11` fullscreen toggle (`e.preventDefault()`, `requestFullscreen`/`exitFullscreen`). |
-| `src/App.tsx` | Lifecycle (`TITLE_MENU` → `PLAYING` → `PAUSED` / `VICTORY_CUTSCENE` → `VICTORY` / `GAME_OVER`), input handling, `requestAnimationFrame` loop, `?debug=1` boot, `window.__monstrumDebug`. |
-| `src/game/types.ts` | `GAME_VERSION`, `getViewportResolutionScale`, `DifficultyConfig`, `BruteTuningNumbers`, `ROOM_CATEGORIES` (`UNIQUE`/`GENERIC`/`CIRCULATION`), `ITEM_CATALOG`, `ShipMap`, `HudSnapshot`. |
-| `src/game/mapGen.ts` | `generateCargoShip(seed?)`: 3-deck `126x114` procedural vessel (`CONTAINER_FREIGHTER`, `BULK_CARRIER`, `ICEBREAKER`), Z-bend corridors, small+anchor room packing, stub/enclosed-room repair, Deck 1 anti-thicc-wall solver, stairwells, steam pipes, paper maps, loot & clues. |
-| `src/game/pathfinding.ts` | `findPath(...)`: Multi-deck A* across `DECK_3`, `DECK_2`, `DECK_1` using 1-hop and 2-hop stairwell cost heuristics. |
-| `src/game/engine.ts` | `MonstrumGameEngine`: movement, stamina, flashlight battery, acoustic ripples (`emitNoise`), hiding/peeking (`Q` / `E`), `SteamPipe` telegraph/burst/stagger/fog, 3 escape routes (`ESCAPE_HELI`, `ESCAPE_LIFEBOAT`, `ESCAPE_SUBMARINE` + floodgate lever), Paper Map stand proximity auto-close. |
-| `src/game/bruteAi.ts` | `BruteBrain`: utility AI (`PURSUIT`, `SMASH_DOOR`, `CHECK_HIDING`, `STALK_CLUE`, `INVESTIGATE_NOISE`, `UNLEASHED_ROAM`), room/door/light/container memory, sight-only escape progress tracking (`observedHeliRepairs`, `observedLifeboatRepairs`, `observedSubRepairs`, `*Active`). |
-| `src/game/visibility.ts` | 2D raycasting, wall occluder extraction, player LoS, Brute FOV + peripheral checks, stair/door/vent peek visibility helpers. |
-| `src/game/lighting.ts` | Room light flicker, light spill cones, flares/glowsticks, Brute beam falloff. |
-| `src/game/renderer.ts` | Procedural Canvas 2D top-down renderer, OLED `#000000` fog-of-war masking, stair peek circular portal, steam jet & fog FX, debug overlays. |
-| `src/game/textures.ts` | Procedural offscreen canvas textures for decks, bulkheads, props, and environmental blood/drag streaks. |
-| `src/game/audio.ts` | `HorrorAudioEngine`: Web Audio procedural footsteps, Brute thuds, steam pipe clanks/hisses, door creaks/smashes, escape machinery. |
+| `src/main.tsx` | Mounts React app + global `F11` fullscreen toggle. |
+| `src/App.tsx` | Lifecycle (`TITLE_MENU` → `PLAYING` → `PAUSED` / `VICTORY_CUTSCENE` → `VICTORY` / `GAME_OVER`), input, RAF loop, `?debug=1`, `window.__monstrumDebug`. |
+| `src/game/types.ts` | `GAME_VERSION = '0.2.3'`, viewport resolution scaling, difficulty presets & tuning, `ROOM_CATEGORIES`, `ITEM_CATALOG` (`MASTER_FUSE`, reusable `BOLT_CUTTERS`, etc.), `FuseSocket`, `CorridorLightFixture`, `ShipMap`, `BruteState`, `EscapeProgress`, `HudSnapshot`. |
+| `src/game/mapGen.ts` | `generateCargoShip(seed?)`: 3-deck `126x114` vessel (`CONTAINER_FREIGHTER`, `BULK_CARRIER`, `ICEBREAKER`), Deck 1 anti-thicc-wall solver, zero-isolation repair, 3 unlocked `'Fuse Control'` panels, 2–4 padlocked-only vault rooms, `corridorLights`, steam pipes, paper maps, loot & clues. |
+| `src/game/pathfinding.ts` | Multi-deck A* (`findPath(map, startTx, startTy, goalTx, goalTy, doors, canSmashLocked)`). `canSmashLocked` is ONLY `true` during active Brute `CHASE`. |
+| `src/game/engine.ts` | `MonstrumGameEngine`: movement, battery, `isHidingSpotRoomLit`, `isDoorFarSideLit`, lit/dark peeking, `MASTER_FUSE` deck power & switch lock, Brute switch-fiddle loop, reusable `BOLT_CUTTERS` + Helicopter 6-chain cutting, 3 escapes, Paper Map auto-close. |
+| `src/game/bruteAi.ts` | `BruteBrain`: utility AI, room/door/light/container memory, sight-only escape tracking, door-peek reactions by Intelligence, Master-Fuse `knownFuseDecks` & `lowForgetTimers` (Extreme 0 clicks / High 1 click / Med 3s / Low 10s + forget). |
+| `src/game/visibility.ts` | 2D raycasting, wall occluder extraction, player LoS, Brute FOV + `poweredDecks` lit hallway sight boost (`485 * sightMult`), peek helpers. |
+| `src/game/lighting.ts` | Room light flicker, door spill cones, flares/glowsticks, Brute beam falloff. |
+| `src/game/renderer.ts` | Canvas 2D top-down renderer, OLED `#000000` fog-of-war, powered deck ceiling lights (`corridorLights`), lit/dark door peek cones, 6-chain Helicopter bollards, Fuse Control panels, stair peek portal, debug overlays. |
+| `src/game/textures.ts` | Procedural textures for decks, bulkheads, props, and blood/drag streaks. |
+| `src/game/audio.ts` | `HorrorAudioEngine`: Web Audio procedural footsteps, spatial/occluded switches (`playBreakerSwitch`), `playMasterFuseInsert`, `playHeliChainSnap`, steam pipes, door smashes, machinery. |
 | `src/game/debugScenarios.ts` | `DEBUG_SCENARIOS` metadata and `applyDebugScenarioToEngine(...)`. |
-| `src/components/TitleMenu.tsx` | Difficulty axes/presets, seed input, triple-click `:D` Dev Mode + triple-click `High`/`Nightmare` Extreme unlocks, `BruteTuningNumbers` form. |
-| `src/components/GameHud.tsx` | Minimalist HUD (inventory slots 1–6, stamina/battery, contextual `[E]`/`[Q]` prompts, Paper Map & Debug triggers). |
-| `src/components/PaperMapModal.tsx` | Stationary deck schematic modal with fixed `"YOU ARE HERE"` pin; locked to stand's deck unless `devModeUnlocked`. |
-| `src/components/EscapeJournalModal.tsx` | `[J]` Escape Routes & Parts Checklist (Helicopter, Lifeboat, Submarine). |
+| `src/components/TitleMenu.tsx` | Monstrum security booth CCTV menu, live green-phosphor feeds, Setup/Options/Field Guide/Brute Intel/Credits dossiers, secret `:D` & `Extreme` unlocks. |
+| `src/components/GameHud.tsx` | HUD (1–6 slots, stamina/battery, prompts, Paper Map & Debug buttons). |
+| `src/components/PaperMapModal.tsx` | Per-deck schematic with fixed `"YOU ARE HERE"` pin and Fuse Control `[F]` markers. |
+| `src/components/EscapeJournalModal.tsx` | `[J]` Escape Routes, parts checklist, and Helicopter Steel Chains (`0/6`) tracker. |
 | `src/components/EscapeCutsceneModal.tsx` | Noir victory cutscene prior to `VICTORY` summary screen. |
-| `src/components/GameModals.tsx` | Pause, Game Over, and Victory run stats (`RunStats`). |
+| `src/components/GameModals.tsx` | Pause, Game Over, and Victory run stats. |
 
 ---
 
 ## 4. Critical Architecture Invariants & Gotchas
 
 1. **Single 2D Grid Partitioned Vertically by Deck (`map.deckBounds`)**:
-   - `DECK_3` (`y: 0..37`), `DECK_2` (`y: 38..75`), and `DECK_1` (`y: 76..113`) share one `126x114` matrix (`tileSize = 44`).
-   - Walkable tiles on different decks NEVER touch directly; they connect strictly via `map.stairwells` (`targetStairId`).
-   - Any flood-fill, room-packing, wall-carving, or neighbor check must clamp to the active deck's `deckBounds[deck]` (or check `deckGrid[y][x]`), and never strip outer hull `WALL` borders adjacent to `VOID` (except open rails around Deck 2 `Lifeboat Davit` / Deck 3 exterior).
-   - **Deck Stair Topology (`0.2.0`)**: 3 stairwell links total connect adjacent decks (`DECK_3 <-> DECK_2` and `DECK_2 <-> DECK_1`) at offset `x,y` coordinates so transit between Deck 3 and Deck 1 requires crossing Deck 2.
+   - `DECK_3` (`y: 0..37`), `DECK_2` (`y: 38..75`), and `DECK_1` (`y: 76..113`) share one `126x114` matrix (`tileSize = 44`). Decks only connect via `map.stairwells`.
+   - Never call `clear` directly on `reserved` around props/stairs, and note `buildDeck3Annex` in `mapGen.ts`: keep temporary `annexGuard` keys deleted before `buildDeck3Annex` populates interior rooms so switches/fuse panels/containers can spawn inside Deck 3 annexes.
 
-2. **Procedural Generation Pass Ordering (`src/game/mapGen.ts`)**:
-   - **Zero enclosed rooms & zero `3x3` thick walls on Deck 1** depend on pass order:
-     - Dead-end corridor stub pruning (Section `5b`) **must run before** `runAntiThiccWallPass` (Section `5c`), because turning corridor dead-ends back into `WALL` can otherwise recreate `3x3` `WALL` slabs on Deck 1.
-     - Both `packCompactRooms` and `fillGreedyPocketRooms` require `tiles[y][x] === 'WALL'` on the 1-tile perimeter around new rooms so compartments always keep a 1-tile bulkhead separating them from corridors and neighbors.
-   - `ROOM_CATEGORIES` (`src/game/types.ts`) separates `UNIQUE` rooms (at most once per ship, e.g., `Bridge`, `Engine Room`, `Submarine Bay`) from `GENERIC` rooms (`Crew Quarters`, `Storage Room`, etc.) and `CIRCULATION`. Keep `roomIdGrid` distinct per room so Brute clue/memory tracking (`BruteBrain`) doesn't merge separate rooms.
+2. **Procedural Generation Ordering (`src/game/mapGen.ts`)**:
+   - Dead-end corridor stub pruning (Section `5b`) runs before `runAntiThiccWallPass` (Section `5c`).
+   - `lockedOnlyRoomIds` selection (`2..4` interior rooms) locks all bordering doors **and** skips `lockedDoorKeysNow` when checking unlocked BFS reachability of non-vault tiles. Player and Brute spawns exclude `lockedOnlyRoomIds`; `MASTER_FUSE`, 3× `BOLT_CUTTERS`, and `BACKPACK` stay strictly outside locked vaults.
 
-3. **OLED Pure `#000000` Occlusion Invariant**:
-   - Regions behind closed doors and walls must render at exact `rgb(0, 0, 0)` (no ambient grey bleed), except intentional clues like Brute searchlight bounce or stair-peek portals. Verify with `Black Probes` / `probePixels()` whenever modifying `visibility.ts`, `lighting.ts`, or `renderer.ts`.
+3. **OLED Pure `#000000` Occlusion & Powered Decks (`0.2.3`)**:
+   - Behind walls and closed doors must stay exact `rgb(0, 0, 0)`. Even when a deck is powered via `MASTER_FUSE` (`poweredDecks[deck] = true`), `corridorLights` fixtures raycast against walls/closed doors inside active camera deck or `peekingStairId` portal so light never bleeds across bulkheads.
 
-4. **Sight-Only Escape Bias (`BruteBrain`)**:
-   - The Brute does **not** automatically know when you install a part or start the Helicopter / Lifeboat / Submarine unless it hears the noise ripple (`emitNoise`) or **visually spots** the progress (`observedHeliRepairs`, `observedLifeboatRepairs`, `observedSubRepairs`, `*Active` in `bruteAi.ts`). Keep this fair-play constraint intact when adding future AI or escape mechanics.
+4. **Lit-Side Peeking Stealth & Brute Intelligence Tiers (`0.2.2–0.2.3`)**:
+   - Holding `Q` in a **lit room** (hiding vent peek) OR peering through a closed door when the **far side** (`isDoorFarSideLit`) is illuminated (`sw.isOn || poweredDecks[farDeck]`) drains `0` battery, works at `0%` battery, skips fake flashlight cone visuals, and **never alerts the Brute**.
+   - Dark-side door peeks require `>0%` battery, drain `1.35/s` when flashlight is off, and trigger Intelligence-tiered reactions: `LOW` ignores, `MEDIUM` logs `DOOR_PEEK_BEAM` stalk clue, `HIGH`/`EXTREME` roar, smash door, and `CHASE`.
+   - On Master-Fuse powered decks (`poweredDecks[deck]`), wall switches lock ON (`cannot toggle off`) and Brute reacts by Intelligence: `EXTREME` (`0` clicks -> immediately `knownFuseDecks.add(deck)`), `HIGH` (`1` click -> learns deck), `MEDIUM` (`3s` fiddle loop -> learns deck), `LOW` (`10s` fiddle loop -> learns deck, then `lowForgetTimers` expires after `48–72s` so it forgets and tries switches again).
 
-5. **Smooth Resolution Scaling**:
-   - `getViewportResolutionScale(w, h)` (`Math.sqrt(areaRatio)` clamped `0.45..3.0` around `1440x900`) preserves identical visible world area across small and 4K windows. Always apply zoom changes through `engine.getEffectiveZoom(w, h)` so raycast checks, camera, and mouse aim stay aligned.
+5. **Bolt Cutters, Chained Chopper & Chase-Only Padlock Smash (`0.2.3`)**:
+   - `BOLT_CUTTERS` are **reusable** (infinite uses on locked vault doors, normal padlocks, and Helicopter chains).
+   - Stern Helicopter begins bound by **6 heavy chains** (`heliChainsRemaining = 6`). Cutting takes `2.0s/chain` with `BOLT_CUTTERS` in pack and emits a `950px` snap noise ripple (`urgency = 0.92`). Parts (`3/3`) may be installed anytime, but turbine spin-up (`ACTIVATING`) requires `heliChainsRemaining === 0`.
+   - Outside active `CHASE`/`PURSUIT`, Brute uses `canSmashLocked = false` and **never** smashes padlocked doors (`!door.isLocked` guard in `followTarget`). Only active `CHASE` can breach locked vault rooms.
+
+6. **Sight-Only Escape Bias (`BruteBrain`)**:
+   - Keep Brute fair-play intact: Brute only learns of escape progress via acoustic ripples or direct visual observation (`observedHeliRepairs`, etc.), never omnisciently.
+

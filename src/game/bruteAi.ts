@@ -90,6 +90,11 @@ export class BruteBrain {
   public stalkTarget: StalkTarget | null = null;
   public stalkRoomQueue: StalkQueueEntry[] = [];
 
+  // Master Fuse per-deck intelligence awareness & Low-Int periodic forgetfulness
+  public knownFuseDecks: Set<ShipDeck> = new Set();
+  public lowForgetTimers: Partial<Record<ShipDeck, number>> = {};
+  public fuseDeckScanCooldowns: Partial<Record<ShipDeck, number>> = {};
+
   // Sight-observed escape progress (Brute only biases patrol routes after visually seeing repairs/activation)
   public observedHeliRepairs = 0;
   public observedHeliActive = false;
@@ -268,6 +273,49 @@ export class BruteBrain {
     this.recentlyCheckedSpots.set(spotId, nowSec + 26);
   }
 
+  public getSwitchDeck(sw: RoomLightSwitch): ShipDeck {
+    return this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+  }
+
+  public markFuseDeckKnown(deck: ShipDeck, intelligence: DifficultyLevel): void {
+    this.knownFuseDecks.add(deck);
+    if (intelligence === 'LOW') {
+      this.lowForgetTimers[deck] = 48 + Math.random() * 24;
+    } else {
+      delete this.lowForgetTimers[deck];
+    }
+  }
+
+  public updateFuseMemory(
+    dt: number,
+    poweredDecks: Record<ShipDeck, boolean>,
+    intelligence: DifficultyLevel
+  ): void {
+    if (intelligence !== 'LOW') return;
+    for (const deck of ['DECK_3', 'DECK_2', 'DECK_1'] as const) {
+      if (!poweredDecks[deck] || !this.knownFuseDecks.has(deck)) continue;
+      const rem = this.lowForgetTimers[deck];
+      if (rem === undefined) {
+        this.lowForgetTimers[deck] = 48 + Math.random() * 24;
+        continue;
+      }
+      const next = rem - dt;
+      if (next <= 0) {
+        this.knownFuseDecks.delete(deck);
+        delete this.lowForgetTimers[deck];
+        delete this.fuseDeckScanCooldowns[deck];
+        for (const sw of this.map.lightSwitches) {
+          if (this.getSwitchDeck(sw) === deck) {
+            this.lightCooldowns.delete(sw.id);
+            this.rememberedLights.set(sw.id, false);
+          }
+        }
+      } else {
+        this.lowForgetTimers[deck] = next;
+      }
+    }
+  }
+
   private getDeckAtWorld(wx: number, wy: number): ShipDeck {
     const tx = Math.max(0, Math.min(this.map.width - 1, Math.floor(wx / this.map.tileSize)));
     const ty = Math.max(0, Math.min(this.map.height - 1, Math.floor(wy / this.map.tileSize)));
@@ -326,7 +374,8 @@ export class BruteBrain {
     doorsByTile: Map<number, Door>,
     difficulty: DifficultyConfig,
     tuning?: BruteTuningNumbers,
-    escape?: EscapeProgress
+    escape?: EscapeProgress,
+    poweredDecks?: Record<ShipDeck, boolean>
   ): ClueDetectionEvent[] {
     this.clueScanTimer -= dt;
     if (this.clueScanTimer > 0) return [];
@@ -441,14 +490,70 @@ export class BruteBrain {
       }
     }
 
-    // 3. Check Room Light Switches left ON unexpectedly (scoped per roomId!)
+    // 3. Check Room Light Switches & Master-Fuse Deck Lighting
     const bTx = Math.max(0, Math.min(this.map.width - 1, Math.floor(brute.x / this.map.tileSize)));
     const bTy = Math.max(0, Math.min(this.map.height - 1, Math.floor(brute.y / this.map.tileSize)));
     const bruteRoom = this.map.roomGrid[bTy][bTx];
     const bruteRoomId = this.map.roomIdGrid[bTy][bTx];
+    const bruteDeck = this.map.deckGrid[bTy]?.[bTx] ?? 'DECK_2';
     const lightSightRange = 485 * senses.sightMult;
 
+    // Extreme Intelligence deduces immediately from deck/hallway illumination that switches are futile
+    if (
+      poweredDecks?.[bruteDeck] &&
+      difficulty.intelligence === 'EXTREME' &&
+      !this.knownFuseDecks.has(bruteDeck)
+    ) {
+      this.knownFuseDecks.add(bruteDeck);
+      for (const sw of this.map.lightSwitches) {
+        if (this.getSwitchDeck(sw) === bruteDeck) {
+          this.rememberedLights.set(sw.id, true);
+        }
+      }
+    }
+
+    // If on a fuse-powered deck and Brute hasn't learned/forgot it's fuse-powered yet, head to nearest switch
+    if (
+      !silentSyncOnly &&
+      poweredDecks?.[bruteDeck] &&
+      !this.knownFuseDecks.has(bruteDeck) &&
+      difficulty.intelligence !== 'EXTREME' &&
+      !brute.fiddleSwitchId &&
+      nowSec >= (this.fuseDeckScanCooldowns[bruteDeck] ?? 0)
+    ) {
+      const deckSwitches = this.map.lightSwitches
+        .filter((sw) => this.getSwitchDeck(sw) === bruteDeck && nowSec >= (this.lightCooldowns.get(sw.id) ?? 0))
+        .sort((a, b) => Math.hypot(a.x - brute.x, a.y - brute.y) - Math.hypot(b.x - brute.x, b.y - brute.y));
+      const nearestSw = deckSwitches[0];
+      if (nearestSw) {
+        this.fuseDeckScanCooldowns[bruteDeck] = nowSec + 18;
+        this.lightCooldowns.set(nearestSw.id, nowSec + 18);
+        this.triggerClueReaction(
+          nearestSw.roomId,
+          nearestSw.room,
+          nearestSw.x,
+          nearestSw.y,
+          'LIGHT_LEFT_ON',
+          nowSec,
+          difficulty.intelligence,
+          nearestSw,
+          tuning
+        );
+        events.push({
+          x: nearestSw.x,
+          y: nearestSw.y,
+          room: nearestSw.room,
+          roomId: nearestSw.roomId,
+          reason: 'LIGHT_LEFT_ON',
+        });
+      }
+    }
+
     for (const sw of this.map.lightSwitches) {
+      const swDeck = this.getSwitchDeck(sw);
+      if (this.knownFuseDecks.has(swDeck)) continue;
+      if (poweredDecks?.[swDeck] && difficulty.intelligence === 'EXTREME') continue;
+
       const memOn = this.rememberedLights.get(sw.id) ?? false;
       if (!sw.isOn) {
         this.rememberedLights.set(sw.id, false);
@@ -481,23 +586,31 @@ export class BruteBrain {
           ));
 
       if (seesLight && !silentSyncOnly) {
-        this.lightCooldowns.set(sw.id, nowSec + 18);
+        // When deck is fuse-powered, steer Brute to the nearest switch on that deck first
+        let targetSw = sw;
+        if (poweredDecks?.[swDeck]) {
+          const nearest = this.map.lightSwitches
+            .filter((cand) => this.getSwitchDeck(cand) === swDeck)
+            .sort((a, b) => Math.hypot(a.x - brute.x, a.y - brute.y) - Math.hypot(b.x - brute.x, b.y - brute.y))[0];
+          if (nearest) targetSw = nearest;
+        }
+        this.lightCooldowns.set(targetSw.id, nowSec + 18);
         this.triggerClueReaction(
-          sw.roomId,
-          sw.room,
-          sw.x,
-          sw.y,
+          targetSw.roomId,
+          targetSw.room,
+          targetSw.x,
+          targetSw.y,
           'LIGHT_LEFT_ON',
           nowSec,
           difficulty.intelligence,
-          sw,
+          targetSw,
           tuning
         );
         events.push({
-          x: sw.x,
-          y: sw.y,
-          room: sw.room,
-          roomId: sw.roomId,
+          x: targetSw.x,
+          y: targetSw.y,
+          room: targetSw.room,
+          roomId: targetSw.roomId,
           reason: 'LIGHT_LEFT_ON',
         });
       }
@@ -994,7 +1107,8 @@ export class BruteBrain {
     player: PlayerState,
     doorsByTile: Map<number, Door>,
     difficulty: DifficultyConfig,
-    tuning?: BruteTuningNumbers
+    tuning?: BruteTuningNumbers,
+    poweredDecks?: Record<ShipDeck, boolean>
   ): UtilityGoal {
     if (brute.state === 'STUNNED') {
       this.activeGoal = 'UNLEASHED_ROAM';
@@ -1006,7 +1120,7 @@ export class BruteBrain {
       return 'SMASH_DOOR';
     }
 
-    const seesPlayer = canBruteSeePlayer(brute, player, this.map, doorsByTile, difficulty, tuning);
+    const seesPlayer = canBruteSeePlayer(brute, player, this.map, doorsByTile, difficulty, tuning, poweredDecks);
     if (seesPlayer) {
       this.activeGoal = 'PURSUIT';
       return 'PURSUIT';

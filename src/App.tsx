@@ -60,6 +60,9 @@ declare global {
         heliState: string;
         lifeboatState: string;
         submarineState: string;
+        heliChainsRemaining: number;
+        poweredDecks: Record<string, boolean>;
+        fuseSockets: Array<{ id: string; deck: string; x: number; y: number; hasFuse: boolean }>;
       } | null;
       getRuntimeDetails: () => {
         bruteTuning: BruteTuningNumbers;
@@ -88,6 +91,10 @@ declare global {
         };
         activeNoiseRipples: Array<{ x: number; y: number; maxRadius: number }>;
         maxAcousticRadius: number;
+        lockedOnlyRoomIds: number[];
+        poweredDecks: Record<string, boolean>;
+        bruteKnownFuseDecks: string[];
+        bruteFiddleSwitchId: string | null;
         nearestDoor: {
           id: string;
           x: number;
@@ -541,6 +548,15 @@ export default function App() {
           heliState: engine.escape.heliState,
           lifeboatState: engine.escape.lifeboatState,
           submarineState: engine.escape.submarineState,
+          heliChainsRemaining: engine.escape.heliChainsRemaining,
+          poweredDecks: { ...engine.poweredDecks },
+          fuseSockets: engine.map.fuseSockets.map((f) => ({
+            id: f.id,
+            deck: f.deck,
+            x: f.x,
+            y: f.y,
+            hasFuse: f.hasFuse,
+          })),
         };
       },
       getRuntimeDetails: () => {
@@ -611,6 +627,10 @@ export default function App() {
             maxRadius: r.maxRadius,
           })),
           maxAcousticRadius: engine.maxEmittedAcousticRadius,
+          lockedOnlyRoomIds: [...engine.map.lockedOnlyRoomIds],
+          poweredDecks: { ...engine.poweredDecks },
+          bruteKnownFuseDecks: Array.from(engine.brain.knownFuseDecks),
+          bruteFiddleSwitchId: engine.brute.fiddleSwitchId,
           nearestDoor,
         };
       },

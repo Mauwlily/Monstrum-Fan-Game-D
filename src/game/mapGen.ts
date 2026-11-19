@@ -2,8 +2,10 @@ import {
   BloodStreak,
   Container,
   ContainerType,
+  CorridorLightFixture,
   Door,
   FloorMaterial,
+  FuseSocket,
   HidingSpot,
   HidingSpotType,
   ItemId,
@@ -931,12 +933,6 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     addDoorway(ax1 + 3, botSepY, 'H', 'Electrical Room', 'GRATING', { open: false, roomId: r3Id });
     addDoorway(ax2 - 3, botSepY, 'H', 'Electrical Room', 'GRATING', { open: rng() > 0.5, roomId: r3Id });
     addProp('SWITCHGEAR', 'DECK_3', ax2 - 3, ay2 - 2, 2, 1, { blocking: true, room: 'Electrical Room', roomId: r3Id });
-
-    for (let y = ay1 - 1; y <= ay2 + 1; y++) {
-      for (let x = ax1 - 1; x <= ax2 + 1; x++) {
-        reserved.add(key(x, y));
-      }
-    }
   };
 
   // Stepped Deck 3 Superstructure (offset wings & jogged interior hallway, zero grid, crisp 1-tile walls)
@@ -1036,10 +1032,18 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     reserveAround(stair32MidTop.tx, stair32MidTop.ty, 1);
     const annexX1 = 88 + randInt(rng, -2, 2);
     const annexY1 = flipY ? 9 : 21;
+    const annexGuard: number[] = [];
     for (let y = annexY1 - 1; y <= annexY1 + 9; y++) {
-      for (let x = annexX1 - 1; x <= 102; x++) reserved.add(key(x, y));
+      for (let x = annexX1 - 1; x <= 102; x++) {
+        const k = key(x, y);
+        if (!reserved.has(k)) {
+          reserved.add(k);
+          annexGuard.push(k);
+        }
+      }
     }
     placeCargoIslandsD3(dhX2 + 3, 102, [stair32MidTop]);
+    for (const k of annexGuard) reserved.delete(k);
     buildDeck3Annex(annexX1, annexY1, 101, annexY1 + 8);
   } else if (archetype === 'BULK_CARRIER') {
     const dhX1 = 50 + shiftA;
@@ -1051,11 +1055,19 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     reserveAround(stair32MidTop.tx, stair32MidTop.ty, 1);
     const annexX1 = 88 + randInt(rng, -2, 2);
     const annexY1 = flipY ? 21 : 9;
+    const annexGuard: number[] = [];
     for (let y = annexY1 - 1; y <= annexY1 + 9; y++) {
-      for (let x = annexX1 - 1; x <= 101; x++) reserved.add(key(x, y));
+      for (let x = annexX1 - 1; x <= 101; x++) {
+        const k = key(x, y);
+        if (!reserved.has(k)) {
+          reserved.add(k);
+          annexGuard.push(k);
+        }
+      }
     }
     placeCargoIslandsD3(23, dhX1 - 3, [stair32AftTop]);
     placeCargoIslandsD3(dhX2 + 3, 102, []);
+    for (const k of annexGuard) reserved.delete(k);
     buildDeck3Annex(annexX1, annexY1, 100, annexY1 + 8);
   } else {
     // ICEBREAKER: L-shaped aft deckhouse (1-tile bulkhead walls strictly preserved) + mid utility annex + forward stepped bridge
@@ -1084,10 +1096,18 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     stair32MidTop = { tx: 56, ty: flipY ? 22 : 16, room: 'Container Bay' };
     const iceAnnexX1 = 44 + randInt(rng, -2, 2);
     const iceAnnexY1 = flipY ? 9 : 21;
+    const annexGuard: number[] = [];
     for (let y = iceAnnexY1 - 1; y <= iceAnnexY1 + 9; y++) {
-      for (let x = iceAnnexX1 - 1; x <= iceAnnexX1 + 13; x++) reserved.add(key(x, y));
+      for (let x = iceAnnexX1 - 1; x <= iceAnnexX1 + 13; x++) {
+        const k = key(x, y);
+        if (!reserved.has(k)) {
+          reserved.add(k);
+          annexGuard.push(k);
+        }
+      }
     }
     placeCargoIslandsD3(aftX2 + 3, fwdX1 - 3, [stair32MidTop]);
+    for (const k of annexGuard) reserved.delete(k);
     buildDeck3Annex(iceAnnexX1, iceAnnexY1, iceAnnexX1 + 12, iceAnnexY1 + 8);
   }
 
@@ -1360,7 +1380,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     const count = randInt(rng, minReplace, maxReplace);
     const eligible = rooms.filter((rb) => {
       if (rb.deck !== deck || rb.category !== 'GENERIC') return false;
-      if (rb.name === 'Cargo Hold' || rb.name === 'Container Bay') return false;
+      if (rb.name === 'Cargo Hold' || rb.name === 'Container Bay' || rb.name === 'Fuse Control') return false;
       const rw = rb.x2 - rb.x1 + 1;
       const rh = rb.y2 - rb.y1 + 1;
       if (rw < 3 || rh < 3 || rw * rh > 32) return false;
@@ -1703,6 +1723,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
       { name: 'Crew Quarters', mat: 'CABIN', wRange: [4, 5], hRange: [4, 5], propKind: 'BUNK', propW: 2, propH: 1 },
       { name: 'Storage Room', mat: 'CARGO', wRange: [4, 5], hRange: [4, 5], lockedChance: 0.3 },
       { name: 'Storage Room', mat: 'CARGO', wRange: [4, 6], hRange: [4, 5] },
+      { name: 'Fuse Control', mat: 'GRATING', wRange: [4, 5], hRange: [4, 5], propKind: 'SWITCHGEAR', propW: 2, propH: 1 },
       { name: 'Workshop', mat: 'STEEL', wRange: [4, 6], hRange: [4, 5], propKind: 'WORKBENCH', propW: 2, propH: 1 },
       { name: 'Electrical Room', mat: 'GRATING', wRange: [4, 5], hRange: [4, 5], propKind: 'SWITCHGEAR', propW: 2, propH: 1 },
       { name: 'Maintenance Bay', mat: 'STEEL', wRange: [4, 6], hRange: [4, 5], propKind: 'WORKBENCH', propW: 2, propH: 1 },
@@ -1820,6 +1841,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     [
       { name: 'Boiler Room', mat: 'GRATING', wRange: [5, 6], hRange: [4, 5], propKind: 'BOILER', propW: 2, propH: 2 },
       { name: 'Pump Room', mat: 'GRATING', wRange: [5, 6], hRange: [4, 5], propKind: 'PUMP_UNIT', propW: 2, propH: 2 },
+      { name: 'Fuse Control', mat: 'GRATING', wRange: [4, 5], hRange: [4, 5], propKind: 'SWITCHGEAR', propW: 2, propH: 1 },
       { name: 'Maintenance Bay', mat: 'STEEL', wRange: [4, 5], hRange: [4, 5], propKind: 'WORKBENCH', propW: 2, propH: 1 },
       { name: 'Electrical Room', mat: 'GRATING', wRange: [4, 5], hRange: [4, 5], propKind: 'SWITCHGEAR', propW: 2, propH: 1 },
       { name: 'Storage Room', mat: 'CARGO', wRange: [4, 5], hRange: [4, 5], lockedChance: 0.3 },
@@ -3118,6 +3140,248 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     }
   }
 
+  // Helper: collect all doors whose opposite passage tiles connect directly to a roomId
+  const getDoorsForRoomId = (targetRoomId: number): Door[] => {
+    const res: Door[] = [];
+    for (const d of doors) {
+      const sides =
+        d.orientation === 'H'
+          ? [
+              { tx: d.tx, ty: d.ty - 1 },
+              { tx: d.tx, ty: d.ty + 1 },
+            ]
+          : [
+              { tx: d.tx - 1, ty: d.ty },
+              { tx: d.tx + 1, ty: d.ty },
+            ];
+      if (sides.some((s) => roomIdGrid[s.ty]?.[s.tx] === targetRoomId)) {
+        res.push(d);
+      }
+    }
+    return res;
+  };
+
+  const countRoomWalkableTiles = (rId: number): number => {
+    let n = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (roomIdGrid[y][x] === rId && isTileWalkable(tiles[y][x])) n++;
+      }
+    }
+    return n;
+  };
+
+  // Guarantee exactly 1 dedicated unlocked 'Fuse Control' room per deck (DECK_3, DECK_2, DECK_1)
+  const fuseRoomIds = new Set<number>();
+  const preferredFuseConvertNames = new Set<RoomName>([
+    'Electrical Room',
+    'Maintenance Bay',
+    'Workshop',
+    'Storage Room',
+  ]);
+  const protectedFromFuseRename = new Set<RoomName>([
+    'Helideck',
+    'Lifeboat Davit',
+    'Submarine Bay',
+    'Weather Deck',
+    'Container Bay',
+    'Forecastle',
+    'Bridge',
+    'Engine Room',
+    'Corridor',
+    'Catwalk',
+  ]);
+
+  const countRoomUnreservedTiles = (rId: number): number => {
+    let n = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (roomIdGrid[y][x] === rId && isTileWalkable(tiles[y][x]) && !reserved.has(key(x, y))) n++;
+      }
+    }
+    return n;
+  };
+
+  for (const deck of ['DECK_3', 'DECK_2', 'DECK_1'] as const) {
+    let fuseRoom = rooms.find(
+      (rb) => rb.deck === deck && rb.name === 'Fuse Control' && countRoomUnreservedTiles(rb.id) >= 2
+    );
+    if (!fuseRoom) {
+      const deckRooms = rooms.filter(
+        (rb) =>
+          rb.deck === deck &&
+          rb.category !== 'CIRCULATION' &&
+          !protectedFromFuseRename.has(rb.name) &&
+          countRoomUnreservedTiles(rb.id) >= 2
+      );
+      deckRooms.sort((a, b) => {
+        const prefA = preferredFuseConvertNames.has(a.name) ? 0 : 1;
+        const prefB = preferredFuseConvertNames.has(b.name) ? 0 : 1;
+        if (prefA !== prefB) return prefA - prefB;
+        return countRoomWalkableTiles(a.id) - countRoomWalkableTiles(b.id);
+      });
+      fuseRoom =
+        deckRooms[0] ??
+        rooms.find(
+          (rb) =>
+            rb.deck === deck &&
+            rb.category !== 'CIRCULATION' &&
+            !protectedFromFuseRename.has(rb.name) &&
+            countRoomWalkableTiles(rb.id) >= 2
+        );
+      if (fuseRoom) {
+        fuseRoom.name = 'Fuse Control';
+        fuseRoom.category = 'GENERIC';
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            if (roomIdGrid[y][x] === fuseRoom.id) {
+              roomGrid[y][x] = 'Fuse Control';
+            }
+          }
+        }
+      }
+    }
+    if (fuseRoom) {
+      fuseRoomIds.add(fuseRoom.id);
+      for (const d of getDoorsForRoomId(fuseRoom.id)) {
+        d.isLocked = false;
+      }
+    }
+  }
+
+  // Create 2..4 Locked-Only Vault Rooms (every entrance padlocked, zero isolation of non-locked tiles)
+  const lockedOnlyRoomIds: number[] = [];
+  const lockedOnlySet = new Set<number>();
+  const neverLockRoomNames = new Set<RoomName>([
+    'Helideck',
+    'Lifeboat Davit',
+    'Submarine Bay',
+    'Weather Deck',
+    'Container Bay',
+    'Forecastle',
+    'Bridge',
+    'Engine Room',
+    'Fuse Control',
+    'Corridor',
+    'Catwalk',
+  ]);
+
+  const vaultCandidates = rooms.filter((rb) => {
+    if (neverLockRoomNames.has(rb.name) || fuseRoomIds.has(rb.id)) return false;
+    if (rb.category === 'CIRCULATION') return false;
+    const walkCount = countRoomWalkableTiles(rb.id);
+    if (walkCount < 6) return false;
+    const rDoors = getDoorsForRoomId(rb.id);
+    return rDoors.length >= 1 && rDoors.length <= 3;
+  });
+  for (let i = vaultCandidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [vaultCandidates[i], vaultCandidates[j]] = [vaultCandidates[j], vaultCandidates[i]];
+  }
+  // Spread candidates across decks (prefer Deck 2 & Deck 1 first, then Deck 3)
+  const vaultOrdered: RoomBounds[] = [];
+  for (const d of ['DECK_2', 'DECK_1', 'DECK_3', 'DECK_2', 'DECK_1'] as const) {
+    const pick = vaultCandidates.find((r) => r.deck === d && !vaultOrdered.includes(r));
+    if (pick) vaultOrdered.push(pick);
+  }
+  for (const r of vaultCandidates) {
+    if (!vaultOrdered.includes(r)) vaultOrdered.push(r);
+  }
+
+  const criticalUnlockedTiles: Array<{ tx: number; ty: number }> = [
+    ...stairwells.map((s) => ({ tx: s.tx, ty: s.ty })),
+    { tx: heliTx, ty: heliTy },
+    { tx: lifeboatTx, ty: lifeboatTy },
+    { tx: subTx, ty: subTy },
+    { tx: subLeverTx, ty: subLeverTy },
+  ];
+
+  const targetLockedVaults = 3 + (rng() < 0.45 ? 1 : 0);
+  for (const rb of vaultOrdered) {
+    if (lockedOnlyRoomIds.length >= targetLockedVaults) break;
+    const rbDoors = getDoorsForRoomId(rb.id);
+    if (rbDoors.length === 0) continue;
+
+    const saved = rbDoors.map((d) => ({ d, isLocked: d.isLocked, isOpen: d.isOpen }));
+    for (const d of rbDoors) {
+      d.isLocked = true;
+      d.isOpen = false;
+    }
+
+    const visUnlocked = runReachabilityBfs(rootTx, rootTy, false);
+    const visAll = runReachabilityBfs(rootTx, rootTy, true);
+
+    let ok = true;
+    // 1. All stairs, escape zones, and Fuse Control rooms stay reachable unlocked
+    for (const pt of criticalUnlockedTiles) {
+      if (visUnlocked[key(pt.tx, pt.ty)] !== 1) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) {
+      for (const fId of fuseRoomIds) {
+        let fuseReachable = false;
+        for (let y = 0; y < height && !fuseReachable; y++) {
+          for (let x = 0; x < width; x++) {
+            if (roomIdGrid[y][x] === fId && isTileWalkable(tiles[y][x]) && visUnlocked[key(x, y)] === 1) {
+              fuseReachable = true;
+              break;
+            }
+          }
+        }
+        if (!fuseReachable) {
+          ok = false;
+          break;
+        }
+      }
+    }
+
+    // 2. Every non-locked walkable tile outside chosen locked-only rooms stays reachable unlocked!
+    if (ok) {
+      const candidateLockedIds = new Set<number>([...lockedOnlySet, rb.id]);
+      const lockedDoorKeysNow = new Set<number>();
+      for (const d of doors) {
+        if (d.isLocked) lockedDoorKeysNow.add(key(d.tx, d.ty));
+      }
+      for (let y = 0; y < height && ok; y++) {
+        for (let x = 0; x < width; x++) {
+          if (!isTileWalkable(tiles[y][x])) continue;
+          if (lockedDoorKeysNow.has(key(x, y))) continue;
+          const rId = roomIdGrid[y][x];
+          if (!candidateLockedIds.has(rId) && visUnlocked[key(x, y)] !== 1) {
+            ok = false;
+            break;
+          }
+        }
+      }
+    }
+
+    // 3. The vault itself is reachable once padlocks are cut
+    if (ok) {
+      let vaultReachableWithCutters = false;
+      for (let y = rb.y1; y <= rb.y2 && !vaultReachableWithCutters; y++) {
+        for (let x = rb.x1; x <= rb.x2; x++) {
+          if (roomIdGrid[y][x] === rb.id && isTileWalkable(tiles[y][x]) && visAll[key(x, y)] === 1) {
+            vaultReachableWithCutters = true;
+            break;
+          }
+        }
+      }
+      if (!vaultReachableWithCutters) ok = false;
+    }
+
+    if (ok) {
+      lockedOnlyRoomIds.push(rb.id);
+      lockedOnlySet.add(rb.id);
+    } else {
+      for (const s of saved) {
+        s.d.isLocked = s.isLocked;
+        s.d.isOpen = s.isOpen;
+      }
+    }
+  }
+
   // Split Deck 1 1-wide hallways with heavy, slow, loud watertight bulkhead doors
   const placeWatertightCorridorDoors = () => {
     const band = deckBounds.DECK_1;
@@ -3289,7 +3553,8 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
       for (let x = 8; x < width - 8; x++) {
         if (!isTileWalkable(tiles[y][x])) continue;
         if (reserved.has(key(x, y)) || doorKeys.has(key(x, y)) || stairKeys.has(key(x, y))) continue;
-        if (roomGrid[y][x] === 'Helideck' || roomGrid[y][x] === 'Lifeboat Davit' || roomGrid[y][x] === 'Submarine Bay') continue;
+        if (roomGrid[y][x] === 'Helideck' || roomGrid[y][x] === 'Lifeboat Davit' || roomGrid[y][x] === 'Submarine Bay' || roomGrid[y][x] === 'Fuse Control') continue;
+        if (lockedOnlySet.has(roomIdGrid[y][x])) continue;
         const hasWallAdj =
           tiles[y - 1][x] === 'WALL' ||
           tiles[y + 1][x] === 'WALL' ||
@@ -3318,7 +3583,58 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   }
 
   // =========================================================================
-  // --- 8. Room-Scoped Light Switches, Hiding Spots & Searchable Containers ---
+  // --- 7b. Corridor & Catwalk Ceiling Lights (Activated by Master Fuse) ---
+  // =========================================================================
+  const corridorLights: CorridorLightFixture[] = [];
+  let corrLightSeq = 0;
+  for (const deck of ['DECK_3', 'DECK_2', 'DECK_1'] as const) {
+    const band = deckBounds[deck];
+    const deckCorTiles: Array<{ tx: number; ty: number }> = [];
+    for (let y = band.y1; y <= band.y2; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        if (!isTileWalkable(tiles[y][x])) continue;
+        if (roomGrid[y][x] === 'Corridor' || roomGrid[y][x] === 'Catwalk') {
+          deckCorTiles.push({ tx: x, ty: y });
+        }
+      }
+    }
+    const spacingPx = tileSize * 4.4;
+    const deckFixtures: CorridorLightFixture[] = [];
+    for (const ct of deckCorTiles) {
+      const wx = (ct.tx + 0.5) * tileSize;
+      const wy = (ct.ty + 0.5) * tileSize;
+      if (deckFixtures.some((f) => Math.hypot(f.x - wx, f.y - wy) < spacingPx)) continue;
+      const fix: CorridorLightFixture = {
+        id: `clight_${corrLightSeq++}`,
+        deck,
+        tx: ct.tx,
+        ty: ct.ty,
+        x: wx,
+        y: wy,
+        range: 255,
+      };
+      deckFixtures.push(fix);
+    }
+    // Second coverage sweep so no corridor pocket stays > 205px from a ceiling light
+    for (const ct of deckCorTiles) {
+      const wx = (ct.tx + 0.5) * tileSize;
+      const wy = (ct.ty + 0.5) * tileSize;
+      if (deckFixtures.some((f) => Math.hypot(f.x - wx, f.y - wy) <= 205)) continue;
+      deckFixtures.push({
+        id: `clight_${corrLightSeq++}`,
+        deck,
+        tx: ct.tx,
+        ty: ct.ty,
+        x: wx,
+        y: wy,
+        range: 255,
+      });
+    }
+    corridorLights.push(...deckFixtures);
+  }
+
+  // =========================================================================
+  // --- 8. Room-Scoped Light Switches, Fuse Panels, Hiding Spots & Containers
   // =========================================================================
   const findFreeTilesInRoomId = (rId: number): Array<{ tx: number; ty: number }> => {
     const res: Array<{ tx: number; ty: number }> = [];
@@ -3368,6 +3684,41 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     scored.sort((a, b) => b.score - a.score || a.tie - b.tie);
     return scored[0]?.c ?? null;
   };
+
+  const fuseSockets: FuseSocket[] = [];
+  let fuseSeq = 0;
+  for (const rb of rooms) {
+    if (!fuseRoomIds.has(rb.id)) continue;
+    let free = findFreeTilesInRoomId(rb.id);
+    if (free.length === 0) {
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (
+            roomIdGrid[y][x] === rb.id &&
+            isTileWalkable(tiles[y][x]) &&
+            !doorKeys.has(key(x, y)) &&
+            !stairKeys.has(key(x, y))
+          ) {
+            free.push({ tx: x, ty: y });
+          }
+        }
+      }
+    }
+    const chosen = pickWallAdjacentTile(free) ?? free[0] ?? null;
+    if (!chosen) continue;
+    reserved.add(key(chosen.tx, chosen.ty));
+    fuseSockets.push({
+      id: `fuse_panel_${fuseSeq++}`,
+      deck: rb.deck,
+      roomId: rb.id,
+      room: rb.name,
+      tx: chosen.tx,
+      ty: chosen.ty,
+      x: (chosen.tx + 0.5) * tileSize,
+      y: (chosen.ty + 0.5) * tileSize,
+      hasFuse: false,
+    });
+  }
 
   const noSwitchRooms = new Set<RoomName>([
     'Helideck',
@@ -3471,7 +3822,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     if (r === 'Bridge' || r === 'Chart Room' || r === 'Radio Room' || r === "Captain's Quarters") {
       return 'DESK';
     }
-    if (r === 'Workshop' || r === 'Engine Room' || r === 'Boiler Room' || r === 'Pump Room' || r === 'Electrical Room' || r === 'Maintenance Bay') {
+    if (r === 'Workshop' || r === 'Engine Room' || r === 'Boiler Room' || r === 'Pump Room' || r === 'Electrical Room' || r === 'Maintenance Bay' || r === 'Fuse Control') {
       return 'TOOLBOX';
     }
     if (r === 'Container Bay' || r === 'Cargo Hold' || r === 'Storage Room' || r === 'Forecastle' || r === 'Weather Deck' || r === 'Submarine Bay') {
@@ -3483,8 +3834,8 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     if (rb.name === 'Helideck' || rb.name === 'Lifeboat Davit') return 0;
     if (rb.name === 'Container Bay') return 6;
     const area = (rb.x2 - rb.x1 + 1) * (rb.y2 - rb.y1 + 1);
-    if (area >= 48) return 3;
-    return area >= 22 ? 2 : 1;
+    const base = area >= 48 ? 3 : area >= 22 ? 2 : 1;
+    return lockedOnlySet.has(rb.id) ? Math.max(2, base) : base;
   };
 
   const containerCoords: Array<{
@@ -3500,7 +3851,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     const cType = containerTypeForRoom(rb.name);
     for (let i = 0; i < count; i++) {
       const free = findFreeTilesInRoomId(rb.id);
-      const chosen = pickWallAdjacentTile(free);
+      const chosen = pickWallAdjacentTile(free) ?? (lockedOnlySet.has(rb.id) ? (free[0] ?? null) : null);
       if (!chosen) break;
       reserved.add(key(chosen.tx, chosen.ty));
       containerCoords.push({
@@ -3771,7 +4122,11 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     { tx: 14, ty: 19 }, // Deck 3 Helideck edge
     { tx: 111, ty: 19 }, // Deck 3 Forecastle
     { tx: stair32AftBot.tx, ty: stair32AftBot.ty }, // Deck 2 Aft stair plaza
-  ].filter((c) => isTileWalkable(tiles[c.ty]?.[c.tx] ?? 'VOID'));
+  ].filter(
+    (c) =>
+      isTileWalkable(tiles[c.ty]?.[c.tx] ?? 'VOID') &&
+      !lockedOnlySet.has(roomIdGrid[c.ty]?.[c.tx] ?? 0)
+  );
   const pStart = playerSpawnChoices[Math.floor(rng() * playerSpawnChoices.length)] ?? { tx: 14, ty: 19 };
 
   const playerDeck = deckGrid[pStart.ty][pStart.tx];
@@ -3783,25 +4138,35 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   ].filter(
     (c) =>
       isTileWalkable(tiles[c.ty]?.[c.tx] ?? 'VOID') &&
+      !lockedOnlySet.has(roomIdGrid[c.ty]?.[c.tx] ?? 0) &&
       (deckGrid[c.ty][c.tx] !== playerDeck ||
         Math.abs(c.tx - pStart.tx) + Math.abs(c.ty - pStart.ty) >= 34)
   );
-  const bStart = bruteChoices[Math.floor(rng() * bruteChoices.length)] ?? { tx: 19, ty: 95 };
+  const bStart = bruteChoices[Math.floor(rng() * bruteChoices.length)] ?? { tx: stair21MidBot.tx, ty: stair21MidBot.ty };
 
   // =========================================================================
   // --- 10. Final Reachability Filter & Escape Item Assignment ---
   // =========================================================================
-  const visited = runReachabilityBfs(pStart.tx, pStart.ty, false);
+  const visitedUnlocked = runReachabilityBfs(pStart.tx, pStart.ty, false);
+  const visitedAll = runReachabilityBfs(pStart.tx, pStart.ty, true);
   const stairByTile = new Map<number, Stairwell>();
   for (const s of stairwells) stairByTile.set(key(s.tx, s.ty), s);
   const finalDoorByTile = new Map<number, Door>();
   for (const d of doors) finalDoorByTile.set(key(d.tx, d.ty), d);
 
-  const reachableContainerCoords = containerCoords.filter((c) => visited[key(c.tx, c.ty)] === 1);
-  const reachableSpots = hidingSpots.filter((s) => visited[key(s.tx, s.ty)] === 1);
-  const reachableSwitches = lightSwitches.filter((sw) => visited[key(sw.tx, sw.ty)] === 1);
+  const reachableContainerCoords = containerCoords.filter((c) => visitedAll[key(c.tx, c.ty)] === 1);
+  const reachableSpots = hidingSpots.filter((s) => visitedAll[key(s.tx, s.ty)] === 1);
+  const reachableSwitches = lightSwitches.filter((sw) => visitedAll[key(sw.tx, sw.ty)] === 1);
 
-  const guaranteedItems: ItemId[] = [
+  const unlockedCriticalItems: ItemId[] = [
+    'MASTER_FUSE',
+    'BOLT_CUTTERS',
+    'BOLT_CUTTERS',
+    'BOLT_CUTTERS',
+    'BACKPACK',
+  ];
+
+  const escapePartItems: ItemId[] = [
     // Deck 2 Lifeboat parts
     'WINCH_CRANK',
     'MARINE_BATTERY',
@@ -3814,11 +4179,9 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     'SUB_BATTERY',
     'BALLAST_PUMP',
     'DIVE_KEY',
-    // Tools & upgrades scaled for 4.5x map
-    'BACKPACK',
-    'BOLT_CUTTERS',
-    'BOLT_CUTTERS',
-    'BOLT_CUTTERS',
+  ];
+
+  const utilityItems: ItemId[] = [
     'FIRE_EXTINGUISHER',
     'FIRE_EXTINGUISHER',
     'FIRE_EXTINGUISHER',
@@ -3838,14 +4201,63 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     'BATTERY_PACK',
   ];
 
-  const indices = reachableContainerCoords.map((_, i) => i);
-  for (let i = indices.length - 1; i > 0; i--) {
+  const shuffleIdx = (arr: number[]) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+  };
+  for (let i = escapePartItems.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
-    [indices[i], indices[j]] = [indices[j], indices[i]];
+    [escapePartItems[i], escapePartItems[j]] = [escapePartItems[j], escapePartItems[i]];
   }
+
+  const unlockedIndices: number[] = [];
+  const lockedVaultIndices: number[] = [];
+  for (let i = 0; i < reachableContainerCoords.length; i++) {
+    const c = reachableContainerCoords[i];
+    if (visitedUnlocked[key(c.tx, c.ty)] === 1 && !lockedOnlySet.has(c.roomId)) {
+      unlockedIndices.push(i);
+    } else {
+      lockedVaultIndices.push(i);
+    }
+  }
+  shuffleIdx(unlockedIndices);
+  shuffleIdx(lockedVaultIndices);
+
   const assignedItems: Array<ItemId | null> = Array(reachableContainerCoords.length).fill(null);
-  for (let i = 0; i < guaranteedItems.length && i < indices.length; i++) {
-    assignedItems[indices[i]] = guaranteedItems[i];
+
+  // 1. Place Master Fuse, Bolt Cutters & Backpack strictly in unlocked reachable containers
+  let uCursor = 0;
+  for (const crit of unlockedCriticalItems) {
+    if (uCursor < unlockedIndices.length) {
+      assignedItems[unlockedIndices[uCursor++]] = crit;
+    }
+  }
+
+  // 2. Strongly bias escape parts into Locked-Only Vault Rooms (all loot allowed, heavy escape weighting)
+  let lCursor = 0;
+  let escapeCursor = 0;
+  const maxEscapeInVaults =
+    lockedVaultIndices.length > 0
+      ? Math.min(escapePartItems.length, Math.max(1, Math.round(lockedVaultIndices.length * 0.78)), 7)
+      : 0;
+  while (lCursor < lockedVaultIndices.length && escapeCursor < maxEscapeInVaults) {
+    assignedItems[lockedVaultIndices[lCursor++]] = escapePartItems[escapeCursor++];
+  }
+
+  // 3. Distribute remaining escape parts + utility tools across leftover vault + unlocked containers
+  const remainingSlots = [
+    ...lockedVaultIndices.slice(lCursor),
+    ...unlockedIndices.slice(uCursor),
+  ];
+  shuffleIdx(remainingSlots);
+  const remainingItems: ItemId[] = [
+    ...escapePartItems.slice(escapeCursor),
+    ...utilityItems,
+  ];
+  for (let i = 0; i < remainingItems.length && i < remainingSlots.length; i++) {
+    assignedItems[remainingSlots[i]] = remainingItems[i];
   }
 
   const reachableContainers: Container[] = reachableContainerCoords.map((bp, idx) => ({
@@ -4037,6 +4449,9 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     steamPipes,
     paperMaps,
     lightSwitches: reachableSwitches,
+    fuseSockets,
+    corridorLights,
+    lockedOnlyRoomIds,
     bloodStreaks,
     playerSpawn: { x: (pStart.tx + 0.5) * tileSize, y: (pStart.ty + 0.5) * tileSize },
     bruteSpawn: { x: (bStart.tx + 0.5) * tileSize, y: (bStart.ty + 0.5) * tileSize },

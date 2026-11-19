@@ -42,6 +42,7 @@ interface DoorPeekBeamData {
   ox: number;
   oy: number;
   range: number;
+  isLitSide: boolean;
   poly: Array<{ x: number; y: number }>;
 }
 
@@ -123,6 +124,7 @@ export class GameRenderer {
     this.drawShipProps(ctx, engine, width, height, zoom);
     this.drawSteamPipes(ctx, engine, width, height, zoom, timeSec);
     this.drawPaperMaps(ctx, engine, width, height, zoom, timeSec);
+    this.drawFuseSockets(ctx, engine, width, height, zoom, timeSec);
     this.drawContainers(ctx, engine, width, height, zoom);
     this.drawHidingSpots(ctx, engine, width, height, zoom);
     this.drawLightSwitches(ctx, engine, timeSec, width, height, zoom);
@@ -1378,6 +1380,66 @@ export class GameRenderer {
     }
   }
 
+  private drawFuseSockets(
+    ctx: CanvasRenderingContext2D,
+    engine: MonstrumGameEngine,
+    width: number,
+    height: number,
+    zoom: number,
+    timeSec: number,
+    camX = engine.cameraX,
+    camY = engine.cameraY
+  ): void {
+    const halfW = width / (2 * zoom) + 90;
+    const halfH = height / (2 * zoom) + 90;
+
+    for (const fs of engine.map.fuseSockets) {
+      if (Math.abs(fs.x - camX) > halfW || Math.abs(fs.y - camY) > halfH) continue;
+
+      ctx.save();
+      ctx.translate(fs.x, fs.y);
+
+      // Floor drop-shadow & heavy electrical junction cabinet
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+      traceRoundedRect(ctx, -12, -12, 26, 26, 3);
+      ctx.fill();
+
+      ctx.fillStyle = fs.hasFuse ? '#172822' : '#1e293b';
+      traceRoundedRect(ctx, -14, -14, 28, 28, 3);
+      ctx.fill();
+      ctx.strokeStyle = fs.hasFuse ? '#34d399' : '#f59e0b';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+
+      // Twin copper busbar clamps & central Master Fuse cradle
+      ctx.fillStyle = '#090d14';
+      traceRoundedRect(ctx, -9, -7, 18, 14, 2);
+      ctx.fill();
+      ctx.fillStyle = '#d97706';
+      ctx.fillRect(-10, -4, 3, 8);
+      ctx.fillRect(7, -4, 3, 8);
+
+      if (fs.hasFuse) {
+        ctx.fillStyle = '#f59e0b';
+        traceRoundedRect(ctx, -6, -3.5, 12, 7, 1.5);
+        ctx.fill();
+        const arc = 0.72 + 0.28 * Math.sin(timeSec * 8);
+        ctx.fillStyle = `rgba(52, 211, 153, ${arc})`;
+        ctx.beginPath();
+        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const blink = Math.sin(timeSec * 4.5) > 0;
+        ctx.fillStyle = blink ? '#ef4444' : '#7f1d1d';
+        ctx.beginPath();
+        ctx.arc(0, -10, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+  }
+
   private drawStairwells(
     ctx: CanvasRenderingContext2D,
     engine: MonstrumGameEngine,
@@ -1813,6 +1875,67 @@ export class GameRenderer {
     ctx.arc(0, 0, 2, 0, Math.PI * 2);
     ctx.fill();
 
+    // 6 Heavy Iron Tie-Down Chains securing fuselage & skids to helideck bollards
+    const chainSpecs: Array<{ fx: number; fy: number; bx: number; by: number }> = [
+      { fx: 20, fy: -12, bx: 44, by: -36 },
+      { fx: 20, fy: 12, bx: 44, by: 36 },
+      { fx: 2, fy: -15, bx: 4, by: -44 },
+      { fx: 2, fy: 15, bx: 4, by: 44 },
+      { fx: -18, fy: -11, bx: -42, by: -36 },
+      { fx: -18, fy: 11, bx: -42, by: 36 },
+    ];
+    for (let i = 0; i < chainSpecs.length; i++) {
+      const cs = chainSpecs[i];
+      const intact = i < esc.heliChainsRemaining;
+
+      // Deck tie-down bollard
+      ctx.fillStyle = intact ? '#475569' : '#1e293b';
+      ctx.beginPath();
+      ctx.arc(cs.bx, cs.by, 3.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = intact ? '#fbbf24' : '#334155';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+
+      if (intact) {
+        // Dark chain shadow + segmented heavy steel chain links + padlock shackle
+        ctx.strokeStyle = '#090d14';
+        ctx.lineWidth = 4.2;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cs.fx, cs.fy);
+        ctx.lineTo(cs.bx, cs.by);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(cs.fx, cs.fy);
+        ctx.lineTo(cs.bx, cs.by);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const mx = (cs.fx + cs.bx) * 0.5;
+        const my = (cs.fy + cs.by) * 0.5;
+        ctx.fillStyle = '#f59e0b';
+        ctx.beginPath();
+        ctx.arc(mx, my, 2.7, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        // Snapped stump link on bollard
+        const dx = cs.fx - cs.bx;
+        const dy = cs.fy - cs.by;
+        const d = Math.hypot(dx, dy) || 1;
+        ctx.strokeStyle = '#475569';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cs.bx, cs.by);
+        ctx.lineTo(cs.bx + (dx / d) * 7, cs.by + (dy / d) * 7);
+        ctx.stroke();
+      }
+    }
+
     ctx.restore();
     ctx.restore();
 
@@ -2203,13 +2326,15 @@ export class GameRenderer {
       ctx.strokeStyle =
         wp.item === 'BACKPACK'
           ? 'rgba(249, 115, 22, 0.72)'
-          : wp.item === 'AVIATION_FUEL' || wp.item === 'IGNITION_KEY' || wp.item === 'ROTOR_FUSE'
-            ? 'rgba(251, 191, 36, 0.65)'
-            : wp.item === 'WINCH_CRANK' || wp.item === 'MARINE_BATTERY' || wp.item === 'HULL_PATCH'
-              ? 'rgba(56, 189, 248, 0.65)'
-              : wp.item === 'SUB_BATTERY' || wp.item === 'BALLAST_PUMP' || wp.item === 'DIVE_KEY'
-                ? 'rgba(45, 212, 191, 0.68)'
-                : 'rgba(163, 230, 53, 0.55)';
+          : wp.item === 'MASTER_FUSE'
+            ? 'rgba(251, 191, 36, 0.85)'
+            : wp.item === 'AVIATION_FUEL' || wp.item === 'IGNITION_KEY' || wp.item === 'ROTOR_FUSE'
+              ? 'rgba(251, 191, 36, 0.65)'
+              : wp.item === 'WINCH_CRANK' || wp.item === 'MARINE_BATTERY' || wp.item === 'HULL_PATCH'
+                ? 'rgba(56, 189, 248, 0.65)'
+                : wp.item === 'SUB_BATTERY' || wp.item === 'BALLAST_PUMP' || wp.item === 'DIVE_KEY'
+                  ? 'rgba(45, 212, 191, 0.68)'
+                  : 'rgba(163, 230, 53, 0.55)';
       ctx.lineWidth = 1.4;
       ctx.beginPath();
       ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2);
@@ -2220,7 +2345,16 @@ export class GameRenderer {
       ctx.ellipse(1, 2, 8, 6, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      if (wp.item === 'BACKPACK') {
+      if (wp.item === 'MASTER_FUSE') {
+        ctx.fillStyle = '#1e293b';
+        traceRoundedRect(ctx, -8, -4.5, 16, 9, 2);
+        ctx.fill();
+        ctx.fillStyle = '#d97706';
+        ctx.fillRect(-8, -4, 3.5, 8);
+        ctx.fillRect(4.5, -4, 3.5, 8);
+        ctx.fillStyle = '#fde047';
+        ctx.fillRect(-3.5, -2.5, 7, 5);
+      } else if (wp.item === 'BACKPACK') {
         // Rugged Expedition Rucksack
         ctx.fillStyle = '#c2410c';
         traceRoundedRect(ctx, -8, -9, 16, 18, 4);
@@ -2473,25 +2607,33 @@ export class GameRenderer {
     const halfH = height / (2 * zoom) + 70;
     for (const sw of engine.map.lightSwitches) {
       if (Math.abs(sw.x - camX) > halfW || Math.abs(sw.y - camY) > halfH) continue;
-      const flk = sw.isOn
-        ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
-        : { intensity: 1, sputterAmount: 0 };
+      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      const deckPowered = engine.poweredDecks[swDeck];
+      const flk = deckPowered
+        ? { intensity: 1, sputterAmount: 0 }
+        : sw.isOn
+          ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
+          : { intensity: 1, sputterAmount: 0 };
       ctx.save();
       ctx.translate(sw.x, sw.y);
       ctx.fillStyle = '#1e293b';
       traceRoundedRect(ctx, -7, -7, 14, 14, 2.5);
       ctx.fill();
-      ctx.strokeStyle = sw.isOn
-        ? `rgba(52, 211, 153, ${(0.45 + 0.55 * flk.intensity).toFixed(2)})`
-        : '#64748b';
+      ctx.strokeStyle = deckPowered
+        ? '#fbbf24'
+        : sw.isOn
+          ? `rgba(52, 211, 153, ${(0.45 + 0.55 * flk.intensity).toFixed(2)})`
+          : '#64748b';
       ctx.lineWidth = 1.4;
       ctx.stroke();
 
       // Toggle lever & status LED
-      ctx.fillStyle = sw.isOn
-        ? `rgba(52, 211, 153, ${(0.4 + 0.6 * flk.intensity).toFixed(2)})`
-        : '#f59e0b';
-      ctx.fillRect(-2.5, sw.isOn ? -4 : 1, 5, 3);
+      ctx.fillStyle = deckPowered
+        ? '#fbbf24'
+        : sw.isOn
+          ? `rgba(52, 211, 153, ${(0.4 + 0.6 * flk.intensity).toFixed(2)})`
+          : '#f59e0b';
+      ctx.fillRect(-2.5, sw.isOn || deckPowered ? -4 : 1, 5, 3);
       ctx.restore();
     }
   }
@@ -3089,10 +3231,23 @@ export class GameRenderer {
   ): RayLightPoly[] {
     const polys: RayLightPoly[] = [];
     const b = engine.brute;
+    const activeDeck = engine.getCurrentDeck();
+    const peekStair = engine.player.peekingStairId
+      ? engine.map.stairwells.find((s) => s.id === engine.player.peekingStairId)
+      : undefined;
+    const peekDest = peekStair
+      ? engine.map.stairwells.find((s) => s.id === peekStair.targetStairId)
+      : undefined;
+
     for (const sw of engine.map.lightSwitches) {
       if (!sw.isOn) continue;
+      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      if (swDeck !== activeDeck && (!peekDest || swDeck !== peekDest.deck)) continue;
+      const deckPowered = engine.poweredDecks[swDeck];
       const bruteDist = Math.hypot(b.x - sw.x, b.y - sw.y);
-      const { intensity, sputterAmount } = getRoomLightFlicker(sw.id, timeSec, bruteDist);
+      const { intensity, sputterAmount } = deckPowered
+        ? { intensity: 1, sputterAmount: 0 }
+        : getRoomLightFlicker(sw.id, timeSec, bruteDist);
       const fixtures = this.getRoomLightFixtures(engine, sw);
       for (const fx of fixtures) {
         const poly = computeVisibilityPolygon(
@@ -3108,6 +3263,39 @@ export class GameRenderer {
         polys.push({ x: fx.x, y: fx.y, range: fx.range, intensity, sputterAmount, poly });
       }
     }
+
+    // Master-Fuse Powered Hallway/Corridor Ceiling Fixtures
+    for (const cl of engine.map.corridorLights) {
+      if (!engine.poweredDecks[cl.deck]) continue;
+      const onPlayerView =
+        cl.deck === activeDeck &&
+        Math.hypot(cl.x - engine.cameraX, cl.y - engine.cameraY) <= 1050;
+      const onPeekView =
+        peekDest &&
+        cl.deck === peekDest.deck &&
+        Math.hypot(cl.x - peekDest.x, cl.y - peekDest.y) <= 720;
+      if (!onPlayerView && !onPeekView) continue;
+
+      const poly = computeVisibilityPolygon(
+        engine.map,
+        engine.doorsByTile,
+        cl.x,
+        cl.y,
+        0,
+        Math.PI * 2,
+        cl.range,
+        64
+      );
+      polys.push({
+        x: cl.x,
+        y: cl.y,
+        range: cl.range,
+        intensity: 0.94,
+        sputterAmount: 0,
+        poly,
+      });
+    }
+
     return polys;
   }
 
@@ -3177,11 +3365,14 @@ export class GameRenderer {
 
   private computeDoorPeekBeam(engine: MonstrumGameEngine): DoorPeekBeamData | null {
     const p = engine.player;
-    if (!p.peekingDoorId || p.hidingSpotId !== null || p.battery <= 0) return null;
+    if (!p.peekingDoorId || p.hidingSpotId !== null) return null;
     const door = engine.map.doors.find(
       (d) => d.id === p.peekingDoorId && !d.isOpen && !d.isBroken
     );
     if (!door) return null;
+
+    const isLitSide = engine.isDoorFarSideLit(door, p.x, p.y);
+    if (!isLitSide && p.battery <= 0) return null;
 
     const ts = engine.map.tileSize;
     const dcx = (door.tx + 0.5) * ts;
@@ -3191,8 +3382,8 @@ export class GameRenderer {
       door.orientation === 'H' ? Math.sign(dcy - p.y) || 1 : Math.sign(dcx - p.x) || 1;
     const ox = door.orientation === 'H' ? dcx : dcx + crossSign * 10;
     const oy = door.orientation === 'H' ? dcy + crossSign * 10 : dcy;
-    const coneWidth = (40 * Math.PI) / 180;
-    const range = 440;
+    const coneWidth = ((isLitSide ? 54 : 40) * Math.PI) / 180;
+    const range = isLitSide ? 420 : 440;
     const poly = computeVisibilityPolygon(
       engine.map,
       engine.doorsByTile,
@@ -3204,7 +3395,7 @@ export class GameRenderer {
       44,
       door.ty * engine.map.width + door.tx
     );
-    return { ox, oy, range, poly: [{ x: ox, y: oy }, ...poly] };
+    return { ox, oy, range, isLitSide, poly: [{ x: ox, y: oy }, ...poly] };
   }
 
   private drawWarmLightingTints(
@@ -3282,8 +3473,8 @@ export class GameRenderer {
       ctx.fill();
     }
 
-    // Focused flashlight beam projecting past closed door during Q keyhole peek
-    if (doorPeekData && doorPeekData.poly.length >= 3) {
+    // Focused flashlight beam projecting past closed door during Q keyhole peek (dark side only)
+    if (doorPeekData && !doorPeekData.isLitSide && doorPeekData.poly.length >= 3) {
       const g = ctx.createRadialGradient(
         doorPeekData.ox,
         doorPeekData.oy,
@@ -3523,12 +3714,13 @@ export class GameRenderer {
       lctx.fill();
     }
 
-    // 3. Closed-Door Keyhole/Crack Peek Cone
+    // 3. Closed-Door Keyhole/Crack Peek Cone (full beam on dark side; subtle threshold crack fill on lit side)
     if (doorPeekData) {
-      const { ox, oy, range, poly } = doorPeekData;
-      const peekGrad = lctx.createRadialGradient(ox, oy, 10, ox, oy, range);
-      peekGrad.addColorStop(0, 'rgba(0,0,0,0.95)');
-      peekGrad.addColorStop(0.7, 'rgba(0,0,0,0.74)');
+      const { ox, oy, range, isLitSide, poly } = doorPeekData;
+      const cutRange = isLitSide ? 115 : range;
+      const peekGrad = lctx.createRadialGradient(ox, oy, 10, ox, oy, cutRange);
+      peekGrad.addColorStop(0, isLitSide ? 'rgba(0,0,0,0.42)' : 'rgba(0,0,0,0.95)');
+      peekGrad.addColorStop(0.7, isLitSide ? 'rgba(0,0,0,0.16)' : 'rgba(0,0,0,0.74)');
       peekGrad.addColorStop(1, 'rgba(0,0,0,0)');
       lctx.fillStyle = peekGrad;
       lctx.beginPath();
@@ -3710,13 +3902,19 @@ export class GameRenderer {
         continue;
       }
       if (!hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, sw.x, sw.y)) continue;
-      const flk = sw.isOn
-        ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
-        : { intensity: 1, sputterAmount: 0 };
+      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      const deckPowered = engine.poweredDecks[swDeck];
+      const flk = deckPowered
+        ? { intensity: 1, sputterAmount: 0 }
+        : sw.isOn
+          ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
+          : { intensity: 1, sputterAmount: 0 };
       ctx.save();
-      ctx.fillStyle = sw.isOn
-        ? `rgba(52, 211, 153, ${(0.4 + 0.55 * flk.intensity).toFixed(2)})`
-        : 'rgba(245, 158, 11, 0.72)';
+      ctx.fillStyle = deckPowered
+        ? 'rgba(251, 191, 36, 0.92)'
+        : sw.isOn
+          ? `rgba(52, 211, 153, ${(0.4 + 0.55 * flk.intensity).toFixed(2)})`
+          : 'rgba(245, 158, 11, 0.72)';
       ctx.beginPath();
       ctx.arc(sw.x, sw.y, 2.1, 0, Math.PI * 2);
       ctx.fill();
@@ -3910,6 +4108,9 @@ export class GameRenderer {
     } else if (nearest.kind === 'PAPER_MAP') {
       tx = nearest.stand.x;
       ty = nearest.stand.y;
+    } else if (nearest.kind === 'FUSE_SOCKET') {
+      tx = nearest.fuseSocket.x;
+      ty = nearest.fuseSocket.y;
     } else if (nearest.kind === 'LIGHT_SWITCH') {
       tx = nearest.lightSwitch.x;
       ty = nearest.lightSwitch.y;
@@ -4137,6 +4338,7 @@ export class GameRenderer {
       this.drawShipProps(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawSteamPipes(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
       this.drawPaperMaps(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
+      this.drawFuseSockets(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
       this.drawContainers(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawHidingSpots(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
       this.drawLightSwitches(ctx, engine, timeSec, worldSpan, worldSpan, 1, dest.x, dest.y);
