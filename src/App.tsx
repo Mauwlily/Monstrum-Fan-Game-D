@@ -116,8 +116,11 @@ declare global {
       } | null;
       getTelemetry: () => DebugTelemetry | null;
       getStatus: () => GameStatus;
+      getRendererBackend: () => string;
       probePixels: () => ProbeReading[];
+      probePixelsAsync: () => Promise<ProbeReading[]>;
       captureCanvasDataUrl: () => string | null;
+      captureCanvasDataUrlAsync: () => Promise<string | null>;
     };
   }
 }
@@ -141,9 +144,14 @@ export default function App() {
   const [lastCaptureUrl, setLastCaptureUrl] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const activeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<MonstrumGameEngine | null>(null);
   const rendererRef = useRef<GameRenderer | null>(null);
   const audioRef = useRef<HorrorAudioEngine | null>(null);
+  const cachedProbesRef = useRef<ProbeReading[]>([]);
+  const probePromiseRef = useRef<Promise<ProbeReading[]> | null>(null);
+  const lastProbeTimeRef = useRef(0);
+  const lastTelemetryTimeRef = useRef(0);
   const statusRef = useRef<GameStatus>('TITLE_MENU');
   const debugOpenRef = useRef(false);
   const devModeUnlockedRef = useRef(devModeUnlocked);
@@ -255,45 +263,10 @@ export default function App() {
     [bruteTuning, customTuningActive, difficulty, getAudio, muted, seedInput]
   );
 
-  const probeBehindWallPixels = useCallback((): ProbeReading[] => {
-    const canvas = canvasRef.current;
+  const buildDebugTelemetry = useCallback((probes: ProbeReading[]): DebugTelemetry | null => {
     const engine = engineRef.current;
-    if (!canvas || !engine || engine.debugProbePoints.length === 0) return [];
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return [];
-
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    const zoom = engine.getEffectiveZoom(w, h);
-    const results: ProbeReading[] = [];
-
-    for (const pt of engine.debugProbePoints) {
-      const sx = (pt.x - engine.cameraX) * zoom + w / 2;
-      const sy = (pt.y - engine.cameraY) * zoom + h / 2;
-      const px = Math.round(sx * dpr);
-      const py = Math.round(sy * dpr);
-      if (px < 0 || py < 0 || px >= canvas.width || py >= canvas.height) continue;
-      const data = ctx.getImageData(px, py, 1, 1).data;
-      results.push({
-        label: pt.label,
-        r: data[0],
-        g: data[1],
-        b: data[2],
-        isPureBlack: data[0] === 0 && data[1] === 0 && data[2] === 0,
-      });
-    }
-    return results;
-  }, []);
-
-  const syncDebugTelemetry = useCallback(() => {
-    const engine = engineRef.current;
-    if (!engine) {
-      setDebugTelemetry(null);
-      return null;
-    }
-    const probes = probeBehindWallPixels();
-    const snap: DebugTelemetry = {
+    if (!engine) return null;
+    return {
       scenario: engine.debugScenario,
       playerX: engine.player.x,
       playerY: engine.player.y,
@@ -311,25 +284,53 @@ export default function App() {
       bruteDistance: engine.getEffectiveBruteDistance(),
       probes,
     };
-    setDebugTelemetry(snap);
-    return snap;
-  }, [probeBehindWallPixels]);
+  }, []);
+
+  const syncDebugTelemetry = useCallback(
+    (probesOverride?: ProbeReading[]) => {
+      const snap = buildDebugTelemetry(probesOverride ?? cachedProbesRef.current);
+      setDebugTelemetry(snap);
+      return snap;
+    },
+    [buildDebugTelemetry]
+  );
 
   const renderImmediateFrame = useCallback(() => {
-    const canvas = canvasRef.current;
     const engine = engineRef.current;
     const renderer = rendererRef.current;
-    if (!canvas || !engine || !renderer) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    renderer.render(ctx, engine, w, h, performance.now() / 1000);
-    ctx.restore();
+    if (!engine || !renderer || !renderer.isInitialized()) return;
+    renderer.render(engine, window.innerWidth, window.innerHeight, performance.now() / 1000);
   }, []);
+
+  const refreshProbesAsync = useCallback(async (): Promise<ProbeReading[]> => {
+    const engine = engineRef.current;
+    const renderer = rendererRef.current;
+    if (!engine || !renderer || !renderer.isInitialized() || engine.debugProbePoints.length === 0) {
+      cachedProbesRef.current = [];
+      return [];
+    }
+    if (probePromiseRef.current) {
+      return probePromiseRef.current;
+    }
+    lastProbeTimeRef.current = performance.now();
+    const pending = (async () => {
+      try {
+        const probes = await renderer.probePixelsAsync(engine);
+        cachedProbesRef.current = probes;
+        if (debugOpenRef.current) {
+          setDebugTelemetry(buildDebugTelemetry(probes));
+        }
+        return probes;
+      } catch (err) {
+        console.warn('GPU pixel probe warning:', err);
+        return cachedProbesRef.current;
+      } finally {
+        probePromiseRef.current = null;
+      }
+    })();
+    probePromiseRef.current = pending;
+    return pending;
+  }, [buildDebugTelemetry]);
 
   const handleLoadScenario = useCallback(
     (id: DebugScenarioId) => {
@@ -343,10 +344,12 @@ export default function App() {
         setStatus('PLAYING');
       }
       engine.applyDebugScenario(id);
+      cachedProbesRef.current = [];
       renderImmediateFrame();
-      syncDebugTelemetry();
+      syncDebugTelemetry([]);
+      void refreshProbesAsync();
     },
-    [renderImmediateFrame, startNewRun, syncDebugTelemetry]
+    [refreshProbesAsync, renderImmediateFrame, startNewRun, syncDebugTelemetry]
   );
 
   const handleUpdateDebugConfig = useCallback(
@@ -357,8 +360,9 @@ export default function App() {
       engine.update(0.016, window.innerWidth, window.innerHeight);
       renderImmediateFrame();
       syncDebugTelemetry();
+      void refreshProbesAsync();
     },
-    [renderImmediateFrame, syncDebugTelemetry]
+    [refreshProbesAsync, renderImmediateFrame, syncDebugTelemetry]
   );
 
   const handleStepDebugFrame = useCallback(() => {
@@ -370,87 +374,133 @@ export default function App() {
     engine.debugConfig.freezeAi = prevFreeze;
     renderImmediateFrame();
     syncDebugTelemetry();
-  }, [renderImmediateFrame, syncDebugTelemetry]);
+    void refreshProbesAsync();
+  }, [refreshProbesAsync, renderImmediateFrame, syncDebugTelemetry]);
 
-  const handleCaptureScreenshot = useCallback(() => {
+  const handleCaptureScreenshot = useCallback(async () => {
     renderImmediateFrame();
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const url = canvas.toDataURL('image/png');
-    setLastCaptureUrl(url);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `monstrum_debug_${engineRef.current?.debugScenario ?? 'live'}_${Date.now()}.png`;
-    a.click();
-    syncDebugTelemetry();
-    return url;
+    const renderer = rendererRef.current;
+    if (!renderer || !renderer.isInitialized()) return null;
+    try {
+      const url = await renderer.capturePngDataUrlAsync();
+      if (!url) return null;
+      setLastCaptureUrl(url);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `monstrum_debug_${engineRef.current?.debugScenario ?? 'live'}_${Date.now()}.png`;
+      a.click();
+      syncDebugTelemetry();
+      return url;
+    } catch (err) {
+      console.warn('Screenshot capture warning:', err);
+      return null;
+    }
   }, [renderImmediateFrame, syncDebugTelemetry]);
 
   const returnToTitle = useCallback(() => {
-    try 
-    {
+    try {
       audioRef.current?.dispose();
-    } catch (err) 
-    {
-     console.warn('Audio dispose warning:', err) 
+    } catch (err) {
+      console.warn('Audio dispose warning:', err);
     }
     audioRef.current = null;
 
+    try {
+      rendererRef.current?.dispose();
+    } catch (err) {
+      console.warn('Renderer dispose warning:', err);
+    }
+    rendererRef.current = null;
+    activeCanvasRef.current = null;
+
     engineRef.current = null;
+    cachedProbesRef.current = [];
     setHud(null);
     setDebugOpen(false);
+    setDebugTelemetry(null);
     setStatus('TITLE_MENU');
   }, []);
 
-  // Main animation loop
+  // Ensure initial telemetry populates immediately whenever DebugPanel is toggled open
+  useEffect(() => {
+    if (debugOpen && status !== 'TITLE_MENU') {
+      syncDebugTelemetry();
+      void refreshProbesAsync();
+    }
+  }, [debugOpen, refreshProbesAsync, status, syncDebugTelemetry]);
+
+  // Main Three.js WebGPU / WebGL2 animation loop
   useEffect(() => {
     if (status === 'TITLE_MENU') return;
 
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    let cancelled = false;
     let rafId = 0;
     let lastTime = performance.now();
 
-    const resizeCanvas = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
-        canvas.width = Math.floor(w * dpr);
-        canvas.height = Math.floor(h * dpr);
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
-      }
+    if (!rendererRef.current || activeCanvasRef.current !== canvas) {
+      rendererRef.current?.dispose();
+      rendererRef.current = new GameRenderer();
+      activeCanvasRef.current = canvas;
+    }
+    const activeRenderer = rendererRef.current;
+
+    if (!activeRenderer.isInitialized()) {
+      void activeRenderer
+        .init(canvas)
+        .then(() => {
+          if (cancelled || activeRenderer !== rendererRef.current) return;
+          const eng = engineRef.current;
+          if (eng) {
+            activeRenderer.render(eng, window.innerWidth, window.innerHeight, performance.now() / 1000);
+            if (debugOpenRef.current) {
+              syncDebugTelemetry();
+              void refreshProbesAsync();
+            }
+          }
+        })
+        .catch((err) => {
+          console.error('Failed to initialize Three.js WebGPU/WebGL2 renderer:', err);
+        });
+    }
+
+    const syncCanvasCssSize = () => {
+      const target = canvasRef.current;
+      if (!target) return;
+      target.style.width = `${window.innerWidth}px`;
+      target.style.height = `${window.innerHeight}px`;
     };
 
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
+    syncCanvasCssSize();
+    window.addEventListener('resize', syncCanvasCssSize);
 
     const frame = (now: number) => {
       const dt = (now - lastTime) / 1000;
       lastTime = now;
 
-      const canvas = canvasRef.current;
       const engine = engineRef.current;
       const renderer = rendererRef.current;
 
-      if (canvas && engine && renderer) {
+      if (engine && renderer) {
         const w = window.innerWidth;
         const h = window.innerHeight;
         if (statusRef.current === 'PLAYING') {
           engine.update(dt, w, h);
         }
 
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
-          ctx.save();
-          ctx.scale(dpr, dpr);
-          renderer.render(ctx, engine, w, h, now / 1000);
-          ctx.restore();
-        }
-        if (debugOpenRef.current) {
-          syncDebugTelemetry();
+        if (renderer.isInitialized()) {
+          renderer.render(engine, w, h, now / 1000);
+          if (debugOpenRef.current) {
+            if (now - lastTelemetryTimeRef.current >= 100) {
+              lastTelemetryTimeRef.current = now;
+              syncDebugTelemetry();
+            }
+            if (now - lastProbeTimeRef.current >= 500) {
+              void refreshProbesAsync();
+            }
+          }
         }
       }
 
@@ -460,10 +510,11 @@ export default function App() {
     rafId = requestAnimationFrame(frame);
 
     return () => {
+      cancelled = true;
       cancelAnimationFrame(rafId);
-      window.removeEventListener('resize', resizeCanvas);
+      window.removeEventListener('resize', syncCanvasCssSize);
     };
-  }, [status, syncDebugTelemetry]);
+  }, [refreshProbesAsync, status, syncDebugTelemetry]);
 
   // Auto-boot into deterministic debug mode when ?debug=1 is present
   useEffect(() => {
@@ -696,13 +747,23 @@ export default function App() {
       },
       getTelemetry: () => syncDebugTelemetry(),
       getStatus: () => statusRef.current,
+      getRendererBackend: () => rendererRef.current?.getBackendLabel() ?? 'Uninitialized',
       probePixels: () => {
         renderImmediateFrame();
-        return probeBehindWallPixels();
+        void refreshProbesAsync();
+        return cachedProbesRef.current;
+      },
+      probePixelsAsync: async () => {
+        renderImmediateFrame();
+        return await refreshProbesAsync();
       },
       captureCanvasDataUrl: () => {
         renderImmediateFrame();
         return canvasRef.current?.toDataURL('image/png') ?? null;
+      },
+      captureCanvasDataUrlAsync: async () => {
+        renderImmediateFrame();
+        return (await rendererRef.current?.capturePngDataUrlAsync()) ?? null;
       },
     };
     return () => {
@@ -711,7 +772,7 @@ export default function App() {
   }, [
     handleLoadScenario,
     handleUpdateDebugConfig,
-    probeBehindWallPixels,
+    refreshProbesAsync,
     renderImmediateFrame,
     syncDebugTelemetry,
   ]);
@@ -830,6 +891,9 @@ export default function App() {
   useEffect(() => {
     return () => {
       audioRef.current?.dispose();
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+      activeCanvasRef.current = null;
     };
   }, []);
 
@@ -923,8 +987,13 @@ export default function App() {
           onLoadScenario={handleLoadScenario}
           onUpdateConfig={handleUpdateDebugConfig}
           onStepFrame={handleStepDebugFrame}
-          onCaptureScreenshot={handleCaptureScreenshot}
-          onRefreshProbes={syncDebugTelemetry}
+          onCaptureScreenshot={() => {
+            void handleCaptureScreenshot();
+          }}
+          onRefreshProbes={() => {
+            renderImmediateFrame();
+            void refreshProbesAsync();
+          }}
         />
       )}
 

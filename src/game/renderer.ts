@@ -1,22 +1,57 @@
+import * as THREE from 'three/webgpu';
+import type { ProbeReading } from '../components/DebugPanel';
+import { MonstrumGameEngine } from './engine';
 import { getRoomLightFlicker } from './lighting';
 import { isTileWalkable } from './mapGen';
-import { MonstrumGameEngine } from './engine';
-import { createProceduralShipTextures, ProceduralShipTextures } from './textures';
-import { Container, getDeckLabel, HidingSpot, RoomLightSwitch, RoomName, ShipDeck } from './types';
 import {
+  BakedShipAssets,
+  bakeShipDeckChunks,
+  createDynamicSpriteLibrary,
+  DynamicSpriteLibrary,
+  SpriteEntry,
+} from './threeAssets';
+import {
+  CompositeMaterialBundle,
+  createBakedLightmapQuadMaterial,
+  createBatchedRadialFanMaterial,
+  createDarknessCompositeMaterial,
+  createOceanMaterial,
+  createScreenBlitMaterial,
+  createSrgbReadbackBlitMaterial,
+  createStairPortalMaterial,
+  createThinRingBatchMaterial,
+  createVignetteAndDangerMaterial,
+  OceanMaterialBundle,
+  StairPortalMaterialBundle,
+  VignetteDangerMaterialBundle,
+} from './threeTsl';
+import {
+  getDeckLabel,
+  RoomLightSwitch,
+  RoomName,
+  ShipDeck,
+  ShipMap,
+} from './types';
+import {
+  buildVisibilityFanBuffers,
   computeVisibilityPolygon,
+  FanMeshData,
   getLocalOccluders,
   getSensesProfile,
   hasLineOfSight,
   hasLineOfSightToEntity,
+  LightPolygonCache,
 } from './visibility';
 
 interface RayLightPoly {
+  cacheKey?: string;
+  deck: ShipDeck;
   x: number;
   y: number;
   range: number;
   intensity: number;
   sputterAmount: number;
+  fan: FanMeshData;
   poly: Array<{ x: number; y: number }>;
 }
 
@@ -27,6 +62,7 @@ interface BruteBeamData {
   range: number;
   intensity: number;
   isChasing: boolean;
+  fan: FanMeshData;
   poly: Array<{ x: number; y: number }>;
 }
 
@@ -35,6 +71,7 @@ interface StairGlowData {
   y: number;
   range: number;
   intensity: number;
+  fan: FanMeshData;
   poly: Array<{ x: number; y: number }>;
 }
 
@@ -43,3118 +80,1083 @@ interface DoorPeekBeamData {
   oy: number;
   range: number;
   isLitSide: boolean;
+  fan: FanMeshData;
   poly: Array<{ x: number; y: number }>;
 }
 
-function traceRoundedRect(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number
-): void {
-  const rad = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rad, y);
-  ctx.lineTo(x + w - rad, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rad);
-  ctx.lineTo(x + w, y + h - rad);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h);
-  ctx.lineTo(x + rad, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rad);
-  ctx.lineTo(x, y + rad);
-  ctx.quadraticCurveTo(x, y, x + rad, y);
-  ctx.closePath();
+interface SpriteSlot {
+  mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+  mat: THREE.MeshBasicMaterial;
+}
+
+class SpritePool {
+  private slots: SpriteSlot[] = [];
+  private cursor = 0;
+
+  constructor(
+    private scene: THREE.Object3D,
+    private unitQuad: THREE.PlaneGeometry,
+    private defaultRenderOrder: number,
+    initialCapacity = 16
+  ) {
+    for (let i = 0; i < initialCapacity; i++) {
+      this.allocateSlot();
+    }
+  }
+
+  private allocateSlot(): SpriteSlot {
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(this.unitQuad, mat);
+    mesh.visible = false;
+    mesh.frustumCulled = false;
+    mesh.renderOrder = this.defaultRenderOrder;
+    this.scene.add(mesh);
+    const slot: SpriteSlot = { mesh, mat };
+    this.slots.push(slot);
+    return slot;
+  }
+
+  public beginFrame(): void {
+    this.cursor = 0;
+  }
+
+  public place(
+    entry: SpriteEntry,
+    wx: number,
+    wy: number,
+    options?: {
+      rot2d?: number;
+      scaleX?: number;
+      scaleY?: number;
+      tint?: number;
+      opacity?: number;
+      renderOrder?: number;
+    }
+  ): void {
+    if (this.cursor >= this.slots.length) {
+      this.allocateSlot();
+    }
+    const slot = this.slots[this.cursor++];
+    const sx = (options?.scaleX ?? 1) * entry.w;
+    const sy = (options?.scaleY ?? 1) * entry.h;
+    if (slot.mat.map !== entry.texture) {
+      slot.mat.map = entry.texture;
+      slot.mat.needsUpdate = true;
+    }
+    slot.mat.color.setHex(options?.tint ?? 0xffffff);
+    slot.mat.opacity = options?.opacity ?? 1;
+    slot.mesh.position.set(wx, -wy, 0);
+    slot.mesh.rotation.set(0, 0, -(options?.rot2d ?? 0));
+    slot.mesh.scale.set(sx, sy, 1);
+    slot.mesh.renderOrder = options?.renderOrder ?? this.defaultRenderOrder;
+    slot.mesh.visible = true;
+  }
+
+  public endFrame(): void {
+    for (let i = this.cursor; i < this.slots.length; i++) {
+      this.slots[i].mesh.visible = false;
+    }
+  }
+
+  public dispose(): void {
+    for (const s of this.slots) {
+      this.scene.remove(s.mesh);
+      s.mat.dispose();
+    }
+    this.slots = [];
+  }
+}
+
+class FanBatch {
+  private geom: THREE.BufferGeometry;
+  private mat: THREE.MeshBasicNodeMaterial;
+  private mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
+  private posAttr: THREE.BufferAttribute;
+  private radialAttr: THREE.BufferAttribute;
+  private paramsAttr: THREE.BufferAttribute;
+  private col0Attr: THREE.BufferAttribute;
+  private col1Attr: THREE.BufferAttribute;
+  private col2Attr: THREE.BufferAttribute;
+  private posArr: Float32Array;
+  private radialArr: Float32Array;
+  private paramsArr: Float32Array;
+  private col0Arr: Float32Array;
+  private col1Arr: Float32Array;
+  private col2Arr: Float32Array;
+  private vertexCursor = 0;
+  private maxVerts: number;
+  private frameHash1 = 2166136261;
+  private frameHash2 = 0x9e3779b9;
+  private lastUploadedCount = -1;
+  private lastHash1 = 0;
+  private lastHash2 = 0;
+  private c0 = new THREE.Color();
+  private c1 = new THREE.Color();
+  private c2 = new THREE.Color();
+
+  constructor(
+    private parent: THREE.Object3D,
+    renderOrder: number,
+    initialVerts = 2048
+  ) {
+    this.maxVerts = initialVerts;
+    this.posArr = new Float32Array(initialVerts * 3);
+    this.radialArr = new Float32Array(initialVerts * 2);
+    this.paramsArr = new Float32Array(initialVerts * 3);
+    this.col0Arr = new Float32Array(initialVerts * 4);
+    this.col1Arr = new Float32Array(initialVerts * 4);
+    this.col2Arr = new Float32Array(initialVerts * 4);
+
+    this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.radialAttr = new THREE.BufferAttribute(this.radialArr, 2).setUsage(THREE.DynamicDrawUsage);
+    this.paramsAttr = new THREE.BufferAttribute(this.paramsArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.col0Attr = new THREE.BufferAttribute(this.col0Arr, 4).setUsage(THREE.DynamicDrawUsage);
+    this.col1Attr = new THREE.BufferAttribute(this.col1Arr, 4).setUsage(THREE.DynamicDrawUsage);
+    this.col2Attr = new THREE.BufferAttribute(this.col2Arr, 4).setUsage(THREE.DynamicDrawUsage);
+
+    this.geom = new THREE.BufferGeometry();
+    this.geom.setAttribute('position', this.posAttr);
+    this.geom.setAttribute('aRadialOffset', this.radialAttr);
+    this.geom.setAttribute('aFanParams', this.paramsAttr);
+    this.geom.setAttribute('aColor0', this.col0Attr);
+    this.geom.setAttribute('aColor1', this.col1Attr);
+    this.geom.setAttribute('aColor2', this.col2Attr);
+    this.geom.setDrawRange(0, 0);
+
+    this.mat = createBatchedRadialFanMaterial();
+    this.mesh = new THREE.Mesh(this.geom, this.mat);
+    this.mesh.visible = false;
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = renderOrder;
+    parent.add(this.mesh);
+  }
+
+  public beginFrame(): void {
+    this.vertexCursor = 0;
+    this.frameHash1 = 2166136261;
+    this.frameHash2 = 0x9e3779b9;
+  }
+
+  public clear(): void {
+    this.vertexCursor = 0;
+    this.lastUploadedCount = 0;
+    this.geom.setDrawRange(0, 0);
+    this.mesh.visible = false;
+  }
+
+  private ensureCapacity(addVerts: number): void {
+    const needed = this.vertexCursor + addVerts;
+    if (needed <= this.maxVerts) return;
+    const nextMax = Math.max(this.maxVerts * 2, needed + 1024);
+
+    const nextPos = new Float32Array(nextMax * 3);
+    const nextRadial = new Float32Array(nextMax * 2);
+    const nextParams = new Float32Array(nextMax * 3);
+    const nextCol0 = new Float32Array(nextMax * 4);
+    const nextCol1 = new Float32Array(nextMax * 4);
+    const nextCol2 = new Float32Array(nextMax * 4);
+
+    if (this.vertexCursor > 0) {
+      nextPos.set(this.posArr.subarray(0, this.vertexCursor * 3));
+      nextRadial.set(this.radialArr.subarray(0, this.vertexCursor * 2));
+      nextParams.set(this.paramsArr.subarray(0, this.vertexCursor * 3));
+      nextCol0.set(this.col0Arr.subarray(0, this.vertexCursor * 4));
+      nextCol1.set(this.col1Arr.subarray(0, this.vertexCursor * 4));
+      nextCol2.set(this.col2Arr.subarray(0, this.vertexCursor * 4));
+    }
+
+    this.posArr = nextPos;
+    this.radialArr = nextRadial;
+    this.paramsArr = nextParams;
+    this.col0Arr = nextCol0;
+    this.col1Arr = nextCol1;
+    this.col2Arr = nextCol2;
+
+    this.posAttr = new THREE.BufferAttribute(nextPos, 3).setUsage(THREE.DynamicDrawUsage);
+    this.radialAttr = new THREE.BufferAttribute(nextRadial, 2).setUsage(THREE.DynamicDrawUsage);
+    this.paramsAttr = new THREE.BufferAttribute(nextParams, 3).setUsage(THREE.DynamicDrawUsage);
+    this.col0Attr = new THREE.BufferAttribute(nextCol0, 4).setUsage(THREE.DynamicDrawUsage);
+    this.col1Attr = new THREE.BufferAttribute(nextCol1, 4).setUsage(THREE.DynamicDrawUsage);
+    this.col2Attr = new THREE.BufferAttribute(nextCol2, 4).setUsage(THREE.DynamicDrawUsage);
+
+    this.geom.setAttribute('position', this.posAttr);
+    this.geom.setAttribute('aRadialOffset', this.radialAttr);
+    this.geom.setAttribute('aFanParams', this.paramsAttr);
+    this.geom.setAttribute('aColor0', this.col0Attr);
+    this.geom.setAttribute('aColor1', this.col1Attr);
+    this.geom.setAttribute('aColor2', this.col2Attr);
+    this.maxVerts = nextMax;
+    this.lastUploadedCount = -1;
+  }
+
+  private mixHash(v: number): void {
+    const iv = Math.imul(v | 0, 1);
+    this.frameHash1 = Math.imul(this.frameHash1 ^ iv, 16777619);
+    this.frameHash2 = Math.imul(this.frameHash2 ^ (iv + 0x9e3779b9), 2246822519);
+  }
+
+  public addFan(
+    fan: FanMeshData,
+    innerRadius: number,
+    range: number,
+    stopPos: number,
+    c0Hex: number,
+    a0: number,
+    c1Hex: number,
+    a1: number,
+    c2Hex: number,
+    a2: number
+  ): void {
+    const vCount = fan.vertexCount;
+    if (vCount <= 0) return;
+
+    this.mixHash(fan.version);
+    this.mixHash(vCount);
+    this.mixHash(Math.round(fan.positions[0] ?? 0));
+    this.mixHash(Math.round(fan.positions[1] ?? 0));
+    this.mixHash(c0Hex);
+    this.mixHash(Math.round(a0 * 1000));
+    this.mixHash(c1Hex);
+    this.mixHash(Math.round(a1 * 1000));
+    this.mixHash(Math.round(range));
+
+    this.ensureCapacity(vCount);
+
+    const vBase = this.vertexCursor;
+    this.posArr.set(fan.positions.subarray(0, vCount * 3), vBase * 3);
+    this.radialArr.set(fan.radialOffsets.subarray(0, vCount * 2), vBase * 2);
+
+    this.c0.setHex(c0Hex);
+    this.c1.setHex(c1Hex);
+    this.c2.setHex(c2Hex);
+
+    const r0 = this.c0.r;
+    const g0 = this.c0.g;
+    const b0 = this.c0.b;
+    const r1 = this.c1.r;
+    const g1 = this.c1.g;
+    const b1 = this.c1.b;
+    const r2 = this.c2.r;
+    const g2 = this.c2.g;
+    const b2 = this.c2.b;
+
+    const paramsArr = this.paramsArr;
+    const col0Arr = this.col0Arr;
+    const col1Arr = this.col1Arr;
+    const col2Arr = this.col2Arr;
+
+    let i3 = vBase * 3;
+    let i4 = vBase * 4;
+    for (let i = 0; i < vCount; i++) {
+      paramsArr[i3] = innerRadius;
+      paramsArr[i3 + 1] = range;
+      paramsArr[i3 + 2] = stopPos;
+      i3 += 3;
+
+      col0Arr[i4] = r0;
+      col0Arr[i4 + 1] = g0;
+      col0Arr[i4 + 2] = b0;
+      col0Arr[i4 + 3] = a0;
+
+      col1Arr[i4] = r1;
+      col1Arr[i4 + 1] = g1;
+      col1Arr[i4 + 2] = b1;
+      col1Arr[i4 + 3] = a1;
+
+      col2Arr[i4] = r2;
+      col2Arr[i4 + 1] = g2;
+      col2Arr[i4 + 2] = b2;
+      col2Arr[i4 + 3] = a2;
+      i4 += 4;
+    }
+
+    this.vertexCursor = vBase + vCount;
+  }
+
+  public endFrame(): void {
+    const count = this.vertexCursor;
+    if (count === 0) {
+      this.geom.setDrawRange(0, 0);
+      this.mesh.visible = false;
+      this.lastUploadedCount = 0;
+      return;
+    }
+
+    if (
+      count === this.lastUploadedCount &&
+      this.frameHash1 === this.lastHash1 &&
+      this.frameHash2 === this.lastHash2
+    ) {
+      this.geom.setDrawRange(0, count);
+      this.mesh.visible = true;
+      return;
+    }
+
+    this.lastUploadedCount = count;
+    this.lastHash1 = this.frameHash1;
+    this.lastHash2 = this.frameHash2;
+
+    this.posAttr.clearUpdateRanges();
+    this.posAttr.addUpdateRange(0, count * 3);
+    this.posAttr.needsUpdate = true;
+
+    this.radialAttr.clearUpdateRanges();
+    this.radialAttr.addUpdateRange(0, count * 2);
+    this.radialAttr.needsUpdate = true;
+
+    this.paramsAttr.clearUpdateRanges();
+    this.paramsAttr.addUpdateRange(0, count * 3);
+    this.paramsAttr.needsUpdate = true;
+
+    this.col0Attr.clearUpdateRanges();
+    this.col0Attr.addUpdateRange(0, count * 4);
+    this.col0Attr.needsUpdate = true;
+
+    this.col1Attr.clearUpdateRanges();
+    this.col1Attr.addUpdateRange(0, count * 4);
+    this.col1Attr.needsUpdate = true;
+
+    this.col2Attr.clearUpdateRanges();
+    this.col2Attr.addUpdateRange(0, count * 4);
+    this.col2Attr.needsUpdate = true;
+
+    this.geom.setDrawRange(0, count);
+    this.mesh.visible = true;
+  }
+
+  public dispose(): void {
+    this.parent.remove(this.mesh);
+    this.geom.dispose();
+    this.mat.dispose();
+  }
+}
+
+class DynamicLineBatch {
+  private geom: THREE.BufferGeometry;
+  private posAttr: THREE.BufferAttribute;
+  private posArr: Float32Array;
+  private mat: THREE.LineBasicMaterial;
+  private lines: THREE.LineSegments;
+  private vertexCursor = 0;
+  private maxVerts: number;
+
+  constructor(
+    private parent: THREE.Object3D,
+    color: number,
+    opacity: number,
+    renderOrder: number,
+    initialVerts = 512
+  ) {
+    this.maxVerts = initialVerts;
+    this.posArr = new Float32Array(initialVerts * 3);
+    this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.geom = new THREE.BufferGeometry();
+    this.geom.setAttribute('position', this.posAttr);
+    this.geom.setDrawRange(0, 0);
+
+    this.mat = new THREE.LineBasicMaterial({
+      color,
+      transparent: opacity < 1,
+      opacity,
+      depthWrite: false,
+      depthTest: false,
+    });
+    this.lines = new THREE.LineSegments(this.geom, this.mat);
+    this.lines.frustumCulled = false;
+    this.lines.visible = false;
+    this.lines.renderOrder = renderOrder;
+    parent.add(this.lines);
+  }
+
+  public beginFrame(): void {
+    this.vertexCursor = 0;
+  }
+
+  public setStyle(color: number, opacity: number): void {
+    this.mat.color.setHex(color);
+    this.mat.opacity = opacity;
+    this.mat.transparent = opacity < 1;
+  }
+
+  private ensureCapacity(addVerts: number): void {
+    if (this.vertexCursor + addVerts <= this.maxVerts) return;
+    const nextMax = Math.max(this.maxVerts * 2, this.vertexCursor + addVerts + 128);
+    const nextArr = new Float32Array(nextMax * 3);
+    nextArr.set(this.posArr.subarray(0, this.vertexCursor * 3));
+    this.posArr = nextArr;
+    this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.geom.setAttribute('position', this.posAttr);
+    this.maxVerts = nextMax;
+  }
+
+  public addSegment(x1: number, y1: number, x2: number, y2: number): void {
+    this.ensureCapacity(2);
+    let idx = this.vertexCursor * 3;
+    this.posArr[idx++] = x1;
+    this.posArr[idx++] = -y1;
+    this.posArr[idx++] = 0;
+    this.posArr[idx++] = x2;
+    this.posArr[idx++] = -y2;
+    this.posArr[idx++] = 0;
+    this.vertexCursor += 2;
+  }
+
+  public addDashedSegment(
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    dashLen = 5,
+    gapLen = 4
+  ): void {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len = Math.hypot(dx, dy);
+    if (len < 0.5) return;
+    const ux = dx / len;
+    const uy = dy / len;
+    const step = dashLen + gapLen;
+    for (let d = 0; d < len; d += step) {
+      const dEnd = Math.min(len, d + dashLen);
+      this.addSegment(x1 + ux * d, y1 + uy * d, x1 + ux * dEnd, y1 + uy * dEnd);
+    }
+  }
+
+  public addPolyLoop(pts: Array<{ x: number; y: number }>): void {
+    if (pts.length < 2) return;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % pts.length];
+      this.addSegment(a.x, a.y, b.x, b.y);
+    }
+  }
+
+  public addRect(x: number, y: number, w: number, h: number): void {
+    this.addSegment(x, y, x + w, y);
+    this.addSegment(x + w, y, x + w, y + h);
+    this.addSegment(x + w, y + h, x, y + h);
+    this.addSegment(x, y + h, x, y);
+  }
+
+  public endFrame(): void {
+    if (this.vertexCursor === 0) {
+      this.geom.setDrawRange(0, 0);
+      this.lines.visible = false;
+      return;
+    }
+    this.posAttr.needsUpdate = true;
+    this.geom.setDrawRange(0, this.vertexCursor);
+    this.lines.visible = true;
+  }
+
+  public dispose(): void {
+    this.parent.remove(this.lines);
+    this.geom.dispose();
+    this.mat.dispose();
+  }
+}
+
+class ThinRingBatch {
+  private geom: THREE.BufferGeometry;
+  private mat: THREE.MeshBasicNodeMaterial;
+  private mesh: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicNodeMaterial>;
+  private posAttr: THREE.BufferAttribute;
+  private offsetAttr: THREE.BufferAttribute;
+  private paramsAttr: THREE.BufferAttribute;
+  private colorAttr: THREE.BufferAttribute;
+  private posArr: Float32Array;
+  private offsetArr: Float32Array;
+  private paramsArr: Float32Array;
+  private colorArr: Float32Array;
+  private vertexCursor = 0;
+  private maxVerts: number;
+
+  constructor(
+    private parent: THREE.Object3D,
+    renderOrder: number,
+    initialQuads = 64
+  ) {
+    this.maxVerts = initialQuads * 6;
+    this.posArr = new Float32Array(this.maxVerts * 3);
+    this.offsetArr = new Float32Array(this.maxVerts * 2);
+    this.paramsArr = new Float32Array(this.maxVerts * 3);
+    this.colorArr = new Float32Array(this.maxVerts * 4);
+
+    this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.offsetAttr = new THREE.BufferAttribute(this.offsetArr, 2).setUsage(THREE.DynamicDrawUsage);
+    this.paramsAttr = new THREE.BufferAttribute(this.paramsArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.colorAttr = new THREE.BufferAttribute(this.colorArr, 4).setUsage(THREE.DynamicDrawUsage);
+
+    this.geom = new THREE.BufferGeometry();
+    this.geom.setAttribute('position', this.posAttr);
+    this.geom.setAttribute('aRingOffset', this.offsetAttr);
+    this.geom.setAttribute('aRingParams', this.paramsAttr);
+    this.geom.setAttribute('aRingColor', this.colorAttr);
+    this.geom.setDrawRange(0, 0);
+
+    this.mat = createThinRingBatchMaterial();
+    this.mesh = new THREE.Mesh(this.geom, this.mat);
+    this.mesh.visible = false;
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = renderOrder;
+    parent.add(this.mesh);
+  }
+
+  public beginFrame(): void {
+    this.vertexCursor = 0;
+  }
+
+  private ensureCapacity(addVerts: number): void {
+    if (this.vertexCursor + addVerts <= this.maxVerts) return;
+    const nextMax = Math.max(this.maxVerts * 2, this.vertexCursor + addVerts + 96);
+    const nextPos = new Float32Array(nextMax * 3);
+    const nextOffset = new Float32Array(nextMax * 2);
+    const nextParams = new Float32Array(nextMax * 3);
+    const nextColor = new Float32Array(nextMax * 4);
+
+    if (this.vertexCursor > 0) {
+      nextPos.set(this.posArr.subarray(0, this.vertexCursor * 3));
+      nextOffset.set(this.offsetArr.subarray(0, this.vertexCursor * 2));
+      nextParams.set(this.paramsArr.subarray(0, this.vertexCursor * 3));
+      nextColor.set(this.colorArr.subarray(0, this.vertexCursor * 4));
+    }
+
+    this.posArr = nextPos;
+    this.offsetArr = nextOffset;
+    this.paramsArr = nextParams;
+    this.colorArr = nextColor;
+
+    this.posAttr = new THREE.BufferAttribute(nextPos, 3).setUsage(THREE.DynamicDrawUsage);
+    this.offsetAttr = new THREE.BufferAttribute(nextOffset, 2).setUsage(THREE.DynamicDrawUsage);
+    this.paramsAttr = new THREE.BufferAttribute(nextParams, 3).setUsage(THREE.DynamicDrawUsage);
+    this.colorAttr = new THREE.BufferAttribute(nextColor, 4).setUsage(THREE.DynamicDrawUsage);
+
+    this.geom.setAttribute('position', this.posAttr);
+    this.geom.setAttribute('aRingOffset', this.offsetAttr);
+    this.geom.setAttribute('aRingParams', this.paramsAttr);
+    this.geom.setAttribute('aRingColor', this.colorAttr);
+    this.maxVerts = nextMax;
+  }
+
+  public addRing(
+    wx: number,
+    wy: number,
+    radius: number,
+    halfThickness: number,
+    feather: number,
+    color: THREE.Color,
+    alpha: number
+  ): void {
+    if (radius <= 0.5 || alpha <= 0.002) return;
+    this.ensureCapacity(6);
+
+    const half = radius + halfThickness + feather + 2;
+    const cx = wx;
+    const cy = -wy;
+    const cr = color.r;
+    const cg = color.g;
+    const cb = color.b;
+
+    const corners: Array<[number, number]> = [
+      [-half, -half],
+      [half, -half],
+      [half, half],
+      [-half, -half],
+      [half, half],
+      [-half, half],
+    ];
+
+    let i2 = this.vertexCursor * 2;
+    let i3 = this.vertexCursor * 3;
+    let i4 = this.vertexCursor * 4;
+
+    for (let k = 0; k < 6; k++) {
+      const [ox, oy] = corners[k];
+      this.posArr[i3] = cx + ox;
+      this.posArr[i3 + 1] = cy + oy;
+      this.posArr[i3 + 2] = 0;
+
+      this.offsetArr[i2] = ox;
+      this.offsetArr[i2 + 1] = oy;
+
+      this.paramsArr[i3] = radius;
+      this.paramsArr[i3 + 1] = halfThickness;
+      this.paramsArr[i3 + 2] = feather;
+
+      this.colorArr[i4] = cr;
+      this.colorArr[i4 + 1] = cg;
+      this.colorArr[i4 + 2] = cb;
+      this.colorArr[i4 + 3] = alpha;
+
+      i2 += 2;
+      i3 += 3;
+      i4 += 4;
+    }
+
+    this.vertexCursor += 6;
+  }
+
+  public endFrame(): void {
+    const count = this.vertexCursor;
+    if (count === 0) {
+      this.geom.setDrawRange(0, 0);
+      this.mesh.visible = false;
+      return;
+    }
+    this.posAttr.clearUpdateRanges();
+    this.posAttr.addUpdateRange(0, count * 3);
+    this.posAttr.needsUpdate = true;
+
+    this.offsetAttr.clearUpdateRanges();
+    this.offsetAttr.addUpdateRange(0, count * 2);
+    this.offsetAttr.needsUpdate = true;
+
+    this.paramsAttr.clearUpdateRanges();
+    this.paramsAttr.addUpdateRange(0, count * 3);
+    this.paramsAttr.needsUpdate = true;
+
+    this.colorAttr.clearUpdateRanges();
+    this.colorAttr.addUpdateRange(0, count * 4);
+    this.colorAttr.needsUpdate = true;
+
+    this.geom.setDrawRange(0, count);
+    this.mesh.visible = true;
+  }
+
+  public dispose(): void {
+    this.parent.remove(this.mesh);
+    this.geom.dispose();
+    this.mat.dispose();
+  }
 }
 
 export class GameRenderer {
-  private lightCanvas: HTMLCanvasElement;
-  private lightCtx: CanvasRenderingContext2D;
+  private renderer: THREE.WebGPURenderer | null = null;
+  private initialized = false;
+  private disposed = false;
+  private initPromise: Promise<void> | null = null;
+  private anisotropy = 1;
+  private isWebGPU = false;
+
+  private sprites: DynamicSpriteLibrary | null = null;
+  private bakedShip: BakedShipAssets | null = null;
+  private bakedMapRef: ShipMap | null = null;
+  private deckChunkMeshes: Array<{
+    deck: ShipDeck;
+    mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
+    geom: THREE.PlaneGeometry;
+    mat: THREE.MeshBasicMaterial;
+  }> = [];
+
+  // Precomputed per-map caches
+  private roomFixturesCache = new Map<string, Array<{ x: number; y: number; range: number }>>();
+  private lightPolyCache = new LightPolygonCache();
   private lastPlayerSightPolys: Array<Array<{ x: number; y: number }>> = [];
-  private textures: ProceduralShipTextures | null = null;
+  private dynamicFansCache = new Map<string, FanMeshData>();
+  private lastScreenWidth = 1280;
+  private lastScreenHeight = 720;
 
-  constructor() {
-    this.lightCanvas = document.createElement('canvas');
-    const ctx = this.lightCanvas.getContext('2d');
-    if (!ctx) throw new Error('Could not initialize 2D lighting context');
-    this.lightCtx = ctx;
+  // Shared Geometries & Scenes
+  private unitQuadGeom = new THREE.PlaneGeometry(1, 1);
+  private ndcQuadGeom = new THREE.PlaneGeometry(2, 2);
+
+  private worldScene = new THREE.Scene();
+  private losScene = new THREE.Scene();
+  private lightMaskScene = new THREE.Scene();
+  private compositeScene = new THREE.Scene();
+  private postScene = new THREE.Scene();
+  private screenOverlayScene = new THREE.Scene();
+  private vignetteScene = new THREE.Scene();
+  private blitScene = new THREE.Scene();
+  private readbackScene = new THREE.Scene();
+  private deckBakeWarmScene = new THREE.Scene();
+  private deckBakeMaskScene = new THREE.Scene();
+
+  // Cameras
+  private worldCamera = new THREE.OrthographicCamera(-640, 640, 360, -360, 0.1, 500);
+  private portalCamera = new THREE.OrthographicCamera(-200, 200, 200, -200, 0.1, 500);
+  private screenCamera = new THREE.OrthographicCamera(0, 1280, 0, -720, 0.1, 500);
+  private ndcCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  private deckBakeCamera = new THREE.OrthographicCamera(0, 1000, 0, -1000, 0.1, 500);
+
+  // Render Targets
+  private sceneTarget: THREE.RenderTarget | null = null;
+  private losTarget: THREE.RenderTarget | null = null;
+  private lightMaskTarget: THREE.RenderTarget | null = null;
+  private finalTarget: THREE.RenderTarget | null = null;
+  private probeTarget: THREE.RenderTarget | null = null;
+  private portalTarget: THREE.RenderTarget | null = null;
+  private portalLosTarget: THREE.RenderTarget | null = null;
+  private deckWarmTarget: THREE.RenderTarget | null = null;
+  private deckMaskTarget: THREE.RenderTarget | null = null;
+  private deckWarmPixelW = 0;
+  private deckWarmPixelH = 0;
+  private bakedLightMapRef: ShipMap | null = null;
+  private bakedLightDeck: ShipDeck | null = null;
+  private bakedLightDoorHash1 = 0;
+  private bakedLightDoorHash2 = 0;
+  private targetPixelW = 0;
+  private targetPixelH = 0;
+  private portalPixelSpan = 0;
+
+  // TSL Materials & Quads
+  private oceanBundle: OceanMaterialBundle | null = null;
+  private oceanMesh: THREE.Mesh | null = null;
+  private compositeBundle: CompositeMaterialBundle | null = null;
+  private vignetteBundle: VignetteDangerMaterialBundle | null = null;
+  private portalBundle: StairPortalMaterialBundle | null = null;
+  private portalQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicNodeMaterial> | null = null;
+  private deckWarmQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicNodeMaterial> | null = null;
+  private deckWarmTexNode: ReturnType<typeof createBakedLightmapQuadMaterial>['texNode'] | null = null;
+  private deckWarmMat: THREE.MeshBasicNodeMaterial | null = null;
+  private deckMaskQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicNodeMaterial> | null = null;
+  private deckMaskTexNode: ReturnType<typeof createBakedLightmapQuadMaterial>['texNode'] | null = null;
+  private deckMaskMat: THREE.MeshBasicNodeMaterial | null = null;
+  private screenBlitMat: THREE.MeshBasicNodeMaterial | null = null;
+  private readbackBlitMat: THREE.MeshBasicNodeMaterial | null = null;
+  private screenBlitMesh: THREE.Mesh | null = null;
+  private readbackBlitMesh: THREE.Mesh | null = null;
+  private compositeQuad: THREE.Mesh | null = null;
+  private vignetteQuad: THREE.Mesh | null = null;
+  private deckBakeWarmFans: FanBatch | null = null;
+  private deckBakeMaskFans: FanBatch | null = null;
+
+  // Pools
+  private worldSprites: SpritePool | null = null;
+  private postSprites: SpritePool | null = null;
+  private screenSprites: SpritePool | null = null;
+  private staticWarmFans: FanBatch | null = null;
+  private worldWarmFans: FanBatch | null = null;
+  private staticMaskFans: FanBatch | null = null;
+  private lightMaskFans: FanBatch | null = null;
+  private losFans: FanBatch | null = null;
+  private portalLosFans: FanBatch | null = null;
+
+  // Dynamic Line Batches
+  private wakeLines: DynamicLineBatch | null = null;
+  private worldLinesDark: DynamicLineBatch | null = null;
+  private worldLinesSteel: DynamicLineBatch | null = null;
+  private worldLinesLight: DynamicLineBatch | null = null;
+  private worldLinesTeal: DynamicLineBatch | null = null;
+  private postLinesSlate: DynamicLineBatch | null = null;
+  private postLinesCyan: DynamicLineBatch | null = null;
+  private postLinesAmber: DynamicLineBatch | null = null;
+  private postLinesRose: DynamicLineBatch | null = null;
+  private postLinesOrange: DynamicLineBatch | null = null;
+  private postLinesEmerald: DynamicLineBatch | null = null;
+  private postLinesRed: DynamicLineBatch | null = null;
+  private postLinesWhite: DynamicLineBatch | null = null;
+  private ringBatch: ThinRingBatch | null = null;
+  private bruteFovFanBatch: FanBatch | null = null;
+
+  // Cached small procedural label textures (black probe labels + stair portal badge)
+  private textBadgeCache = new Map<string, SpriteEntry>();
+  private readbackQueue: Promise<void> = Promise.resolve();
+  private tmpVec2 = new THREE.Vector2();
+  private tmpColor = new THREE.Color();
+
+  private setColorFromCss(target: THREE.Color, css: string): THREE.Color {
+    if (css.startsWith('rgb')) {
+      const m = css.match(/[\d.]+/g);
+      if (m && m.length >= 3) {
+        target.setRGB(
+          Number(m[0]) / 255,
+          Number(m[1]) / 255,
+          Number(m[2]) / 255,
+          THREE.SRGBColorSpace
+        );
+        return target;
+      }
+    }
+    return target.set(css);
   }
 
-  public render(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    timeSec: number
-  ): void {
-    if (this.lightCanvas.width !== width || this.lightCanvas.height !== height) {
-      this.lightCanvas.width = width;
-      this.lightCanvas.height = height;
+  public isInitialized(): boolean {
+    return this.initialized;
+  }
+
+  public getBackendLabel(): string {
+    if (!this.initialized) return 'Initializing';
+    return this.isWebGPU ? 'WebGPU' : 'WebGL2';
+  }
+
+  public async init(canvas: HTMLCanvasElement): Promise<void> {
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      const renderer = new THREE.WebGPURenderer({
+        canvas,
+        antialias: false,
+        alpha: false,
+        powerPreference: 'high-performance',
+      });
+      await renderer.init();
+
+      if (this.disposed) {
+        renderer.dispose();
+        return;
+      }
+
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.setClearColor(0x000000, 1);
+
+      const backend = renderer.backend as {
+        isWebGPUBackend?: boolean;
+        device?: GPUDevice;
+      };
+      this.isWebGPU = Boolean(backend?.isWebGPUBackend);
+      this.anisotropy = Math.min(4, renderer.getMaxAnisotropy?.() ?? 1);
+
+      if (this.isWebGPU && backend?.device?.lost) {
+        backend.device.lost.then((info) => {
+          if (!this.disposed) {
+            console.warn('WebGPU device lost:', info?.message ?? info?.reason);
+          }
+        });
+      }
+
+      this.renderer = renderer;
+      this.worldCamera.position.set(0, 0, 100);
+      this.portalCamera.position.set(0, 0, 100);
+      this.screenCamera.position.set(0, 0, 100);
+      this.ndcCamera.position.set(0, 0, 5);
+      this.deckBakeCamera.position.set(0, 0, 100);
+
+      this.sprites = createDynamicSpriteLibrary(44, this.anisotropy);
+
+      // Ocean background quad
+      this.oceanBundle = createOceanMaterial();
+      this.oceanMesh = new THREE.Mesh(this.unitQuadGeom, this.oceanBundle.material);
+      this.oceanMesh.frustumCulled = false;
+      this.oceanMesh.renderOrder = 0;
+      this.worldScene.add(this.oceanMesh);
+
+      // Pools
+      this.worldSprites = new SpritePool(this.worldScene, this.unitQuadGeom, 8, 96);
+      this.postSprites = new SpritePool(this.postScene, this.unitQuadGeom, 1, 24);
+      this.screenSprites = new SpritePool(this.screenOverlayScene, this.unitQuadGeom, 2, 16);
+
+      this.staticWarmFans = new FanBatch(this.worldScene, 19, 16384);
+      this.worldWarmFans = new FanBatch(this.worldScene, 20, 2048);
+      this.staticMaskFans = new FanBatch(this.lightMaskScene, 0, 16384);
+      this.lightMaskFans = new FanBatch(this.lightMaskScene, 1, 2048);
+      this.deckBakeWarmFans = new FanBatch(this.deckBakeWarmScene, 0, 20480);
+      this.deckBakeMaskFans = new FanBatch(this.deckBakeMaskScene, 0, 20480);
+      this.losFans = new FanBatch(this.losScene, 0, 1024);
+      this.portalLosFans = new FanBatch(this.losScene, 0, 1024);
+
+      // Line batches
+      this.wakeLines = new DynamicLineBatch(this.worldScene, 0x7dd3fc, 0.14, 1, 1024);
+      this.worldLinesDark = new DynamicLineBatch(this.worldScene, 0x090d14, 0.9, 5, 128);
+      this.worldLinesSteel = new DynamicLineBatch(this.worldScene, 0x64748b, 0.95, 5, 128);
+      this.worldLinesLight = new DynamicLineBatch(this.worldScene, 0xe2e8f0, 0.95, 5, 128);
+      this.worldLinesTeal = new DynamicLineBatch(this.worldScene, 0x2dd4bf, 0.45, 4, 256);
+
+      this.postLinesSlate = new DynamicLineBatch(this.postScene, 0x0f172a, 0.85, 0, 128);
+      this.postLinesCyan = new DynamicLineBatch(this.postScene, 0x38bdf8, 0.85, 5, 512);
+      this.postLinesAmber = new DynamicLineBatch(this.postScene, 0xfbbf24, 0.9, 5, 256);
+      this.postLinesRose = new DynamicLineBatch(this.postScene, 0xf43f5e, 0.78, 5, 1024);
+      this.postLinesOrange = new DynamicLineBatch(this.postScene, 0xf97316, 0.78, 5, 512);
+      this.postLinesEmerald = new DynamicLineBatch(this.postScene, 0x34d399, 0.85, 5, 128);
+      this.postLinesRed = new DynamicLineBatch(this.postScene, 0xef4444, 0.95, 5, 64);
+      this.postLinesWhite = new DynamicLineBatch(this.postScene, 0xf8fafc, 0.72, 2, 128);
+      this.ringBatch = new ThinRingBatch(this.postScene, 2, 64);
+
+      this.bruteFovFanBatch = new FanBatch(this.postScene, 4, 512);
+
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      this.ensureRenderTargets(window.innerWidth, window.innerHeight, dpr);
+      this.ensurePortalTargets(400);
+
+      this.initialized = true;
+    })();
+
+    return this.initPromise;
+  }
+
+  private createRt(
+    w: number,
+    h: number,
+    type: THREE.TextureDataType
+  ): THREE.RenderTarget {
+    const rt = new THREE.RenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      type,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    rt.texture.generateMipmaps = false;
+    rt.texture.colorSpace = THREE.NoColorSpace;
+    return rt;
+  }
+
+  private ensureRenderTargets(width: number, height: number, dpr: number): void {
+    const renderer = this.renderer;
+    if (!renderer) return;
+
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(width, height, false);
+    renderer.getDrawingBufferSize(this.tmpVec2);
+    const pw = Math.max(1, Math.floor(this.tmpVec2.x));
+    const ph = Math.max(1, Math.floor(this.tmpVec2.y));
+
+    if (this.targetPixelW === pw && this.targetPixelH === ph && this.finalTarget) {
+      return;
     }
 
-    if (!this.textures) {
-      this.textures = createProceduralShipTextures(ctx, engine.map.tileSize);
-    }
+    this.targetPixelW = pw;
+    this.targetPixelH = ph;
 
-    const shakeX = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
-    const shakeY = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
-    const zoom = engine.getEffectiveZoom(width, height);
-    const viewCenterX = width / 2 + shakeX;
-    const viewCenterY = height / 2 + shakeY;
+    this.sceneTarget?.dispose();
+    this.losTarget?.dispose();
+    this.lightMaskTarget?.dispose();
+    this.finalTarget?.dispose();
+    this.probeTarget?.dispose();
 
-    // 1. Pure OLED black void background
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, width, height);
+    this.sceneTarget = this.createRt(pw, ph, THREE.HalfFloatType);
+    this.losTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
+    this.lightMaskTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
+    this.finalTarget = this.createRt(pw, ph, THREE.HalfFloatType);
+    this.probeTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
 
-    ctx.save();
-    ctx.translate(viewCenterX, viewCenterY);
-    ctx.scale(zoom, zoom);
-    ctx.translate(-engine.cameraX, -engine.cameraY);
-
-    const incomingStairId = engine.getBruteIncomingStairDestId();
-
-    this.drawOceanWaves(ctx, engine, width, height, timeSec, zoom);
-    this.drawTiles(ctx, engine, width, height, timeSec, zoom);
-    this.drawRoomStencils(ctx, engine, width, height, zoom);
-    this.drawBloodStreaks(ctx, engine, width, height, zoom);
-    this.drawStairwells(ctx, engine, incomingStairId, timeSec);
-    this.drawBulkheads(ctx, engine, width, height, zoom);
-    this.drawEscapeZones(ctx, engine, timeSec);
-    this.drawShipProps(ctx, engine, width, height, zoom);
-    this.drawSteamPipes(ctx, engine, width, height, zoom, timeSec);
-    this.drawPaperMaps(ctx, engine, width, height, zoom, timeSec);
-    this.drawFuseSockets(ctx, engine, width, height, zoom, timeSec);
-    this.drawContainers(ctx, engine, width, height, zoom);
-    this.drawHidingSpots(ctx, engine, width, height, zoom);
-    this.drawLightSwitches(ctx, engine, timeSec, width, height, zoom);
-    this.drawDoors(ctx, engine, width, height, zoom);
-    this.drawDroppedLights(ctx, engine, timeSec, width, height, zoom);
-    this.drawWorldPickups(ctx, engine, timeSec, undefined, width, height, zoom);
-    this.drawParticles(ctx, engine);
-
-    if (engine.player.hidingSpotId === null) {
-      this.drawPlayer(ctx, engine, timeSec);
-    }
-
-    this.drawBrute(ctx, engine, timeSec);
-
-    // Precompute lit room, Brute searchlight beam, stairwell shaft spill, and door keyhole beam polygons
-    const litRoomPolys = this.computeLitRoomPolygons(engine, timeSec);
-    const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec);
-    const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec);
-    const doorPeekData = this.computeDoorPeekBeam(engine);
-    this.drawWarmLightingTints(ctx, engine, litRoomPolys, bruteBeam, stairGlow, doorPeekData, timeSec);
-
-    ctx.restore();
-
-    // 2. Pure #000000 Raycast Darkness & Player-LoS Clipped Lighting Overlay
-    this.renderLightingMask(
-      engine,
-      width,
-      height,
-      viewCenterX,
-      viewCenterY,
-      zoom,
-      timeSec,
-      litRoomPolys,
-      bruteBeam,
-      stairGlow,
-      doorPeekData
-    );
-    ctx.drawImage(this.lightCanvas, 0, 0);
-
-    // 3. Post-darkness perceptual details (strictly LoS-gated)
-    ctx.save();
-    ctx.translate(viewCenterX, viewCenterY);
-    ctx.scale(zoom, zoom);
-    ctx.translate(-engine.cameraX, -engine.cameraY);
-    this.drawLightSwitchBeacons(ctx, engine, timeSec);
-    this.drawStairwellBeacons(ctx, engine, incomingStairId, timeSec);
-    this.drawStairClimbRing(ctx, engine);
-    this.drawBruteEyesInDarkness(ctx, engine, timeSec);
-    this.drawRipples(ctx, engine);
-    this.drawInteractHalo(ctx, engine, timeSec);
-    if (engine.debugConfig.enabled) {
-      this.drawDebugOverlays(ctx, engine, width, height, zoom);
-    }
-    ctx.restore();
-
-    // 3b. Circular Raycasted Stairwell Landing Peek Portal (Hold Q near stairwell)
-    if (
-      engine.player.peekingStairId !== null &&
-      engine.player.hidingSpotId === null &&
-      engine.player.climbingStairId === null
-    ) {
-      this.drawStairPeekPortal(
-        ctx,
-        engine,
-        viewCenterX,
-        viewCenterY,
-        zoom,
-        width,
-        height,
-        timeSec,
-        litRoomPolys,
-        bruteBeam
+    if (!this.compositeBundle) {
+      this.compositeBundle = createDarknessCompositeMaterial(
+        this.sceneTarget.texture,
+        this.losTarget.texture,
+        this.lightMaskTarget.texture
       );
-    }
-
-    // 4. Screen vignette & spot/chase danger pulse
-    this.drawVignetteAndDanger(ctx, engine, width, height, zoom, timeSec);
-  }
-
-  private drawOceanWaves(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    timeSec: number,
-    zoom: number
-  ): void {
-    const halfW = width / (2 * zoom);
-    const halfH = height / (2 * zoom);
-    const startX = Math.floor((engine.cameraX - halfW) / 140) * 140 - 140;
-    const endX = engine.cameraX + halfW + 140;
-    const startY = Math.floor((engine.cameraY - halfH) / 76) * 76 - 76;
-    const endY = engine.cameraY + halfH + 76;
-
-    // Deep layered North Atlantic swells
-    ctx.lineWidth = 1.6;
-    for (let y = startY; y < endY; y += 76) {
-      for (let x = startX; x < endX; x += 140) {
-        const phase = y * 0.024 + x * 0.011;
-        const drift = Math.sin(timeSec * 1.15 + phase) * 16;
-        ctx.strokeStyle = 'rgba(28, 56, 92, 0.22)';
-        ctx.beginPath();
-        ctx.moveTo(x + drift, y);
-        ctx.quadraticCurveTo(x + 36 + drift, y - 7, x + 74 + drift, y);
-        ctx.stroke();
-
-        ctx.strokeStyle = 'rgba(56, 189, 248, 0.08)';
-        ctx.beginPath();
-        ctx.moveTo(x + 24 - drift * 0.6, y + 28);
-        ctx.quadraticCurveTo(x + 56 - drift * 0.6, y + 23, x + 90 - drift * 0.6, y + 28);
-        ctx.stroke();
-      }
-    }
-
-    // Subtle sea-foam wake hugging the outer hull plates
-    const { tiles, tileSize, width: mw, height: mh } = engine.map;
-    const minTx = Math.max(0, Math.floor((engine.cameraX - halfW) / tileSize) - 1);
-    const maxTx = Math.min(mw - 1, Math.ceil((engine.cameraX + halfW) / tileSize) + 1);
-    const minTy = Math.max(0, Math.floor((engine.cameraY - halfH) / tileSize) - 1);
-    const maxTy = Math.min(mh - 1, Math.ceil((engine.cameraY + halfH) / tileSize) + 1);
-
-    ctx.strokeStyle = 'rgba(125, 211, 252, 0.1)';
-    ctx.lineWidth = 2.2;
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        const t = tiles[ty][tx];
-        if (t === 'VOID') continue;
-        const x = tx * tileSize;
-        const y = ty * tileSize;
-        const wave = Math.sin(timeSec * 1.8 + tx * 0.45 + ty * 0.35) * 2.5;
-        if (tiles[ty - 1]?.[tx] === 'VOID') {
-          ctx.beginPath();
-          ctx.moveTo(x + 2, y - 6 + wave);
-          ctx.quadraticCurveTo(x + tileSize * 0.5, y - 9 - wave, x + tileSize - 2, y - 6 + wave);
-          ctx.stroke();
-        }
-        if (tiles[ty + 1]?.[tx] === 'VOID') {
-          ctx.beginPath();
-          ctx.moveTo(x + 2, y + tileSize + 6 - wave);
-          ctx.quadraticCurveTo(
-            x + tileSize * 0.5,
-            y + tileSize + 9 + wave,
-            x + tileSize - 2,
-            y + tileSize + 6 - wave
-          );
-          ctx.stroke();
-        }
-      }
-    }
-  }
-
-  private drawTiles(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    timeSec: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const { tiles, floorMaterial, tileSize, width: mw, height: mh } = engine.map;
-    const halfW = width / (2 * zoom);
-    const halfH = height / (2 * zoom);
-    const minTx = Math.max(0, Math.floor((camX - halfW) / tileSize) - 1);
-    const maxTx = Math.min(mw - 1, Math.ceil((camX + halfW) / tileSize) + 1);
-    const minTy = Math.max(0, Math.floor((camY - halfH) / tileSize) - 1);
-    const maxTy = Math.min(mh - 1, Math.ceil((camY + halfH) / tileSize) + 1);
-    const tex = this.textures;
-
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        const t = tiles[ty][tx];
-        if (t === 'VOID' || t === 'WALL') continue;
-        const x = tx * tileSize;
-        const y = ty * tileSize;
-        const mat =
-          t === 'EXTERIOR_DECK' || t === 'ESCAPE_HELI' || t === 'ESCAPE_LIFEBOAT'
-            ? 'WEATHER'
-            : floorMaterial[ty][tx];
-
-        // World-aligned cached procedural ship deck texture
-        const pat = tex?.floorPatterns[mat];
-        if (pat) {
-          ctx.fillStyle = pat;
-          ctx.fillRect(x, y, tileSize, tileSize);
-        } else {
-          ctx.fillStyle = '#141a23';
-          ctx.fillRect(x, y, tileSize, tileSize);
-        }
-
-        // Deterministic rust/oil grime decals breaking repetition
-        const hash = ((tx * 73856093) ^ (ty * 19349663)) >>> 0;
-        if (tex && tex.grimeDecals.length > 0 && mat !== 'BRIDGE' && hash % 7 === 0) {
-          const decal = tex.grimeDecals[hash % tex.grimeDecals.length];
-          ctx.drawImage(decal, x, y);
-        }
-
-        // Escape deck hazard zones
-        if (t === 'ESCAPE_HELI') {
-          ctx.fillStyle = 'rgba(251, 191, 36, 0.1)';
-          ctx.fillRect(x, y, tileSize, tileSize);
-          ctx.strokeStyle = 'rgba(251, 191, 36, 0.24)';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
-        } else if (t === 'ESCAPE_LIFEBOAT') {
-          ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
-          ctx.fillRect(x, y, tileSize, tileSize);
-          ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
-        } else if (t === 'ESCAPE_SUBMARINE') {
-          ctx.fillStyle = 'rgba(45, 212, 191, 0.14)';
-          ctx.fillRect(x, y, tileSize, tileSize);
-          ctx.strokeStyle = 'rgba(45, 212, 191, 0.34)';
-          ctx.lineWidth = 1.2;
-          ctx.strokeRect(x + 2, y + 2, tileSize - 4, tileSize - 4);
-        }
-
-        // Floor-to-wall Ambient Occlusion + crisp steel bulkhead baseboard along inner wall edge
-        const aoDepth = 6;
-        const wallN = tiles[ty - 1]?.[tx] === 'WALL';
-        const wallS = tiles[ty + 1]?.[tx] === 'WALL';
-        const wallW = tiles[ty]?.[tx - 1] === 'WALL';
-        const wallE = tiles[ty]?.[tx + 1] === 'WALL';
-
-        if (wallN) {
-          const g = ctx.createLinearGradient(x, y, x, y + aoDepth);
-          g.addColorStop(0, 'rgba(0, 0, 0, 0.36)');
-          g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(x, y, tileSize, aoDepth);
-          ctx.fillStyle = 'rgba(100, 116, 139, 0.38)';
-          ctx.fillRect(x, y, tileSize, 1.5);
-        }
-        if (wallS) {
-          const g = ctx.createLinearGradient(x, y + tileSize, x, y + tileSize - aoDepth);
-          g.addColorStop(0, 'rgba(0, 0, 0, 0.34)');
-          g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(x, y + tileSize - aoDepth, tileSize, aoDepth);
-          ctx.fillStyle = 'rgba(71, 85, 105, 0.38)';
-          ctx.fillRect(x, y + tileSize - 1.5, tileSize, 1.5);
-        }
-        if (wallW) {
-          const g = ctx.createLinearGradient(x, y, x + aoDepth, y);
-          g.addColorStop(0, 'rgba(0, 0, 0, 0.35)');
-          g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(x, y, aoDepth, tileSize);
-          ctx.fillStyle = 'rgba(100, 116, 139, 0.36)';
-          ctx.fillRect(x, y, 1.5, tileSize);
-        }
-        if (wallE) {
-          const g = ctx.createLinearGradient(x + tileSize, y, x + tileSize - aoDepth, y);
-          g.addColorStop(0, 'rgba(0, 0, 0, 0.35)');
-          g.addColorStop(1, 'rgba(0, 0, 0, 0)');
-          ctx.fillStyle = g;
-          ctx.fillRect(x + tileSize - aoDepth, y, aoDepth, tileSize);
-          ctx.fillStyle = 'rgba(71, 85, 105, 0.36)';
-          ctx.fillRect(x + tileSize - 1.5, y, 1.5, tileSize);
-        }
-
-        // Exterior deck corner-chamfered tubular steel gunwale safety railings
-        if (t === 'EXTERIOR_DECK' || t === 'ESCAPE_HELI' || t === 'ESCAPE_LIFEBOAT') {
-          const voidN = tiles[ty - 1]?.[tx] === 'VOID';
-          const voidS = tiles[ty + 1]?.[tx] === 'VOID';
-          const voidW = tiles[ty]?.[tx - 1] === 'VOID';
-          const voidE = tiles[ty]?.[tx + 1] === 'VOID';
-
-          const inset = 3;
-          const cham = 10;
-
-          const drawRail = (x1: number, y1: number, x2: number, y2: number) => {
-            ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
-            ctx.lineWidth = 4.2;
-            ctx.beginPath();
-            ctx.moveTo(x1, y1 + 1.5);
-            ctx.lineTo(x2, y2 + 1.5);
-            ctx.stroke();
-
-            ctx.strokeStyle = '#64748b';
-            ctx.lineWidth = 2.6;
-            ctx.lineCap = 'round';
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
-            ctx.stroke();
-
-            ctx.fillStyle = '#cbd5e1';
-            ctx.beginPath();
-            ctx.arc(x1, y1, 2.2, 0, Math.PI * 2);
-            ctx.arc(x2, y2, 2.2, 0, Math.PI * 2);
-            ctx.fill();
-          };
-
-          if (voidN) {
-            drawRail(x + (voidW ? cham : 0), y + inset, x + tileSize - (voidE ? cham : 0), y + inset);
-          }
-          if (voidS) {
-            drawRail(
-              x + (voidW ? cham : 0),
-              y + tileSize - inset,
-              x + tileSize - (voidE ? cham : 0),
-              y + tileSize - inset
-            );
-          }
-          if (voidW) {
-            drawRail(x + inset, y + (voidN ? cham : 0), x + inset, y + tileSize - (voidS ? cham : 0));
-          }
-          if (voidE) {
-            drawRail(
-              x + tileSize - inset,
-              y + (voidN ? cham : 0),
-              x + tileSize - inset,
-              y + tileSize - (voidS ? cham : 0)
-            );
-          }
-          // Angled chamfer corner rail caps
-          if (voidN && voidW) drawRail(x + inset, y + cham, x + cham, y + inset);
-          if (voidN && voidE) drawRail(x + tileSize - cham, y + inset, x + tileSize - inset, y + cham);
-          if (voidS && voidW) drawRail(x + inset, y + tileSize - cham, x + cham, y + tileSize - inset);
-          if (voidS && voidE)
-            drawRail(x + tileSize - cham, y + tileSize - inset, x + tileSize - inset, y + tileSize - cham);
-        }
-      }
-    }
-  }
-
-  private drawBulkheads(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const { tiles, tileSize, width: mw, height: mh } = engine.map;
-    const halfW = width / (2 * zoom);
-    const halfH = height / (2 * zoom);
-    const minTx = Math.max(0, Math.floor((camX - halfW) / tileSize) - 1);
-    const maxTx = Math.min(mw - 1, Math.ceil((camX + halfW) / tileSize) + 1);
-    const minTy = Math.max(0, Math.floor((camY - halfH) / tileSize) - 1);
-    const maxTy = Math.min(mh - 1, Math.ceil((camY + halfH) / tileSize) + 1);
-    const armorPattern = this.textures?.wallArmorPattern;
-
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        if (tiles[ty][tx] !== 'WALL') continue;
-        const x = tx * tileSize;
-        const y = ty * tileSize;
-
-        // Flush outer armor fill aligned 1:1 with raycast wall segments (zero gaps behind walls)
-        ctx.fillStyle = armorPattern ?? '#1d2635';
-        ctx.fillRect(x, y, tileSize, tileSize);
-
-        const nWall = tiles[ty - 1]?.[tx] === 'WALL';
-        const sWall = tiles[ty + 1]?.[tx] === 'WALL';
-        const wWall = tiles[ty]?.[tx - 1] === 'WALL';
-        const eWall = tiles[ty]?.[tx + 1] === 'WALL';
-
-        const isOuterHull =
-          tiles[ty - 1]?.[tx] === 'VOID' ||
-          tiles[ty + 1]?.[tx] === 'VOID' ||
-          tiles[ty]?.[tx - 1] === 'VOID' ||
-          tiles[ty]?.[tx + 1] === 'VOID';
-
-        // Connected bulkhead rim bevels only along exposed faces (eliminates blocky tile grid lines)
-        const rimW = 4;
-        if (!nWall) {
-          ctx.fillStyle = isOuterHull ? '#475569' : '#3b4a62';
-          ctx.fillRect(x, y, tileSize, rimW);
-          ctx.fillStyle = '#090d14';
-          ctx.fillRect(x, y, tileSize, 1.2);
-        }
-        if (!sWall) {
-          ctx.fillStyle = '#111722';
-          ctx.fillRect(x, y + tileSize - rimW, tileSize, rimW);
-          ctx.fillStyle = '#06090e';
-          ctx.fillRect(x, y + tileSize - 1.2, tileSize, 1.2);
-        }
-        if (!wWall) {
-          ctx.fillStyle = isOuterHull ? '#3e4c63' : '#313f55';
-          ctx.fillRect(x, y, rimW, tileSize);
-          ctx.fillStyle = '#090d14';
-          ctx.fillRect(x, y, 1.2, tileSize);
-        }
-        if (!eWall) {
-          ctx.fillStyle = '#151c29';
-          ctx.fillRect(x + tileSize - rimW, y, rimW, tileSize);
-          ctx.fillStyle = '#06090e';
-          ctx.fillRect(x + tileSize - 1.2, y, 1.2, tileSize);
-        }
-
-        // Mitered corner highlights/caps where two exposed bulkhead faces meet
-        if (!nWall && !wWall) {
-          ctx.fillStyle = '#64748b';
-          ctx.fillRect(x + 1, y + 1, rimW - 1, rimW - 1);
-        }
-        if (!nWall && !eWall) {
-          ctx.fillStyle = '#475569';
-          ctx.fillRect(x + tileSize - rimW, y + 1, rimW - 1, rimW - 1);
-        }
-        if (!sWall && !wWall) {
-          ctx.fillStyle = '#293548';
-          ctx.fillRect(x + 1, y + tileSize - rimW, rimW - 1, rimW - 1);
-        }
-        if (!sWall && !eWall) {
-          ctx.fillStyle = '#0b0f17';
-          ctx.fillRect(x + tileSize - rimW, y + tileSize - rimW, rimW - 1, rimW - 1);
-        }
-
-        // Subtle welded center rib on thicker multi-tile bulkheads
-        if (nWall && sWall && !wWall && !eWall) {
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
-          ctx.fillRect(x + tileSize * 0.5 - 1, y, 2, tileSize);
-        } else if (wWall && eWall && !nWall && !sWall) {
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
-          ctx.fillRect(x, y + tileSize * 0.5 - 1, tileSize, 2);
-        }
-      }
-    }
-  }
-
-  private drawRoomStencils(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 220;
-    const halfH = height / (2 * zoom) + 180;
-    ctx.save();
-    ctx.font = '600 11px "Barlow Condensed", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.2)';
-
-    const ts = engine.map.tileSize;
-    for (const r of engine.map.rooms) {
-      if (r.name === 'Catwalk') continue;
-      const cx = ((r.x1 + r.x2 + 1) / 2) * ts;
-      const cy = ((r.y1 + r.y2 + 1) / 2) * ts;
-      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
-      ctx.fillText(r.name.toUpperCase(), cx, cy);
-    }
-    ctx.restore();
-  }
-
-  private drawBloodStreaks(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const streaks = engine.map.bloodStreaks;
-    if (!streaks || streaks.length === 0) return;
-
-    const halfW = width / (2 * zoom) + 90;
-    const halfH = height / (2 * zoom) + 90;
-
-    for (const bs of streaks) {
-      if (
-        Math.abs(bs.x - camX) > halfW ||
-        Math.abs(bs.y - camY) > halfH
-      ) {
-        continue;
-      }
-
-      ctx.save();
-      ctx.translate(bs.x, bs.y);
-      ctx.rotate(bs.angle);
-
-      const alpha = bs.intensity;
-      if (bs.kind === 'DRAG_SMEAR') {
-        // Dark dried pool at origin
-        ctx.fillStyle = `rgba(62, 10, 12, ${alpha * 0.72})`;
-        ctx.beginPath();
-        ctx.ellipse(2, 0, bs.width * 0.65, bs.width * 0.45, 0, 0, Math.PI * 2);
-        ctx.fill();
-
-        // Tapered body/finger drag streaks
-        const ribs = [-0.34, -0.08, 0.16, 0.38];
-        for (let r = 0; r < ribs.length; r++) {
-          const offsetY = ribs[r] * bs.width;
-          const segLen = bs.length * (0.72 + ((bs.seed + r * 17) % 28) / 100);
-          const grad = ctx.createLinearGradient(0, offsetY, segLen, offsetY);
-          grad.addColorStop(0, `rgba(112, 16, 20, ${alpha * 0.78})`);
-          grad.addColorStop(0.55, `rgba(88, 12, 15, ${alpha * 0.48})`);
-          grad.addColorStop(1, 'rgba(62, 8, 10, 0)');
-          ctx.strokeStyle = grad;
-          ctx.lineCap = 'round';
-          ctx.lineWidth = r === 1 || r === 2 ? 3.2 : 1.9;
-          ctx.beginPath();
-          ctx.moveTo(0, offsetY);
-          ctx.quadraticCurveTo(
-            segLen * 0.5,
-            offsetY + (((bs.seed + r) % 3) - 1) * 1.4,
-            segLen,
-            offsetY * 0.85
-          );
-          ctx.stroke();
-        }
-      } else if (bs.kind === 'BOOTPRINTS') {
-        const steps = Math.max(4, Math.floor(bs.length / 10));
-        for (let i = 0; i < steps; i++) {
-          const stepAlpha = alpha * Math.max(0.18, 0.85 - (i / steps) * 0.62);
-          const sx = i * 9.5;
-          const sy = i % 2 === 0 ? -3.4 : 3.4;
-          ctx.fillStyle = `rgba(98, 14, 18, ${stepAlpha})`;
-          // Heel
-          ctx.beginPath();
-          ctx.ellipse(sx - 1.5, sy, 2.0, 1.5, 0, 0, Math.PI * 2);
-          ctx.fill();
-          // Forefoot sole
-          ctx.beginPath();
-          ctx.ellipse(sx + 2.4, sy, 3.0, 1.85, 0, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else {
-        // SPLATTER: coagulated core + directional cast-off droplets
-        ctx.fillStyle = `rgba(76, 11, 14, ${alpha * 0.76})`;
-        ctx.beginPath();
-        ctx.ellipse(0, 0, bs.width * 0.42, bs.width * 0.3, 0.2, 0, Math.PI * 2);
-        ctx.fill();
-
-        let s = bs.seed + 11;
-        for (let d = 0; d < 9; d++) {
-          s = (s * 1664525 + 1013904223) >>> 0;
-          const a = ((s % 1000) / 1000 - 0.5) * 1.3;
-          s = (s * 1664525 + 1013904223) >>> 0;
-          const dist = 4 + ((s % 1000) / 1000) * bs.length;
-          const rad = Math.max(0.8, 1.0 + ((s >>> 8) % 24) / 10);
-          ctx.fillStyle =
-            d % 3 === 0
-              ? `rgba(127, 29, 29, ${alpha * 0.68})`
-              : `rgba(88, 13, 16, ${alpha * 0.58})`;
-          ctx.beginPath();
-          ctx.ellipse(
-            Math.cos(a) * dist,
-            Math.sin(a) * dist,
-            rad * 1.35,
-            rad * 0.85,
-            a,
-            0,
-            Math.PI * 2
-          );
-          ctx.fill();
-        }
-      }
-
-      ctx.restore();
-    }
-  }
-
-  private drawShipProps(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const ts = engine.map.tileSize;
-    const halfW = width / (2 * zoom) + 120;
-    const halfH = height / (2 * zoom) + 120;
-    const minX = camX - halfW;
-    const maxX = camX + halfW;
-    const minY = camY - halfH;
-    const maxY = camY + halfH;
-
-    // Two-pass order: walkable floor clutter first (flush on deck), then blocking centerpieces
-    const sortedProps = [
-      ...engine.map.props.filter((p) => !p.blocking),
-      ...engine.map.props.filter((p) => Boolean(p.blocking)),
-    ];
-
-    for (const prop of sortedProps) {
-      if (prop.kind === 'SUBMARINE_HULL') continue; // Rendered with moonpool detail in drawEscapeZones
-      const px = prop.tx * ts;
-      const py = prop.ty * ts;
-      const pw = prop.tw * ts;
-      const ph = prop.th * ts;
-      if (px + pw < minX || px > maxX || py + ph < minY || py > maxY) continue;
-
-      ctx.save();
-      if (prop.kind === 'SHIPPING_CONTAINER') {
-        // Ground contact shadow
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, px + 5, py + 6, pw - 4, ph - 4, 4);
-        ctx.fill();
-
-        // Rounded beveled container shell
-        ctx.fillStyle = prop.color ?? '#334155';
-        traceRoundedRect(ctx, px + 2, py + 2, pw - 4, ph - 4, 4);
-        ctx.fill();
-
-        // Corrugated steel roof ribs
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.36)';
-        ctx.lineWidth = 2.2;
-        for (let rx = px + 9; rx < px + pw - 6; rx += 8) {
-          ctx.beginPath();
-          ctx.moveTo(rx, py + 5);
-          ctx.lineTo(rx, py + ph - 5);
-          ctx.stroke();
-        }
-        ctx.strokeStyle = 'rgba(226, 232, 240, 0.14)';
-        ctx.lineWidth = 1;
-        for (let rx = px + 11; rx < px + pw - 6; rx += 8) {
-          ctx.beginPath();
-          ctx.moveTo(rx, py + 5);
-          ctx.lineTo(rx, py + ph - 5);
-          ctx.stroke();
-        }
-
-        ctx.strokeStyle = 'rgba(226, 232, 240, 0.24)';
-        ctx.lineWidth = 1.5;
-        traceRoundedRect(ctx, px + 2.5, py + 2.5, pw - 5, ph - 5, 4);
-        ctx.stroke();
-
-        // ISO Corner castings
-        ctx.fillStyle = '#94a3b8';
-        ctx.fillRect(px + 2, py + 2, 5, 5);
-        ctx.fillRect(px + pw - 7, py + 2, 5, 5);
-        ctx.fillRect(px + 2, py + ph - 7, 5, 5);
-        ctx.fillRect(px + pw - 7, py + ph - 7, 5, 5);
-      } else if (prop.kind === 'TURBINE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 8, 6);
-        ctx.fill();
-
-        ctx.fillStyle = '#242f3f';
-        traceRoundedRect(ctx, px + 3, py + 4, pw - 6, ph - 8, 6);
-        ctx.fill();
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-
-        // Cylindrical rotor housing, cooling fins & copper manifold rings
-        ctx.fillStyle = '#9a3412';
-        traceRoundedRect(ctx, px + 10, py + 8, 7, ph - 16, 2);
-        ctx.fill();
-        traceRoundedRect(ctx, px + pw - 19, py + 8, 7, ph - 16, 2);
-        ctx.fill();
-
-        ctx.fillStyle = '#475569';
-        traceRoundedRect(ctx, px + 20, py + 11, pw - 42, ph - 22, 4);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(15, 23, 42, 0.65)';
-        ctx.lineWidth = 1.5;
-        for (let fx = px + 26; fx < px + pw - 24; fx += 7) {
-          ctx.beginPath();
-          ctx.moveTo(fx, py + 12);
-          ctx.lineTo(fx, py + ph - 12);
-          ctx.stroke();
-        }
-      } else if (prop.kind === 'BOILER') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, px + 6, py + 6, pw - 8, ph - 8, 6);
-        ctx.fill();
-
-        ctx.fillStyle = '#2e2623';
-        traceRoundedRect(ctx, px + 4, py + 4, pw - 8, ph - 8, 6);
-        ctx.fill();
-        ctx.strokeStyle = '#b45309';
-        ctx.lineWidth = 1.8;
-        ctx.stroke();
-
-        // Furnace sight-glass & riveted pressure collar
-        ctx.fillStyle = '#1c1917';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 8.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#f59e0b';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 4.5, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (prop.kind === 'PIPE_RUN') {
-        ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
-        ctx.lineWidth = 6;
-        ctx.beginPath();
-        ctx.moveTo(px + 2, py + 12);
-        ctx.lineTo(px + pw - 2, py + 12);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 4.5;
-        ctx.beginPath();
-        ctx.moveTo(px + 2, py + 10);
-        ctx.lineTo(px + pw - 2, py + 10);
-        ctx.stroke();
-        ctx.strokeStyle = '#9a3412';
-        ctx.lineWidth = 3.2;
-        ctx.beginPath();
-        ctx.moveTo(px + 2, py + 19);
-        ctx.lineTo(px + pw - 2, py + 19);
-        ctx.stroke();
-
-        // Pipe flange collars
-        ctx.fillStyle = '#64748b';
-        for (let fx = px + 14; fx < px + pw - 10; fx += 34) {
-          ctx.fillRect(fx - 2, py + 6, 4, 17);
-        }
-      } else if (prop.kind === 'BUNK') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#2b3648';
-        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#1e3a5f';
-        traceRoundedRect(ctx, px + 14, py + 8, pw - 20, ph - 16, 2);
-        ctx.fill();
-        ctx.fillStyle = '#cbd5e1';
-        traceRoundedRect(ctx, px + 6, py + 9, 7, ph - 18, 2);
-        ctx.fill();
-      } else if (prop.kind === 'GALLEY_COUNTER') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#475569';
-        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(px + 8, py + 9, 14, ph - 18);
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1.3;
-        ctx.beginPath();
-        ctx.arc(px + pw - 18, py + ph / 2, 6, 0, Math.PI * 2);
-        ctx.stroke();
-      } else if (prop.kind === 'MESS_TABLE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 7, py + 10, pw - 10, ph - 16, 3);
-        ctx.fill();
-        ctx.fillStyle = '#57422a';
-        traceRoundedRect(ctx, px + 5, py + 8, pw - 10, ph - 16, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#785a3a';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(px + 8, py + 2, pw - 16, 4);
-        ctx.fillRect(px + 8, py + ph - 6, pw - 16, 4);
-      } else if (prop.kind === 'HELM_CONSOLE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.44)';
-        traceRoundedRect(ctx, px + 8, py + 6, pw - 12, ph - 8, 4);
-        ctx.fill();
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, px + 6, py + 4, pw - 12, ph - 8, 4);
-        ctx.fill();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-        ctx.fillStyle = '#34d399';
-        ctx.fillRect(px + 10, py + 12, 4, 8);
-        ctx.fillStyle = '#fbbf24';
-        ctx.fillRect(px + 10, py + ph - 20, 4, 8);
-      } else if (prop.kind === 'CHART_TABLE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 6, py + 6, pw - 8, ph - 8, 3);
-        ctx.fill();
-        ctx.fillStyle = '#3b4656';
-        traceRoundedRect(ctx, px + 4, py + 4, pw - 8, ph - 8, 3);
-        ctx.fill();
-        ctx.fillStyle = '#cbd5e1';
-        ctx.fillRect(px + 9, py + 9, pw - 18, ph - 18);
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 0.8;
-        ctx.strokeRect(px + 11, py + 11, pw - 22, ph - 22);
-      } else if (prop.kind === 'MED_BED') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#334155';
-        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#94a3b8';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 12, ph - 16, 2);
-        ctx.fill();
-        ctx.fillStyle = '#dc2626';
-        ctx.fillRect(px + pw / 2 - 4, py + ph / 2 - 1.5, 8, 3);
-        ctx.fillRect(px + pw / 2 - 1.5, py + ph / 2 - 4, 3, 8);
-      } else if (prop.kind === 'WORKBENCH') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#475569';
-        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#991b1b';
-        ctx.fillRect(px + 8, py + 10, 10, 8);
-      } else if (prop.kind === 'CAPSTAN') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        ctx.beginPath();
-        ctx.arc(px + ts / 2 + 2, py + ts / 2 + 3, 14, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#334155';
-        ctx.beginPath();
-        ctx.arc(px + ts / 2, py + ts / 2, 13, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.fillStyle = '#475569';
-        ctx.beginPath();
-        ctx.arc(px + ts / 2, py + ts / 2, 6, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (prop.kind === 'CRANE_PEDESTAL') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2 + 3, py + ph / 2 + 4, 21, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#854d0e';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 20, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#fbbf24';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 5;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(px + pw / 2, py + ph / 2);
-        ctx.lineTo(px + pw / 2 + 28, py + ph / 2 - 16);
-        ctx.stroke();
-      } else if (prop.kind === 'FLOODGATE_LEVER') {
-        const subPartsDone = engine.escape.submarineParts.length === 3;
-        const subActiveOrReady = engine.escape.submarineState !== 'IDLE';
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
-        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.strokeStyle = subActiveOrReady ? '#34d399' : subPartsDone ? '#2dd4bf' : '#64748b';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-        // Lever track & handle
-        ctx.fillStyle = '#090d14';
-        ctx.fillRect(px + pw * 0.5 - 3, py + 11, 6, ph - 22);
-        const leverY = subActiveOrReady ? py + ph - 16 : py + 14;
-        ctx.fillStyle = subActiveOrReady ? '#34d399' : subPartsDone ? '#f59e0b' : '#ef4444';
-        ctx.fillRect(px + pw * 0.5 - 7, leverY - 3, 14, 6);
-      } else if (prop.kind === 'PUMP_UNIT') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
-        traceRoundedRect(ctx, px + 6, py + 7, pw - 8, ph - 8, 5);
-        ctx.fill();
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, px + 4, py + 4, pw - 8, ph - 8, 5);
-        ctx.fill();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.fillStyle = '#0f766e';
-        ctx.beginPath();
-        ctx.arc(px + pw * 0.5, py + ph * 0.5, 13, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      } else if (prop.kind === 'SWITCHGEAR') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#242f3f';
-        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 10, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-        for (let sx = px + 14; sx < px + pw - 12; sx += 18) {
-          ctx.fillStyle = sx % 36 < 18 ? '#f59e0b' : '#34d399';
-          ctx.fillRect(sx, py + 12, 4, 4);
-        }
-      } else if (prop.kind === 'CABIN_WARDROBE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 2);
-        ctx.fill();
-        ctx.fillStyle = '#3f2e22';
-        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 2);
-        ctx.fill();
-        ctx.strokeStyle = '#785a3a';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(px + pw / 2 - 0.8, py + 7, 1.6, ph - 14);
-      } else if (prop.kind === 'GALLEY_FRIDGE') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#64748b';
-        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 1.3;
-        ctx.stroke();
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(px + 9, py + ph - 11, pw - 18, 3);
-      } else if (prop.kind === 'DINING_BOOTH') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#7f1d1d';
-        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, 8, 2);
-        ctx.fill();
-        traceRoundedRect(ctx, px + 3, py + ph - 13, pw - 6, 8, 2);
-        ctx.fill();
-        ctx.fillStyle = '#cbd5e1';
-        traceRoundedRect(ctx, px + 6, py + ph / 2 - 5, pw - 12, 10, 2);
-        ctx.fill();
-      } else if (prop.kind === 'MED_CART') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.38)';
-        traceRoundedRect(ctx, px + 8, py + 8, pw - 12, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#cbd5e1';
-        traceRoundedRect(ctx, px + 6, py + 6, pw - 12, ph - 12, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-        ctx.fillStyle = '#dc2626';
-        ctx.fillRect(px + pw / 2 - 4, py + ph / 2 - 1.5, 8, 3);
-        ctx.fillRect(px + pw / 2 - 1.5, py + ph / 2 - 4, 3, 8);
-      } else if (prop.kind === 'CARGO_RACK') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 2);
-        ctx.fill();
-        ctx.fillStyle = '#334155';
-        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, ph - 10, 2);
-        ctx.fill();
-        ctx.strokeStyle = '#d97706';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-        ctx.fillStyle = '#57422a';
-        ctx.fillRect(px + 8, py + 9, pw / 2 - 10, ph - 18);
-        ctx.fillStyle = '#1e3a5f';
-        ctx.fillRect(px + pw / 2 + 2, py + 9, pw / 2 - 10, ph - 18);
-      } else if (prop.kind === 'GENERATOR_SKID') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 6, ph - 10, 4);
-        ctx.fill();
-        ctx.fillStyle = '#1f2937';
-        traceRoundedRect(ctx, px + 3, py + 5, pw - 6, ph - 10, 4);
-        ctx.fill();
-        ctx.strokeStyle = '#f59e0b';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.fillStyle = '#991b1b';
-        traceRoundedRect(ctx, px + 10, py + 10, pw - 20, ph - 20, 3);
-        ctx.fill();
-        ctx.fillStyle = '#334155';
-        for (let gx = px + 14; gx < px + pw - 14; gx += 7) {
-          ctx.fillRect(gx, py + 12, 3, ph - 24);
-        }
-      } else if (prop.kind === 'VALVE_MANIFOLD') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-        traceRoundedRect(ctx, px + 7, py + 7, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.fillStyle = '#334155';
-        traceRoundedRect(ctx, px + 5, py + 5, pw - 10, ph - 10, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#9a3412';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(px + 7, py + ph / 2);
-        ctx.lineTo(px + pw - 7, py + ph / 2);
-        ctx.stroke();
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 7, 0, Math.PI * 2);
-        ctx.stroke();
-      } else if (prop.kind === 'COMPRESSED_AIR_TANK') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2 + 2, py + ph / 2 + 2, 13, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#0f766e';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 12, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#99f6e4';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-        ctx.fillStyle = '#cbd5e1';
-        ctx.beginPath();
-        ctx.arc(px + pw / 2, py + ph / 2, 4, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (prop.kind === 'DIVE_GEAR_RACK') {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-        traceRoundedRect(ctx, px + 6, py + 8, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, px + 4, py + 6, pw - 8, ph - 12, 3);
-        ctx.fill();
-        ctx.strokeStyle = '#2dd4bf';
-        ctx.lineWidth = 1.3;
-        ctx.stroke();
-        for (let tx = px + 11; tx < px + pw - 10; tx += 11) {
-          ctx.fillStyle = '#f59e0b';
-          ctx.beginPath();
-          ctx.arc(tx, py + ph / 2, 3.6, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      } else if (prop.kind === 'RUBBER_RUNNER') {
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.58)';
-        traceRoundedRect(ctx, px + 4, py + 8, pw - 8, ph - 16, 2);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(100, 116, 139, 0.35)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
-        for (let rx = px + 10; rx < px + pw - 8; rx += 8) {
-          ctx.beginPath();
-          ctx.moveTo(rx, py + 11);
-          ctx.lineTo(rx, py + ph - 11);
-          ctx.stroke();
-        }
-      } else if (prop.kind === 'FLOOR_GRATE') {
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.5)';
-        ctx.fillRect(px + 5, py + 5, pw - 10, ph - 10);
-        ctx.strokeStyle = 'rgba(100, 116, 139, 0.45)';
-        ctx.lineWidth = 1.2;
-        ctx.strokeRect(px + 5, py + 5, pw - 10, ph - 10);
-        for (let gx = px + 10; gx < px + pw - 6; gx += 6) {
-          ctx.beginPath();
-          ctx.moveTo(gx, py + 6);
-          ctx.lineTo(gx, py + ph - 6);
-          ctx.stroke();
-        }
-      } else if (prop.kind === 'CABLE_COIL') {
-        const cx = px + pw / 2;
-        const cy = py + ph / 2;
-        ctx.strokeStyle = 'rgba(15, 23, 42, 0.7)';
-        ctx.lineWidth = 5;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 11, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.strokeStyle = prop.color ?? '#b45309';
-        ctx.lineWidth = 2.6;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 11, 0, Math.PI * 1.85);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(cx + 1, cy - 1, 7.2, 0.4, Math.PI * 2.1);
-        ctx.stroke();
-      } else if (prop.kind === 'CAUTION_MAT') {
-        ctx.fillStyle = 'rgba(24, 24, 27, 0.72)';
-        ctx.fillRect(px + 4, py + 8, pw - 8, ph - 16);
-        ctx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(px + 4, py + 8, pw - 8, ph - 16);
-        ctx.strokeStyle = 'rgba(245, 158, 11, 0.36)';
-        ctx.lineWidth = 2;
-        for (let sx = px + 8; sx < px + pw - 10; sx += 9) {
-          ctx.beginPath();
-          ctx.moveTo(sx, py + ph - 10);
-          ctx.lineTo(sx + 5, py + 10);
-          ctx.stroke();
-        }
-      } else if (prop.kind === 'OIL_DRIP_TRAY') {
-        ctx.fillStyle = 'rgba(30, 41, 59, 0.65)';
-        ctx.fillRect(px + 7, py + 9, pw - 14, ph - 18);
-        ctx.strokeStyle = 'rgba(100, 116, 139, 0.55)';
-        ctx.lineWidth = 1.2;
-        ctx.strokeRect(px + 7, py + 9, pw - 14, ph - 18);
-        ctx.fillStyle = 'rgba(2, 6, 23, 0.85)';
-        ctx.beginPath();
-        ctx.ellipse(px + pw / 2, py + ph / 2, pw * 0.25, ph * 0.2, 0.2, 0, Math.PI * 2);
-        ctx.fill();
-      } else if (prop.kind === 'RUG_MAT') {
-        ctx.fillStyle = prop.color ?? 'rgba(127, 29, 29, 0.48)';
-        traceRoundedRect(ctx, px + 5, py + 7, pw - 10, ph - 14, 2);
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(217, 119, 6, 0.35)';
-        ctx.lineWidth = 1.2;
-        traceRoundedRect(ctx, px + 8, py + 10, pw - 16, ph - 20, 1);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-  }
-
-  private drawSteamPipes(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    timeSec: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const ts = engine.map.tileSize;
-    const halfW = width / (2 * zoom) + 220;
-    const halfH = height / (2 * zoom) + 220;
-
-    for (const pipe of engine.map.steamPipes) {
-      if (Math.abs(pipe.x - camX) > halfW || Math.abs(pipe.y - camY) > halfH) continue;
-
-      const wallCx = (pipe.wallTx + 0.5) * ts;
-      const wallCy = (pipe.wallTy + 0.5) * ts;
-      const edgeX = wallCx + pipe.dirX * (ts * 0.48);
-      const edgeY = wallCy + pipe.dirY * (ts * 0.48);
-      const perpX = -pipe.dirY;
-      const perpY = pipe.dirX;
-
-      const isWarn = pipe.warningTimer > 0;
-      const isActive = pipe.activeTimer > 0;
-
-      ctx.save();
-      // Wall-mounted bronze/iron pipe collar & directional flanged nozzle
-      ctx.strokeStyle = '#090d14';
-      ctx.lineWidth = 8;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(edgeX - pipe.dirX * 10, edgeY - pipe.dirY * 10);
-      ctx.lineTo(edgeX + pipe.dirX * 11, edgeY + pipe.dirY * 11);
-      ctx.stroke();
-
-      ctx.strokeStyle = isActive ? '#e2e8f0' : isWarn ? '#f59e0b' : '#9a3412';
-      ctx.lineWidth = 5.2;
-      ctx.beginPath();
-      ctx.moveTo(edgeX - pipe.dirX * 9, edgeY - pipe.dirY * 9);
-      ctx.lineTo(edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10);
-      ctx.stroke();
-
-      // Bolted wall flange collar
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(edgeX - perpX * 8, edgeY - perpY * 8);
-      ctx.lineTo(edgeX + perpX * 8, edgeY + perpY * 8);
-      ctx.stroke();
-
-      // Pressure valve gauge LED
-      ctx.fillStyle = isActive
-        ? '#ef4444'
-        : isWarn
-          ? Math.sin(timeSec * 22) > 0
-            ? '#fde047'
-            : '#f97316'
-          : '#475569';
-      ctx.beginPath();
-      ctx.arc(edgeX - pipe.dirX * 4 + perpX * 6, edgeY - pipe.dirY * 4 + perpY * 6, 2.8, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Warning hiss flare at nozzle before burst
-      if (isWarn) {
-        const wPulse = 0.35 + 0.25 * Math.sin(timeSec * 24);
-        const wGrad = ctx.createRadialGradient(edgeX, edgeY, 2, edgeX + pipe.dirX * 18, edgeY + pipe.dirY * 18, 28);
-        wGrad.addColorStop(0, `rgba(253, 224, 71, ${wPulse})`);
-        wGrad.addColorStop(1, 'rgba(251, 191, 36, 0)');
-        ctx.fillStyle = wGrad;
-        ctx.beginPath();
-        ctx.arc(edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10, 26, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Directional high-pressure steam burst jet (clipped by walls & closed doors)
-      if (isActive) {
-        const clippedTiles = engine.getSteamPipeClippedRangeTiles(pipe);
-        if (clippedTiles > 0) {
-          const jetLen = clippedTiles * ts - 4;
-          const endX = edgeX + pipe.dirX * jetLen;
-          const endY = edgeY + pipe.dirY * jetLen;
-          const jetGrad = ctx.createLinearGradient(edgeX, edgeY, endX, endY);
-          jetGrad.addColorStop(0, 'rgba(248, 250, 252, 0.72)');
-          jetGrad.addColorStop(0.5, 'rgba(226, 232, 240, 0.45)');
-          jetGrad.addColorStop(1, 'rgba(203, 213, 225, 0.08)');
-
-          const wobble = Math.sin(timeSec * 36 + pipe.wallTx) * 2.5;
-          ctx.fillStyle = jetGrad;
-          ctx.beginPath();
-          ctx.moveTo(edgeX + perpX * 5, edgeY + perpY * 5);
-          ctx.lineTo(endX + perpX * (16 + wobble), endY + perpY * (16 + wobble));
-          ctx.lineTo(endX - perpX * (16 - wobble), endY - perpY * (16 - wobble));
-          ctx.lineTo(edgeX - perpX * 5, edgeY - perpY * 5);
-          ctx.closePath();
-          ctx.fill();
-        }
-      }
-      ctx.restore();
-    }
-  }
-
-  private drawPaperMaps(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    timeSec: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 90;
-    const halfH = height / (2 * zoom) + 90;
-
-    for (const stand of engine.map.paperMaps) {
-      if (Math.abs(stand.x - camX) > halfW || Math.abs(stand.y - camY) > halfH) continue;
-
-      ctx.save();
-      ctx.translate(stand.x, stand.y);
-
-      // Stand drop shadow & steel table pedestal
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
-      traceRoundedRect(ctx, -13, -9, 28, 22, 3);
-      ctx.fill();
-
-      ctx.fillStyle = '#334155';
-      traceRoundedRect(ctx, -15, -11, 28, 22, 3);
-      ctx.fill();
-      ctx.strokeStyle = '#64748b';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Blueprint parchment sheet pinned to lectern
-      ctx.fillStyle = '#e7dcc2';
-      traceRoundedRect(ctx, -11, -8, 20, 16, 1.5);
-      ctx.fill();
-
-      // Ink schematic deck lines + tiny red "YOU ARE HERE" pin
-      ctx.strokeStyle = '#1e3a5f';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(-8, -3);
-      ctx.lineTo(6, -3);
-      ctx.moveTo(-8, 2);
-      ctx.lineTo(4, 2);
-      ctx.stroke();
-
-      const pulse = 0.65 + 0.35 * Math.sin(timeSec * 4.5);
-      ctx.fillStyle = `rgba(220, 38, 38, ${pulse})`;
-      ctx.beginPath();
-      ctx.arc(2, -1, 2.2, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Warm brass map reading lamp rim
-      ctx.fillStyle = '#f59e0b';
-      ctx.fillRect(-12, -10, 6, 3);
-
-      ctx.restore();
-    }
-  }
-
-  private drawFuseSockets(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    timeSec: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 90;
-    const halfH = height / (2 * zoom) + 90;
-
-    for (const fs of engine.map.fuseSockets) {
-      if (Math.abs(fs.x - camX) > halfW || Math.abs(fs.y - camY) > halfH) continue;
-
-      ctx.save();
-      ctx.translate(fs.x, fs.y);
-
-      // Floor drop-shadow & heavy electrical junction cabinet
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-      traceRoundedRect(ctx, -12, -12, 26, 26, 3);
-      ctx.fill();
-
-      ctx.fillStyle = fs.hasFuse ? '#172822' : '#1e293b';
-      traceRoundedRect(ctx, -14, -14, 28, 28, 3);
-      ctx.fill();
-      ctx.strokeStyle = fs.hasFuse ? '#34d399' : '#f59e0b';
-      ctx.lineWidth = 1.6;
-      ctx.stroke();
-
-      // Twin copper busbar clamps & central Master Fuse cradle
-      ctx.fillStyle = '#090d14';
-      traceRoundedRect(ctx, -9, -7, 18, 14, 2);
-      ctx.fill();
-      ctx.fillStyle = '#d97706';
-      ctx.fillRect(-10, -4, 3, 8);
-      ctx.fillRect(7, -4, 3, 8);
-
-      if (fs.hasFuse) {
-        ctx.fillStyle = '#f59e0b';
-        traceRoundedRect(ctx, -6, -3.5, 12, 7, 1.5);
-        ctx.fill();
-        const arc = 0.72 + 0.28 * Math.sin(timeSec * 8);
-        ctx.fillStyle = `rgba(52, 211, 153, ${arc})`;
-        ctx.beginPath();
-        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        const blink = Math.sin(timeSec * 4.5) > 0;
-        ctx.fillStyle = blink ? '#ef4444' : '#7f1d1d';
-        ctx.beginPath();
-        ctx.arc(0, -10, 2.1, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      ctx.restore();
-    }
-  }
-
-  private drawStairwells(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    incomingStairId: string | null,
-    timeSec: number
-  ): void {
-    const half = 27; // Enlarged 54x54 heavy companionway hatch
-    const size = half * 2;
-    for (const st of engine.map.stairwells) {
-      const isBruteComing = st.id === incomingStairId;
-      const pulse = isBruteComing ? 0.65 + 0.35 * Math.sin(timeSec * 10) : 0;
-
-      ctx.save();
-      ctx.translate(st.x, st.y);
-
-      // Floor drop-shadow around heavy hatch coaming
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.56)';
-      traceRoundedRect(ctx, -half + 2, -half + 3, size, size, 5);
-      ctx.fill();
-
-      // Heavy bolted outer steel coaming frame
-      ctx.fillStyle = isBruteComing ? '#291811' : '#1b2432';
-      traceRoundedRect(ctx, -half, -half, size, size, 5);
-      ctx.fill();
-
-      ctx.strokeStyle = isBruteComing
-        ? `rgba(255, 115, 20, ${0.75 + 0.25 * pulse})`
-        : st.direction === 'DOWN'
-          ? '#38bdf8'
-          : '#fbbf24';
-      ctx.lineWidth = isBruteComing ? 2.6 : 1.9;
-      traceRoundedRect(ctx, -half + 0.5, -half + 0.5, size - 1, size - 1, 5);
-      ctx.stroke();
-
-      // Recessed stairwell abyss interior
-      const innerHalf = 20;
-      ctx.fillStyle = '#070a0f';
-      traceRoundedRect(ctx, -innerHalf, -innerHalf, innerHalf * 2, innerHalf * 2, 3);
-      ctx.fill();
-
-      // Pulsing orange furnace glow inside the companionway shaft when Brute is climbing through
-      if (isBruteComing) {
-        const g = ctx.createRadialGradient(0, 0, 3, 0, 0, 34);
-        g.addColorStop(0, `rgba(255, 237, 213, ${0.82 * pulse})`);
-        g.addColorStop(0.35, `rgba(255, 115, 0, ${0.75 * pulse})`);
-        g.addColorStop(0.75, `rgba(234, 88, 12, ${0.42 * pulse})`);
-        g.addColorStop(1, 'rgba(234, 88, 12, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(0, 0, 34, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // 6 deep anti-slip steel treads descending into shaft
-      for (let i = 0; i < 6; i++) {
-        const sy = -16 + i * 6;
-        const depthFade = st.direction === 'DOWN' ? 1 - i * 0.11 : 0.45 + i * 0.11;
-        ctx.fillStyle = isBruteComing
-          ? `rgba(255, 140, 56, ${0.35 + depthFade * 0.35 * pulse})`
-          : `rgba(71, 85, 105, ${depthFade})`;
-        ctx.fillRect(-16, sy, 32, 3.6);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-        ctx.fillRect(-16, sy + 3.6, 32, 1);
-      }
-
-      // Yellow/amber safety nosing bar on top step edge
-      ctx.fillStyle = isBruteComing ? '#ffedd5' : '#f59e0b';
-      ctx.fillRect(-16, st.direction === 'DOWN' ? -18 : 15.5, 32, 2.5);
-
-      // Twin tubular side handrails along coaming
-      ctx.strokeStyle = isBruteComing ? '#fdba74' : '#94a3b8';
-      ctx.lineWidth = 2.4;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(-21.5, -19);
-      ctx.lineTo(-21.5, 19);
-      ctx.moveTo(21.5, -19);
-      ctx.lineTo(21.5, 19);
-      ctx.stroke();
-
-      // Corner rivets on outer coaming
-      ctx.fillStyle = '#94a3b8';
-      for (const [rx, ry] of [
-        [-23, -23],
-        [23, -23],
-        [-23, 23],
-        [23, 23],
-      ]) {
-        ctx.beginPath();
-        ctx.arc(rx, ry, 1.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Crisp directional chevron
-      ctx.fillStyle = isBruteComing
-        ? '#fff7ed'
-        : st.direction === 'DOWN'
-          ? '#38bdf8'
-          : '#fbbf24';
-      ctx.beginPath();
-      if (st.direction === 'UP') {
-        ctx.moveTo(0, -10);
-        ctx.lineTo(7, -1);
-        ctx.lineTo(-7, -1);
-      } else {
-        ctx.moveTo(0, 10);
-        ctx.lineTo(7, 1);
-        ctx.lineTo(-7, 1);
-      }
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.restore();
-    }
-  }
-
-  private drawEscapeZones(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number
-  ): void {
-    const ts = engine.map.tileSize;
-    const esc = engine.escape;
-
-    // --- 1. STERN HELIDECK & CARGO CHOPPER ---
-    const hx = engine.map.heliPos.x + 14;
-    const hy = engine.map.heliPos.y;
-    const hasFuel = esc.heliParts.includes('AVIATION_FUEL');
-    const hasFuse = esc.heliParts.includes('ROTOR_FUSE');
-    const hasKey = esc.heliParts.includes('IGNITION_KEY');
-    const heliReady = esc.heliState === 'READY';
-    const heliActivating = esc.heliState === 'ACTIVATING';
-    const heliSpool = heliReady ? 1 : heliActivating ? esc.heliActivationProgress : 0;
-
-    ctx.save();
-    // Octagonal weathered yellow helipad outline & safety circle
-    const padR = 64;
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.35)';
-    ctx.beginPath();
-    ctx.arc(hx, hy, padR, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.strokeStyle = heliReady
-      ? '#34d399'
-      : esc.heliParts.length === 3
-        ? '#fbbf24'
-        : 'rgba(251, 191, 36, 0.5)';
-    ctx.lineWidth = 3.2;
-    ctx.setLineDash([12, 7]);
-    ctx.beginPath();
-    ctx.arc(hx, hy, padR, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Inner aiming ring & stencil H
-    ctx.strokeStyle = 'rgba(248, 250, 252, 0.2)';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.arc(hx, hy, 44, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.font = '700 34px "Barlow Condensed", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = heliReady ? 'rgba(52, 211, 153, 0.4)' : 'rgba(251, 191, 36, 0.28)';
-    ctx.fillText('H', hx + 8, hy);
-
-    // 4 Corner Deck Perimeter Strobe Lights
-    const strobeOn = Math.sin(timeSec * (heliReady ? 6 : 12)) > 0;
-    for (const [sx, sy] of [
-      [-52, -48],
-      [52, -48],
-      [-52, 48],
-      [52, 48],
-    ]) {
-      ctx.fillStyle = '#0f172a';
-      ctx.beginPath();
-      ctx.arc(hx + sx, hy + sy, 4, 0, Math.PI * 2);
-      ctx.fill();
-      if (heliReady || (heliActivating && strobeOn)) {
-        ctx.fillStyle = heliReady ? '#34d399' : '#f59e0b';
-        ctx.beginPath();
-        ctx.arc(hx + sx, hy + sy, 2.6, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.fillStyle = hasFuse ? 'rgba(251, 191, 36, 0.45)' : '#334155';
-        ctx.beginPath();
-        ctx.arc(hx + sx, hy + sy, 2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // Helicopter Body Anchor (centered at heliPos)
-    const lx = engine.map.heliPos.x;
-    const ly = engine.map.heliPos.y;
-    const heliVibX = heliSpool > 0.15 ? Math.sin(timeSec * 52) * heliSpool * 0.9 : 0;
-    const heliVibY = heliSpool > 0.15 ? Math.cos(timeSec * 46) * heliSpool * 0.9 : 0;
-
-    ctx.save();
-    ctx.translate(lx + heliVibX, ly + heliVibY);
-
-    // Helicopter ground drop shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.56)';
-    ctx.beginPath();
-    ctx.ellipse(2, 5, 36, 17, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillRect(-46, 0, 32, 8);
-
-    // Twin tubular landing skids & cross-struts
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 2.6;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(-22, -16);
-    ctx.lineTo(24, -16);
-    ctx.lineTo(29, -13);
-    ctx.moveTo(-22, 16);
-    ctx.lineTo(24, 16);
-    ctx.lineTo(29, 13);
-    // Struts
-    ctx.moveTo(-10, -16);
-    ctx.lineTo(-8, -11);
-    ctx.moveTo(12, -16);
-    ctx.lineTo(10, -11);
-    ctx.moveTo(-10, 16);
-    ctx.lineTo(-8, 11);
-    ctx.moveTo(12, 16);
-    ctx.lineTo(10, 11);
-    ctx.stroke();
-
-    // Tail Boom & Horizontal/Vertical Stabilizers
-    ctx.fillStyle = '#1e293b';
-    ctx.beginPath();
-    ctx.moveTo(-14, -6);
-    ctx.lineTo(-48, -2.5);
-    ctx.lineTo(-48, 2.5);
-    ctx.lineTo(-14, 6);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // Tail fin & spinning tail rotor
-    ctx.fillStyle = '#d97706';
-    ctx.fillRect(-49, -7, 4, 14);
-    ctx.fillStyle = '#0f172a';
-    const tailSpin = heliSpool > 0 ? Math.sin(timeSec * (12 + heliSpool * 44)) * 7 : 6;
-    ctx.fillRect(-48, -tailSpin, 2, tailSpin * 2);
-
-    // Fuselage Cabin Shell
-    const bodyGrad = ctx.createLinearGradient(0, -15, 0, 15);
-    bodyGrad.addColorStop(0, '#334155');
-    bodyGrad.addColorStop(0.5, '#475569');
-    bodyGrad.addColorStop(1, '#1e293b');
-    ctx.fillStyle = bodyGrad;
-    ctx.beginPath();
-    ctx.moveTo(-18, -11);
-    ctx.quadraticCurveTo(4, -16, 26, -9);
-    ctx.quadraticCurveTo(35, 0, 26, 9);
-    ctx.quadraticCurveTo(4, 16, -18, 11);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = heliReady ? '#34d399' : '#64748b';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-
-    // High-vis rescue stripe along fuselage flanks
-    ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(-14, -10.5);
-    ctx.lineTo(12, -11);
-    ctx.moveTo(-14, 10.5);
-    ctx.lineTo(12, 11);
-    ctx.stroke();
-
-    // Part 3: IGNITION_KEY — Cockpit Canopy & Lit Avionics Console + Wing Nav Strobes
-    ctx.fillStyle = hasKey ? '#082f49' : '#090d14';
-    ctx.beginPath();
-    ctx.moveTo(14, -9);
-    ctx.quadraticCurveTo(30, -6, 30, 0);
-    ctx.quadraticCurveTo(30, 6, 14, 9);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = hasKey ? '#38bdf8' : '#334155';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    if (hasKey) {
-      // Glowing green/amber cockpit instrument glow
-      ctx.fillStyle = 'rgba(56, 189, 248, 0.55)';
-      ctx.fillRect(19, -5.5, 4, 11);
-      ctx.fillStyle = '#34d399';
-      ctx.fillRect(21, -3, 2, 2);
-      ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(21, 1, 2, 2);
-      // Red/Green nav lights on fuselage sponsons
-      const navBlink = Math.sin(timeSec * 5) > -0.3;
-      if (navBlink) {
-        ctx.fillStyle = '#ef4444';
-        ctx.beginPath();
-        ctx.arc(8, -14.5, 2.2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#22c55e';
-        ctx.beginPath();
-        ctx.arc(8, 14.5, 2.2, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-
-    // Part 1: AVIATION_FUEL — External Fuel Cell & Hose (Port Flank)
-    if (hasFuel) {
-      ctx.fillStyle = '#b91c1c';
-      traceRoundedRect(ctx, -12, -20, 14, 7, 2);
-      ctx.fill();
-      ctx.strokeStyle = '#fca5a5';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(-4, -13);
-      ctx.quadraticCurveTo(-2, -9, 2, -10);
-      ctx.stroke();
-      ctx.fillStyle = '#34d399';
-      ctx.beginPath();
-      ctx.arc(-5, -16.5, 1.7, 0, Math.PI * 2);
-      ctx.fill();
+      this.compositeQuad = new THREE.Mesh(this.ndcQuadGeom, this.compositeBundle.material);
+      this.compositeQuad.frustumCulled = false;
+      this.compositeScene.add(this.compositeQuad);
     } else {
-      // Dry open filler port & disconnected dangling hose
-      ctx.fillStyle = '#090d14';
-      ctx.beginPath();
-      ctx.arc(-2, -13, 2.8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#64748b';
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.moveTo(-2, -13);
-      ctx.quadraticCurveTo(-8, -19, -13, -17);
-      ctx.stroke();
+      this.compositeBundle.sceneTexNode.value = this.sceneTarget.texture;
+      this.compositeBundle.losTexNode.value = this.losTarget.texture;
+      this.compositeBundle.lightTexNode.value = this.lightMaskTarget.texture;
     }
 
-    // Part 2: ROTOR_FUSE — Starboard Turbine Electronics Bay
-    if (hasFuse) {
-      ctx.fillStyle = '#1e293b';
-      traceRoundedRect(ctx, -8, 12, 13, 6.5, 1.5);
-      ctx.fill();
-      ctx.strokeStyle = '#34d399';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-      ctx.fillStyle = '#34d399';
-      ctx.beginPath();
-      ctx.arc(-1.5, 15.2, 1.8, 0, Math.PI * 2);
-      ctx.fill();
+    if (!this.vignetteBundle) {
+      this.vignetteBundle = createVignetteAndDangerMaterial(this.losTarget.texture);
+      this.vignetteQuad = new THREE.Mesh(this.ndcQuadGeom, this.vignetteBundle.material);
+      this.vignetteQuad.frustumCulled = false;
+      this.vignetteScene.add(this.vignetteQuad);
     } else {
-      // Exposed dark/sparking turbine relay socket
-      ctx.fillStyle = '#090d14';
-      ctx.fillRect(-7, 12, 11, 5.5);
-      ctx.strokeStyle = '#f97316';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(-7, 12, 11, 5.5);
-      if (Math.sin(timeSec * 19) > 0.78) {
-        ctx.fillStyle = '#fde047';
-        ctx.beginPath();
-        ctx.arc(-2, 14.5, 2.2, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      this.vignetteBundle.losTexNode.value = this.losTarget.texture;
     }
 
-    // Dorsal Turbine Cowling & Dual Exhausts
-    ctx.fillStyle = '#1e293b';
-    traceRoundedRect(ctx, -10, -6.5, 18, 13, 3);
-    ctx.fill();
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(-11, -3.5, 2.6, 0, Math.PI * 2);
-    ctx.arc(-11, 3.5, 2.6, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Rotor Assembly (gradual acceleration during ACTIVATING -> full blur disc at READY)
-    const rotorAngle =
-      heliSpool > 0
-        ? timeSec * (2 + heliSpool * 24)
-        : 0.42;
-
-    if (heliSpool > 0.22) {
-      const discAlpha = Math.min(0.32, (heliSpool - 0.22) * 0.42);
-      ctx.fillStyle = `rgba(226, 232, 240, ${discAlpha})`;
-      ctx.beginPath();
-      ctx.arc(0, 0, 44, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = `rgba(251, 191, 36, ${discAlpha * 1.4})`;
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.arc(0, 0, 44, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    ctx.save();
-    ctx.rotate(rotorAngle);
-    const bladeAlpha = heliSpool > 0.5 ? 0.45 : 0.85;
-    ctx.strokeStyle = `rgba(226, 232, 240, ${bladeAlpha})`;
-    ctx.lineWidth = 3.4;
-    ctx.beginPath();
-    ctx.moveTo(-44, 0);
-    ctx.lineTo(44, 0);
-    ctx.moveTo(0, -44);
-    ctx.lineTo(0, 44);
-    ctx.stroke();
-    // Blade tip warning stripes
-    ctx.strokeStyle = `rgba(251, 191, 36, ${bladeAlpha})`;
-    ctx.lineWidth = 3.4;
-    ctx.beginPath();
-    ctx.moveTo(-44, 0);
-    ctx.lineTo(-37, 0);
-    ctx.moveTo(37, 0);
-    ctx.lineTo(44, 0);
-    ctx.moveTo(0, -44);
-    ctx.lineTo(0, -37);
-    ctx.moveTo(0, 37);
-    ctx.lineTo(0, 44);
-    ctx.stroke();
-    ctx.restore();
-
-    // Rotor Hub Cap
-    ctx.fillStyle = '#94a3b8';
-    ctx.beginPath();
-    ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0f172a';
-    ctx.beginPath();
-    ctx.arc(0, 0, 2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 6 Heavy Iron Tie-Down Chains securing fuselage & skids to helideck bollards
-    const chainSpecs: Array<{ fx: number; fy: number; bx: number; by: number }> = [
-      { fx: 20, fy: -12, bx: 44, by: -36 },
-      { fx: 20, fy: 12, bx: 44, by: 36 },
-      { fx: 2, fy: -15, bx: 4, by: -44 },
-      { fx: 2, fy: 15, bx: 4, by: 44 },
-      { fx: -18, fy: -11, bx: -42, by: -36 },
-      { fx: -18, fy: 11, bx: -42, by: 36 },
-    ];
-    for (let i = 0; i < chainSpecs.length; i++) {
-      const cs = chainSpecs[i];
-      const intact = i < esc.heliChainsRemaining;
-
-      // Deck tie-down bollard
-      ctx.fillStyle = intact ? '#475569' : '#1e293b';
-      ctx.beginPath();
-      ctx.arc(cs.bx, cs.by, 3.6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = intact ? '#fbbf24' : '#334155';
-      ctx.lineWidth = 1.1;
-      ctx.stroke();
-
-      if (intact) {
-        // Dark chain shadow + segmented heavy steel chain links + padlock shackle
-        ctx.strokeStyle = '#090d14';
-        ctx.lineWidth = 4.2;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.moveTo(cs.fx, cs.fy);
-        ctx.lineTo(cs.bx, cs.by);
-        ctx.stroke();
-
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 2.4;
-        ctx.setLineDash([4, 3]);
-        ctx.beginPath();
-        ctx.moveTo(cs.fx, cs.fy);
-        ctx.lineTo(cs.bx, cs.by);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        const mx = (cs.fx + cs.bx) * 0.5;
-        const my = (cs.fy + cs.by) * 0.5;
-        ctx.fillStyle = '#f59e0b';
-        ctx.beginPath();
-        ctx.arc(mx, my, 2.7, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        // Snapped stump link on bollard
-        const dx = cs.fx - cs.bx;
-        const dy = cs.fy - cs.by;
-        const d = Math.hypot(dx, dy) || 1;
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(cs.bx, cs.by);
-        ctx.lineTo(cs.bx + (dx / d) * 7, cs.by + (dy / d) * 7);
-        ctx.stroke();
-      }
-    }
-
-    ctx.restore();
-    ctx.restore();
-
-    // --- 2. BOW LIFEBOAT & HYDRAULIC DAVIT CRANE ---
-    const bx = engine.map.lifeboatPos.x;
-    const by = engine.map.lifeboatPos.y;
-    const bTx = engine.map.lifeboatPos.tx;
-    const bTy = engine.map.lifeboatPos.ty;
-    // Detect which side is outboard VOID rail (port top = -1, starboard bottom = +1)
-    const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
-    const outSign = voidNorth ? -1 : 1;
-
-    const hasPatch = esc.lifeboatParts.includes('HULL_PATCH');
-    const hasCrank = esc.lifeboatParts.includes('WINCH_CRANK');
-    const hasBattery = esc.lifeboatParts.includes('MARINE_BATTERY');
-    const boatReady = esc.lifeboatState === 'READY';
-    const boatActivating = esc.lifeboatState === 'ACTIVATING';
-    const craneSwing = boatReady ? 1 : boatActivating ? esc.lifeboatActivationProgress : 0;
-
-    // Davit deck pedestals sit slightly inboard of rail, arms swing boat outward over sea (-outSign*0 -> +outSign*34)
-    const inboardY = by - outSign * 14;
-    const swingOutDist = craneSwing * 36;
-    const boatY = by - outSign * 2 + outSign * swingOutDist;
-    const boatX = bx + 16;
-
-    ctx.save();
-    // Deck mounting plate & yellow safety hazard border around davit bay
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.45)';
-    traceRoundedRect(ctx, bx - 16, by - 16, ts + 28, ts, 4);
-    ctx.fill();
-    ctx.strokeStyle = boatReady
-      ? '#34d399'
-      : esc.lifeboatParts.length === 3
-        ? '#38bdf8'
-        : 'rgba(56, 189, 248, 0.45)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([7, 5]);
-    traceRoundedRect(ctx, bx - 16, by - 16, ts + 28, ts, 4);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Twin Steel A-Frame Davit Pedestals (fore & aft)
-    const leftPedX = bx - 8;
-    const rightPedX = bx + 40;
-    for (const px of [leftPedX, rightPedX]) {
-      ctx.fillStyle = '#334155';
-      traceRoundedRect(ctx, px - 6, inboardY - 6, 12, 12, 2);
-      ctx.fill();
-      ctx.strokeStyle = '#94a3b8';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Swinging hydraulic davit boom arm extending from pedestal over the hull rail
-      const armReach = 12 + swingOutDist * 1.05;
-      const tipY = inboardY + outSign * armReach;
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
-      ctx.lineWidth = 6.5;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(px + 2, inboardY + 2);
-      ctx.lineTo(px + 2, tipY + 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = '#64748b';
-      ctx.lineWidth = 4.8;
-      ctx.beginPath();
-      ctx.moveTo(px, inboardY);
-      ctx.lineTo(px, tipY);
-      ctx.stroke();
-
-      ctx.fillStyle = '#f59e0b';
-      ctx.beginPath();
-      ctx.arc(px, tipY, 3.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Center Hydraulic Winch Drum Box (between the two pedestals)
-    const winchX = (leftPedX + rightPedX) / 2;
-    ctx.fillStyle = '#1e293b';
-    traceRoundedRect(ctx, winchX - 10, inboardY - 6, 20, 12, 2);
-    ctx.fill();
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // Part 2: WINCH_CRANK — Bare Spline vs Geared Crank Wheel + Cable Tension
-    if (hasCrank) {
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 2.4;
-      ctx.beginPath();
-      ctx.arc(winchX + 12, inboardY, 5.5, 0, Math.PI * 2);
-      ctx.stroke();
-      const crankAng = boatActivating ? timeSec * 9 : 0.6;
-      ctx.beginPath();
-      ctx.moveTo(winchX + 12, inboardY);
-      ctx.lineTo(winchX + 12 + Math.cos(crankAng) * 7, inboardY + Math.sin(crankAng) * 7);
-      ctx.stroke();
+    if (!this.screenBlitMat) {
+      const blit = createScreenBlitMaterial(this.finalTarget.texture);
+      this.screenBlitMat = blit.material;
+      this.screenBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.screenBlitMat);
+      this.screenBlitMesh.frustumCulled = false;
+      this.blitScene.add(this.screenBlitMesh);
+      (this.screenBlitMesh as unknown as { _texNode: ReturnType<typeof createScreenBlitMaterial>['texNode'] })._texNode = blit.texNode;
     } else {
-      // Bare stripped spline stub
-      ctx.fillStyle = '#475569';
-      ctx.fillRect(winchX + 9, inboardY - 2, 5, 4);
+      const texNode = (this.screenBlitMesh as unknown as { _texNode: ReturnType<typeof createScreenBlitMaterial>['texNode'] })._texNode;
+      texNode.value = this.finalTarget.texture;
     }
 
-    // Part 3: MARINE_BATTERY — Deck Power Tray & Floodlight
-    const batX = bx - 14;
-    const batY = inboardY - outSign * 4;
-    ctx.fillStyle = '#0f172a';
-    traceRoundedRect(ctx, batX - 5, batY - 5, 10, 10, 1.5);
-    ctx.fill();
-    if (hasBattery) {
-      ctx.fillStyle = '#0284c7';
-      ctx.fillRect(batX - 4, batY - 4, 8, 8);
-      ctx.fillStyle = '#22d3ee';
-      ctx.beginPath();
-      ctx.arc(batX, batY, 2, 0, Math.PI * 2);
-      ctx.fill();
-      if (boatActivating || boatReady) {
-        // Davit crane spotlight cone illuminating boat over water
-        const spot = ctx.createRadialGradient(boatX, boatY, 4, boatX, boatY, 42);
-        spot.addColorStop(0, boatReady ? 'rgba(52, 211, 153, 0.25)' : 'rgba(56, 189, 248, 0.22)');
-        spot.addColorStop(1, 'rgba(56, 189, 248, 0)');
-        ctx.fillStyle = spot;
-        ctx.beginPath();
-        ctx.arc(boatX, boatY, 42, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    if (!this.readbackBlitMat) {
+      const rb = createSrgbReadbackBlitMaterial(this.finalTarget.texture);
+      this.readbackBlitMat = rb.material;
+      this.readbackBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.readbackBlitMat);
+      this.readbackBlitMesh.frustumCulled = false;
+      this.readbackScene.add(this.readbackBlitMesh);
+      (this.readbackBlitMesh as unknown as { _texNode: ReturnType<typeof createSrgbReadbackBlitMaterial>['texNode'] })._texNode = rb.texNode;
     } else {
-      ctx.strokeStyle = '#ca8a04';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(batX - 4.5, batY - 4.5, 9, 9);
+      const texNode = (this.readbackBlitMesh as unknown as { _texNode: ReturnType<typeof createSrgbReadbackBlitMaterial>['texNode'] })._texNode;
+      texNode.value = this.finalTarget.texture;
     }
+  }
 
-    // Lifeboat Hull (suspended & swung out over the ocean as crane activates)
-    const boatBob = boatReady ? Math.sin(timeSec * 2.8) * 1.4 : 0;
-    ctx.save();
-    ctx.translate(boatX, boatY + boatBob);
+  private ensurePortalTargets(pixelSpan: number): void {
+    const span = Math.max(64, Math.round(pixelSpan));
+    if (this.portalPixelSpan === span && this.portalTarget && this.portalLosTarget) return;
 
-    // Water/deck contact shadow beneath boat
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.52)';
-    ctx.beginPath();
-    ctx.ellipse(2, 4, 28, 12.5, 0, 0, Math.PI * 2);
-    ctx.fill();
+    this.portalPixelSpan = span;
+    this.portalTarget?.dispose();
+    this.portalLosTarget?.dispose();
 
-    // Enclosed Rescue-Orange Lifeboat Hull
-    const hullGrad = ctx.createLinearGradient(0, -12, 0, 12);
-    hullGrad.addColorStop(0, '#fb923c');
-    hullGrad.addColorStop(0.5, '#ea580c');
-    hullGrad.addColorStop(1, '#9a3412');
-    ctx.fillStyle = hullGrad;
-    ctx.beginPath();
-    ctx.moveTo(-27, 0);
-    ctx.quadraticCurveTo(-18, -12, 0, -12);
-    ctx.quadraticCurveTo(20, -12, 27, 0);
-    ctx.quadraticCurveTo(20, 12, 0, 12);
-    ctx.quadraticCurveTo(-18, 12, -27, 0);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = boatReady ? '#34d399' : '#fed7aa';
-    ctx.lineWidth = 1.8;
-    ctx.stroke();
+    this.portalTarget = this.createRt(span, span, THREE.HalfFloatType);
+    this.portalLosTarget = this.createRt(span, span, THREE.UnsignedByteType);
 
-    // Reflective white/slate top cabin canopy & hatch
-    ctx.fillStyle = '#e2e8f0';
-    traceRoundedRect(ctx, -14, -7, 26, 14, 5);
-    ctx.fill();
-    ctx.fillStyle = '#0f172a';
-    traceRoundedRect(ctx, 4, -4.5, 6, 9, 2);
-    ctx.fill();
-
-    // Part 1: HULL_PATCH — Fractured Hull Crack vs Bolted Steel Patch
-    if (hasPatch) {
-      ctx.fillStyle = '#475569';
-      traceRoundedRect(ctx, -11, -5, 11, 10, 1.5);
-      ctx.fill();
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = '#e2e8f0';
-      for (const [rx, ry] of [
-        [-9, -3],
-        [-2, -3],
-        [-9, 3],
-        [-2, 3],
-      ]) {
-        ctx.fillRect(rx, ry, 1.4, 1.4);
-      }
+    if (!this.portalBundle) {
+      this.portalBundle = createStairPortalMaterial(
+        this.portalTarget.texture,
+        this.portalLosTarget.texture
+      );
+      this.portalQuad = new THREE.Mesh(this.unitQuadGeom, this.portalBundle.material);
+      this.portalQuad.frustumCulled = false;
+      this.portalQuad.renderOrder = 0;
+      this.screenOverlayScene.add(this.portalQuad);
     } else {
-      // Jagged hull fracture
-      ctx.strokeStyle = '#090d14';
-      ctx.lineWidth = 2.2;
-      ctx.beginPath();
-      ctx.moveTo(-10, -4);
-      ctx.lineTo(-6, -1);
-      ctx.lineTo(-8, 2);
-      ctx.lineTo(-3, 5);
-      ctx.stroke();
-    }
-
-    // Steel hoisting shackles & lift cables connecting davit tips to boat bow/stern
-    ctx.strokeStyle = hasCrank ? '#e2e8f0' : 'rgba(148, 163, 184, 0.45)';
-    ctx.lineWidth = hasCrank ? 1.5 : 1;
-    ctx.beginPath();
-    ctx.moveTo(-22, 0);
-    ctx.lineTo(leftPedX - boatX, inboardY + outSign * (12 + swingOutDist * 1.05) - (boatY + boatBob));
-    ctx.moveTo(22, 0);
-    ctx.lineTo(rightPedX - boatX, inboardY + outSign * (12 + swingOutDist * 1.05) - (boatY + boatBob));
-    ctx.stroke();
-
-    ctx.restore();
-    ctx.restore();
-
-    // --- 3. DECK 1 MOONPOOL CHAMBER & DEEP-DIVE SUBMARINE ---
-    const subPos = engine.map.submarinePos;
-    const poolX = 102 * ts;
-    const poolY = 92 * ts;
-    const poolW = 4 * ts;
-    const poolH = 6 * ts;
-    const hasSubBat = esc.submarineParts.includes('SUB_BATTERY');
-    const hasBallast = esc.submarineParts.includes('BALLAST_PUMP');
-    const hasDiveKey = esc.submarineParts.includes('DIVE_KEY');
-    const subReady = esc.submarineState === 'READY';
-    const subActivating = esc.submarineState === 'ACTIVATING';
-    const floodLevel = subReady ? 1 : subActivating ? esc.submarineActivationProgress : 0;
-
-    ctx.save();
-    // Recessed Moonpool Water Basin (centered on 102..105, 92..97)
-    ctx.fillStyle = '#04121d';
-    traceRoundedRect(ctx, poolX - 6, poolY - 6, poolW + 12, poolH + 12, 6);
-    ctx.fill();
-
-    // Water ripples inside moonpool + surging white foam during floodgate deluge
-    const waterAlpha = 0.42 + floodLevel * 0.45;
-    ctx.fillStyle = `rgba(13, 148, 136, ${waterAlpha * 0.25})`;
-    traceRoundedRect(ctx, poolX, poolY, poolW, poolH, 4);
-    ctx.fill();
-
-    ctx.strokeStyle = subActivating
-      ? `rgba(153, 246, 228, ${0.45 + Math.sin(timeSec * 14) * 0.25})`
-      : 'rgba(45, 212, 191, 0.22)';
-    ctx.lineWidth = 1.6;
-    for (let wy = poolY + 24; wy < poolY + poolH - 18; wy += 36) {
-      const drift = Math.sin(timeSec * (subActivating ? 8 : 2.1) + wy * 0.05) * 6;
-      ctx.beginPath();
-      ctx.moveTo(poolX + 16 + drift, wy);
-      ctx.quadraticCurveTo(poolX + poolW * 0.5, wy - 6, poolX + poolW - 16 + drift, wy);
-      ctx.stroke();
-    }
-
-    // Moonpool steel coaming & hazard border
-    ctx.strokeStyle = subReady ? '#34d399' : esc.submarineParts.length === 3 ? '#2dd4bf' : 'rgba(45, 212, 191, 0.48)';
-    ctx.lineWidth = 2.6;
-    ctx.setLineDash([10, 6]);
-    traceRoundedRect(ctx, poolX - 4, poolY - 4, poolW + 8, poolH + 8, 5);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // Boarding boarding-gangway apron at submarinePos (100, 95)
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.72)';
-    traceRoundedRect(ctx, subPos.x - 18, subPos.y - 26, 46, 52, 4);
-    ctx.fill();
-    ctx.strokeStyle = subReady ? '#34d399' : '#2dd4bf';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-
-    // Deep-Dive Rescue Submarine (vertical bow-south / bow-north posture inside moonpool)
-    const subCx = poolX + poolW * 0.5;
-    const subCy = poolY + poolH * 0.5 + (subReady ? Math.sin(timeSec * 3) * 2.5 : 0);
-    ctx.save();
-    ctx.translate(subCx, subCy);
-
-    // Shadow in water
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
-    ctx.beginPath();
-    ctx.ellipse(4, 4, 34, 98, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Outer dive hull (deep graphite + rescue-yellow dorsal stripe)
-    const subGrad = ctx.createLinearGradient(-32, 0, 32, 0);
-    subGrad.addColorStop(0, '#0f172a');
-    subGrad.addColorStop(0.5, '#334155');
-    subGrad.addColorStop(1, '#0f172a');
-    ctx.fillStyle = subGrad;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 31, 94, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = subReady ? '#34d399' : '#64748b';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Bow & stern hydroplanes
-    ctx.fillStyle = '#475569';
-    ctx.fillRect(-42, -56, 12, 10);
-    ctx.fillRect(30, -56, 12, 10);
-    ctx.fillRect(-38, 70, 10, 8);
-    ctx.fillRect(28, 70, 10, 8);
-
-    // Centerline safety stripe
-    ctx.strokeStyle = '#eab308';
-    ctx.lineWidth = 2.4;
-    ctx.beginPath();
-    ctx.moveTo(0, -82);
-    ctx.lineTo(0, 82);
-    ctx.stroke();
-
-    // Conning tower sail & hatch
-    ctx.fillStyle = '#1e293b';
-    traceRoundedRect(ctx, -16, -24, 32, 48, 12);
-    ctx.fill();
-    ctx.strokeStyle = subReady ? '#34d399' : '#94a3b8';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-
-    // Part 1: SUB_BATTERY — Port Power Cell Bank
-    ctx.fillStyle = hasSubBat ? '#0d9488' : '#090d14';
-    traceRoundedRect(ctx, -28, -16, 10, 32, 2);
-    ctx.fill();
-    ctx.strokeStyle = hasSubBat ? '#5eead4' : '#475569';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-    if (hasSubBat) {
-      ctx.fillStyle = '#5eead4';
-      ctx.fillRect(-25, -10, 4, 6);
-      ctx.fillRect(-25, 4, 4, 6);
-    }
-
-    // Part 2: BALLAST_PUMP — Aft Starboard Trim Manifold
-    ctx.fillStyle = hasBallast ? '#0369a1' : '#090d14';
-    traceRoundedRect(ctx, 18, 18, 11, 26, 2);
-    ctx.fill();
-    ctx.strokeStyle = hasBallast ? '#38bdf8' : '#475569';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // Part 3: DIVE_KEY — Conning Periscope & Helm Console Beacon
-    ctx.fillStyle = hasDiveKey ? '#064e3b' : '#090d14';
-    ctx.beginPath();
-    ctx.arc(0, -4, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = hasDiveKey ? '#34d399' : '#475569';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-    if (hasDiveKey) {
-      ctx.fillStyle = '#34d399';
-      ctx.beginPath();
-      ctx.arc(0, -4, 3.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.restore();
-
-    // Floodgate Lever floor beacon ring
-    ctx.strokeStyle =
-      esc.submarineState === 'READY'
-        ? 'rgba(52, 211, 153, 0.75)'
-        : esc.submarineParts.length === 3
-          ? `rgba(45, 212, 191, ${0.45 + 0.35 * Math.sin(timeSec * 6)})`
-          : 'rgba(148, 163, 184, 0.32)';
-    ctx.lineWidth = 1.8;
-    ctx.beginPath();
-    ctx.arc(subPos.leverX, subPos.leverY, 26, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.restore();
-  }
-
-  private drawWorldPickups(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number,
-    deckOverride?: ShipDeck,
-    width = 1280,
-    height = 720,
-    zoom = 1.25,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const deck = deckOverride ?? engine.getCurrentDeck();
-    const halfW = width / (2 * zoom) + 80;
-    const halfH = height / (2 * zoom) + 80;
-    for (const wp of engine.worldPickups) {
-      if (wp.deck !== deck) continue;
-      if (Math.abs(wp.x - camX) > halfW || Math.abs(wp.y - camY) > halfH) continue;
-      const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
-      ctx.save();
-      ctx.translate(wp.x, wp.y);
-
-      // Ground halo ring so dropped items stay readable in torchlight
-      ctx.strokeStyle =
-        wp.item === 'BACKPACK'
-          ? 'rgba(249, 115, 22, 0.72)'
-          : wp.item === 'MASTER_FUSE'
-            ? 'rgba(251, 191, 36, 0.85)'
-            : wp.item === 'AVIATION_FUEL' || wp.item === 'IGNITION_KEY' || wp.item === 'ROTOR_FUSE'
-              ? 'rgba(251, 191, 36, 0.65)'
-              : wp.item === 'WINCH_CRANK' || wp.item === 'MARINE_BATTERY' || wp.item === 'HULL_PATCH'
-                ? 'rgba(56, 189, 248, 0.65)'
-                : wp.item === 'SUB_BATTERY' || wp.item === 'BALLAST_PUMP' || wp.item === 'DIVE_KEY'
-                  ? 'rgba(45, 212, 191, 0.68)'
-                  : 'rgba(163, 230, 53, 0.55)';
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.arc(0, 0, 12 * pulse, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-      ctx.beginPath();
-      ctx.ellipse(1, 2, 8, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (wp.item === 'MASTER_FUSE') {
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, -8, -4.5, 16, 9, 2);
-        ctx.fill();
-        ctx.fillStyle = '#d97706';
-        ctx.fillRect(-8, -4, 3.5, 8);
-        ctx.fillRect(4.5, -4, 3.5, 8);
-        ctx.fillStyle = '#fde047';
-        ctx.fillRect(-3.5, -2.5, 7, 5);
-      } else if (wp.item === 'BACKPACK') {
-        // Rugged Expedition Rucksack
-        ctx.fillStyle = '#c2410c';
-        traceRoundedRect(ctx, -8, -9, 16, 18, 4);
-        ctx.fill();
-        ctx.strokeStyle = '#fed7aa';
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, -5, -4, 10, 9, 2);
-        ctx.fill();
-        ctx.fillStyle = '#fb923c';
-        ctx.fillRect(-6, -9, 12, 2.4);
-      } else if (wp.item === 'AVIATION_FUEL') {
-        ctx.fillStyle = '#dc2626';
-        traceRoundedRect(ctx, -6, -7, 12, 14, 2);
-        ctx.fill();
-        ctx.fillStyle = '#fbbf24';
-        ctx.fillRect(1, -9, 4, 3);
-      } else if (wp.item === 'IGNITION_KEY' || wp.item === 'DIVE_KEY') {
-        ctx.strokeStyle = wp.item === 'DIVE_KEY' ? '#2dd4bf' : '#fbbf24';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(-3, 0, 3.5, 0, Math.PI * 2);
-        ctx.moveTo(0.5, 0);
-        ctx.lineTo(7, 0);
-        ctx.lineTo(7, 3);
-        ctx.stroke();
-      } else if (wp.item === 'ROTOR_FUSE') {
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, -7, -4, 14, 8, 2);
-        ctx.fill();
-        ctx.fillStyle = '#fbbf24';
-        ctx.fillRect(-7, -3, 3, 6);
-        ctx.fillRect(4, -3, 3, 6);
-        ctx.fillStyle = '#34d399';
-        ctx.fillRect(-2, -1.5, 4, 3);
-      } else if (wp.item === 'HULL_PATCH') {
-        ctx.fillStyle = '#475569';
-        traceRoundedRect(ctx, -7, -6, 14, 12, 1.5);
-        ctx.fill();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      } else if (wp.item === 'WINCH_CRANK') {
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-        ctx.arc(0, 0, 5.5, 0, Math.PI * 2);
-        ctx.moveTo(0, 0);
-        ctx.lineTo(7, -4);
-        ctx.stroke();
-      } else if (wp.item === 'MARINE_BATTERY' || wp.item === 'SUB_BATTERY') {
-        ctx.fillStyle = wp.item === 'SUB_BATTERY' ? '#0f766e' : '#0369a1';
-        traceRoundedRect(ctx, -6, -6, 12, 12, 1.5);
-        ctx.fill();
-        ctx.fillStyle = wp.item === 'SUB_BATTERY' ? '#5eead4' : '#38bdf8';
-        ctx.fillRect(-4, -8, 3, 2);
-        ctx.fillStyle = '#ef4444';
-        ctx.fillRect(1, -8, 3, 2);
-      } else if (wp.item === 'BALLAST_PUMP') {
-        ctx.fillStyle = '#1e293b';
-        traceRoundedRect(ctx, -7, -5, 14, 10, 2);
-        ctx.fill();
-        ctx.strokeStyle = '#2dd4bf';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-        ctx.fillStyle = '#2dd4bf';
-        ctx.beginPath();
-        ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        // General Tool Drop
-        ctx.fillStyle =
-          wp.item === 'FLARE'
-            ? '#fb7185'
-            : wp.item === 'GLOWSTICK'
-              ? '#34d399'
-              : wp.item === 'FIRE_EXTINGUISHER'
-                ? '#ef4444'
-                : wp.item === 'BOLT_CUTTERS'
-                  ? '#cbd5e1'
-                  : '#a3e635';
-        traceRoundedRect(ctx, -6, -3, 12, 6, 2);
-        ctx.fill();
-      }
-
-      ctx.restore();
+      this.portalBundle.portalTexNode.value = this.portalTarget.texture;
+      this.portalBundle.portalLosTexNode.value = this.portalLosTarget.texture;
     }
   }
 
-  private drawContainers(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 70;
-    const halfH = height / (2 * zoom) + 70;
-    for (const c of engine.map.containers) {
-      if (Math.abs(c.x - camX) > halfW || Math.abs(c.y - camY) > halfH) continue;
-      this.drawSingleContainer(ctx, c);
+  private ensureMapBaked(map: ShipMap): void {
+    if (this.bakedMapRef === map) return;
+
+    for (const ch of this.deckChunkMeshes) {
+      this.worldScene.remove(ch.mesh);
+      ch.geom.dispose();
+      ch.mat.dispose();
     }
-  }
+    this.deckChunkMeshes = [];
+    this.bakedShip?.dispose();
+    this.bakedShip = null;
 
-  private drawSingleContainer(ctx: CanvasRenderingContext2D, c: Container): void {
-    ctx.save();
-    ctx.translate(c.x, c.y);
+    this.roomFixturesCache.clear();
+    this.lightPolyCache.clear();
+    this.staticWarmFans?.clear();
+    this.worldWarmFans?.clear();
+    this.staticMaskFans?.clear();
+    this.lightMaskFans?.clear();
+    this.dynamicFansCache.clear();
+    this.bakedLightMapRef = null;
+    this.bakedLightDeck = null;
 
-    if (c.type === 'CABINET') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-      traceRoundedRect(ctx, -11, -8, 26, 20, 3);
-      ctx.fill();
-      ctx.fillStyle = c.searched ? '#1e2530' : '#334155';
-      traceRoundedRect(ctx, -13, -10, 26, 20, 3);
-      ctx.fill();
-      ctx.strokeStyle = c.searched ? '#334155' : '#64748b';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    } else if (c.type === 'TOOLBOX') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-      traceRoundedRect(ctx, -9, -6, 22, 16, 2.5);
-      ctx.fill();
-      ctx.fillStyle = c.searched ? '#3b1c1c' : '#991b1b';
-      traceRoundedRect(ctx, -11, -8, 22, 16, 2.5);
-      ctx.fill();
-      ctx.strokeStyle = c.searched ? '#475569' : '#fca5a5';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-    } else if (c.type === 'SUPPLY_CRATE') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.44)';
-      traceRoundedRect(ctx, -11, -11, 26, 26, 3);
-      ctx.fill();
-      ctx.fillStyle = c.searched ? '#262018' : '#57422a';
-      traceRoundedRect(ctx, -13, -13, 26, 26, 3);
-      ctx.fill();
-      ctx.strokeStyle = c.searched ? '#3f362a' : '#a17c50';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(-11, -11);
-      ctx.lineTo(11, 11);
-      ctx.stroke();
-    } else {
-      // DESK
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
-      traceRoundedRect(ctx, -12, -7, 28, 18, 2.5);
-      ctx.fill();
-      ctx.fillStyle = c.searched ? '#1e242c' : '#3b4656';
-      traceRoundedRect(ctx, -14, -9, 28, 18, 2.5);
-      ctx.fill();
-      ctx.strokeStyle = '#64748b';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
+    this.bakedShip = bakeShipDeckChunks(map, this.anisotropy);
+    this.bakedMapRef = map;
+
+    for (const ch of this.bakedShip.chunks) {
+      const geom = new THREE.PlaneGeometry(ch.wPx, ch.hPx);
+      const mat = new THREE.MeshBasicMaterial({
+        map: ch.texture,
+        transparent: true,
+        depthWrite: false,
+        depthTest: false,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.position.set(ch.xPx + ch.wPx * 0.5, -(ch.yPx + ch.hPx * 0.5), 0);
+      mesh.renderOrder = 2;
+      mesh.frustumCulled = false;
+      this.worldScene.add(mesh);
+      this.deckChunkMeshes.push({ deck: ch.deck, mesh, geom, mat });
     }
 
-    // Subtle unsearched latch indicator
-    if (!c.searched) {
-      ctx.fillStyle = '#fbbf24';
-      ctx.fillRect(-3, -2, 6, 4);
+    // Precompute all room light fixture coordinates once per map
+    for (const sw of map.lightSwitches) {
+      this.roomFixturesCache.set(sw.id, this.computeRoomLightFixturesOnce(map, sw));
     }
-    ctx.restore();
-  }
-
-  private drawHidingSpots(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 70;
-    const halfH = height / (2 * zoom) + 70;
-    for (const s of engine.map.hidingSpots) {
-      if (Math.abs(s.x - camX) > halfW || Math.abs(s.y - camY) > halfH) continue;
-      this.drawSingleHidingSpot(ctx, s, engine.player.hidingSpotId === s.id);
-    }
-  }
-
-  private drawSingleHidingSpot(
-    ctx: CanvasRenderingContext2D,
-    s: HidingSpot,
-    isOccupied: boolean
-  ): void {
-    ctx.save();
-    ctx.translate(s.x, s.y);
-
-    const flash = s.checkedFlash;
-    if (s.type === 'LOCKER') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.48)';
-      traceRoundedRect(ctx, -12, -12, 28, 28, 3);
-      ctx.fill();
-      ctx.fillStyle = flash > 0 ? '#7c2d12' : isOccupied ? '#1e3a5f' : '#283242';
-      traceRoundedRect(ctx, -14, -14, 28, 28, 3);
-      ctx.fill();
-      ctx.strokeStyle = flash > 0 ? '#f97316' : isOccupied ? '#38bdf8' : '#526075';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Louvered vent lines
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1.6;
-      for (let ly = -7; ly <= 7; ly += 5) {
-        ctx.beginPath();
-        ctx.moveTo(-8, ly);
-        ctx.lineTo(8, ly);
-        ctx.stroke();
-      }
-    } else if (s.type === 'UNDER_DESK') {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.42)';
-      traceRoundedRect(ctx, -13, -9, 30, 22, 3);
-      ctx.fill();
-      ctx.fillStyle = flash > 0 ? '#7c2d12' : isOccupied ? '#1e3a5f' : '#333d4d';
-      traceRoundedRect(ctx, -15, -11, 30, 22, 3);
-      ctx.fill();
-      ctx.strokeStyle = flash > 0 ? '#f97316' : isOccupied ? '#38bdf8' : '#64748b';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    } else {
-      // CARGO_CRATE hiding spot
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.46)';
-      traceRoundedRect(ctx, -12, -12, 28, 28, 3);
-      ctx.fill();
-      ctx.fillStyle = flash > 0 ? '#7c2d12' : isOccupied ? '#1e3a5f' : '#4a3a28';
-      traceRoundedRect(ctx, -14, -14, 28, 28, 3);
-      ctx.fill();
-      ctx.strokeStyle = flash > 0 ? '#f97316' : isOccupied ? '#38bdf8' : '#8a6b48';
-      ctx.lineWidth = 1.8;
-      ctx.stroke();
-    }
-
-    ctx.restore();
-  }
-
-  private drawLightSwitches(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const b = engine.brute;
-    const halfW = width / (2 * zoom) + 70;
-    const halfH = height / (2 * zoom) + 70;
-    for (const sw of engine.map.lightSwitches) {
-      if (Math.abs(sw.x - camX) > halfW || Math.abs(sw.y - camY) > halfH) continue;
-      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
-      const deckPowered = engine.poweredDecks[swDeck];
-      const flk = deckPowered
-        ? { intensity: 1, sputterAmount: 0 }
-        : sw.isOn
-          ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
-          : { intensity: 1, sputterAmount: 0 };
-      ctx.save();
-      ctx.translate(sw.x, sw.y);
-      ctx.fillStyle = '#1e293b';
-      traceRoundedRect(ctx, -7, -7, 14, 14, 2.5);
-      ctx.fill();
-      ctx.strokeStyle = deckPowered
-        ? '#fbbf24'
-        : sw.isOn
-          ? `rgba(52, 211, 153, ${(0.45 + 0.55 * flk.intensity).toFixed(2)})`
-          : '#64748b';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Toggle lever & status LED
-      ctx.fillStyle = deckPowered
-        ? '#fbbf24'
-        : sw.isOn
-          ? `rgba(52, 211, 153, ${(0.4 + 0.6 * flk.intensity).toFixed(2)})`
-          : '#f59e0b';
-      ctx.fillRect(-2.5, sw.isOn || deckPowered ? -4 : 1, 5, 3);
-      ctx.restore();
-    }
-  }
-
-  private drawDoors(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const ts = engine.map.tileSize;
-    const halfW = width / (2 * zoom) + ts * 2;
-    const halfH = height / (2 * zoom) + ts * 2;
-    for (const d of engine.map.doors) {
-      const cx = (d.tx + 0.5) * ts;
-      const cy = (d.ty + 0.5) * ts;
-      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
-      ctx.save();
-      ctx.translate(cx, cy);
-
-      if (d.isBroken) {
-        // Splintered twisted hinge frame
-        ctx.fillStyle = '#475569';
-        if (d.orientation === 'H') {
-          ctx.fillRect(-ts / 2, -3, 8, 6);
-          ctx.fillRect(ts / 2 - 8, -3, 8, 6);
-        } else {
-          ctx.fillRect(-3, -ts / 2, 6, 8);
-          ctx.fillRect(-3, ts / 2 - 8, 6, 8);
-        }
-        ctx.restore();
-        continue;
-      }
-
-      if (d.orientation === 'V') {
-        ctx.rotate(Math.PI / 2);
-      }
-
-      // Steel bulkhead threshold strip
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
-      ctx.fillRect(-ts / 2, -6, ts, 12);
-
-      if (d.openProgress > 0.02) {
-        // Smooth rotating armored door leaf based on openProgress (0..1)
-        ctx.translate(-ts / 2 + 4, 0);
-        ctx.rotate(-d.openProgress * 1.38);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, 1, -2, ts - 8, d.isWatertight ? 9 : 7, 2);
-        ctx.fill();
-        ctx.fillStyle = d.isLocked ? '#7f1d1d' : d.isWatertight ? '#1e3a4c' : '#526075';
-        traceRoundedRect(ctx, 0, d.isWatertight ? -4.5 : -3.5, ts - 8, d.isWatertight ? 9 : 7, 2);
-        ctx.fill();
-        ctx.strokeStyle = d.isWatertight ? '#22d3ee' : '#94a3b8';
-        ctx.lineWidth = d.isWatertight ? 1.5 : 1.1;
-        ctx.stroke();
-        if (d.isWatertight) {
-          // Brass dogging wheel on swung watertight leaf
-          ctx.strokeStyle = '#fbbf24';
-          ctx.lineWidth = 1.4;
-          ctx.beginPath();
-          ctx.arc((ts - 8) * 0.5, 0, 3.8, 0, Math.PI * 2);
-          ctx.stroke();
-        }
-      } else {
-        const wt = Boolean(d.isWatertight);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
-        traceRoundedRect(ctx, -ts / 2 + 3, -3, ts - 4, wt ? 11 : 9, 2);
-        ctx.fill();
-        ctx.fillStyle = d.isLocked ? '#7f1d1d' : wt ? '#1e3a4c' : '#475569';
-        traceRoundedRect(ctx, -ts / 2 + 2, wt ? -5.5 : -4.5, ts - 4, wt ? 11 : 9, 2);
-        ctx.fill();
-        ctx.strokeStyle = d.isLocked ? '#ef4444' : wt ? '#22d3ee' : '#94a3b8';
-        ctx.lineWidth = wt ? 1.9 : 1.5;
-        ctx.stroke();
-        // Porthole / reinforcement bar
-        ctx.fillStyle = '#1e293b';
-        ctx.fillRect(-8, -2, 16, 4);
-        if (wt && !d.isLocked) {
-          // Heavy brass dogging handwheel + bolted ribs
-          ctx.fillStyle = '#f59e0b';
-          ctx.fillRect(-ts / 2 + 4, -4, 3, 8);
-          ctx.fillRect(ts / 2 - 7, -4, 3, 8);
-          ctx.strokeStyle = '#fbbf24';
-          ctx.lineWidth = 1.6;
-          ctx.beginPath();
-          ctx.arc(0, 0, 4.4, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(-4, 0);
-          ctx.lineTo(4, 0);
-          ctx.moveTo(0, -4);
-          ctx.lineTo(0, 4);
-          ctx.stroke();
-        }
-        if (d.isLocked) {
-          ctx.fillStyle = '#ef4444';
-          ctx.beginPath();
-          ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      if (d.lockCut) {
-        // Severed padlock debris left on floor frame (noticeable by Brute)
-        ctx.fillStyle = '#991b1b';
-        ctx.fillRect(ts / 2 - 9, 7, 5, 4);
-        ctx.fillStyle = '#cbd5e1';
-        ctx.fillRect(ts / 2 - 4, 8, 3, 3);
-      }
-      ctx.restore();
-    }
-  }
-
-  private drawDroppedLights(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number,
-    width: number,
-    height: number,
-    zoom: number,
-    camX = engine.cameraX,
-    camY = engine.cameraY
-  ): void {
-    const halfW = width / (2 * zoom) + 70;
-    const halfH = height / (2 * zoom) + 70;
-    for (const l of engine.droppedLights) {
-      if (Math.abs(l.x - camX) > halfW || Math.abs(l.y - camY) > halfH) continue;
-      ctx.save();
-      if (l.type === 'GLOWSTICK') {
-        ctx.fillStyle = '#34d399';
-        ctx.translate(l.x, l.y);
-        ctx.rotate(0.5);
-        ctx.fillRect(-6, -2, 12, 4);
-      } else {
-        const flicker = 4 + Math.sin(timeSec * 28) * 1.5;
-        ctx.fillStyle = '#fb7185';
-        ctx.beginPath();
-        ctx.arc(l.x, l.y, flicker, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-  }
-
-  private drawParticles(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
-    for (const pt of engine.particles) {
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, pt.life / pt.maxLife);
-      ctx.fillStyle = pt.color;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-  }
-
-  private drawPlayer(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number
-  ): void {
-    const p = engine.player;
-    const stride = p.isMoving ? Math.sin(p.walkPhase) : 0;
-    const crouchScale = p.crouching ? 0.87 : 1.0;
-    const torsoTwist = p.isMoving ? stride * (p.sprinting ? 0.1 : 0.055) : 0;
-    const idleBreath = p.isMoving
-      ? 0
-      : Math.sin(timeSec * (p.exhausted ? 7.2 : 2.5)) * (p.exhausted ? 0.45 : 0.18);
-    const hasLight = p.flashlightOn && p.battery > 0;
-
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(p.angle + torsoTwist);
-
-    // 1. Ground contact shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.beginPath();
-    ctx.ellipse(-1, 2, 10 * crouchScale, (p.crouching ? 11 : 13.5), 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 2. Articulated steel-toed deck boots stepping during stride
-    const drawBoot = (xOff: number, yOff: number) => {
-      ctx.fillStyle = '#0f172a';
-      traceRoundedRect(ctx, xOff - 3.6, yOff - 2.3, 7.6, 4.6, 1.8);
-      ctx.fill();
-      ctx.fillStyle = '#334155';
-      traceRoundedRect(ctx, xOff + 1.4, yOff - 1.9, 2.5, 3.8, 1.1);
-      ctx.fill();
-    };
-    const leftStride = stride * (p.crouching ? 3.2 : p.sprinting ? 6.2 : 4.8);
-    drawBoot(leftStride, -4.4 * crouchScale);
-    drawBoot(-leftStride, 4.4 * crouchScale);
-
-    // 3. Strapped canvas utility satchel OR expanded Crew Expedition Backpack
-    ctx.save();
-    ctx.translate(-5.8 * crouchScale, 0);
-    if (p.hasBackpack) {
-      // Larger rugged orange-trimmed crew expedition backpack (+2 slots upgrade)
-      ctx.fillStyle = '#7c2d12';
-      traceRoundedRect(ctx, -6.2, -9.2 * crouchScale, 10, 18.4 * crouchScale, 3);
-      ctx.fill();
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1.3;
-      ctx.stroke();
-      ctx.fillStyle = '#c2410c';
-      traceRoundedRect(ctx, -4.8, -7.2 * crouchScale, 6.2, 14.4 * crouchScale, 2);
-      ctx.fill();
-      // Twin SOLAS orange straps & bedroll
-      ctx.fillStyle = '#fb923c';
-      ctx.fillRect(-3.6, -7.5 * crouchScale, 1.8, 15 * crouchScale);
-      ctx.fillStyle = '#334155';
-      traceRoundedRect(ctx, -7.6, -5.8 * crouchScale, 2.6, 11.6 * crouchScale, 1.2);
-      ctx.fill();
-    } else {
-      ctx.fillStyle = '#1f2d27';
-      traceRoundedRect(ctx, -4.4, -7.2 * crouchScale, 7.6, 14.4 * crouchScale, 2.5);
-      ctx.fill();
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
-      // Canvas pack flap & high-vis survival strap
-      ctx.fillStyle = '#2d3f37';
-      traceRoundedRect(ctx, -3.5, -5.8 * crouchScale, 4.8, 11.6 * crouchScale, 1.6);
-      ctx.fill();
-      ctx.fillStyle = p.inventory.length > 1 ? '#d97706' : '#475569';
-      ctx.fillRect(-1.8, -5.4 * crouchScale, 1.6, 10.8 * crouchScale);
-    }
-    ctx.restore();
-
-    // 4. Left arm (counter-swinging in oilskin sleeve with deckhand glove)
-    const leftArmForward = -stride * (p.crouching ? 2.4 : p.sprinting ? 5.2 : 3.8);
-    ctx.save();
-    ctx.translate(leftArmForward * 0.45, -10.5 * crouchScale);
-    ctx.rotate(-stride * 0.16);
-    ctx.fillStyle = '#1e3a5f';
-    traceRoundedRect(ctx, -2.6, -2.4, 8.6, 4.8, 2.2);
-    ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    // Deckhand glove
-    ctx.fillStyle = '#475569';
-    ctx.beginPath();
-    ctx.arc(6.2, 0, 2.2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-
-    // 5. Right arm braced forward holding heavy-duty marine flashlight
-    const rightArmBob = stride * (p.crouching ? 1.2 : 2.1);
-    ctx.save();
-    ctx.translate(rightArmBob * 0.35, 9.6 * crouchScale);
-    ctx.rotate(-0.12 + stride * 0.06);
-    ctx.fillStyle = '#1e3a5f';
-    traceRoundedRect(ctx, -2.0, -2.4, 9.2, 4.8, 2.2);
-    ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    // Gloved hand gripping torch
-    ctx.fillStyle = '#475569';
-    ctx.beginPath();
-    ctx.arc(7.2, 0, 2.2, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Marine flashlight body + flared bezel
-    ctx.fillStyle = '#334155';
-    traceRoundedRect(ctx, 5.2, -1.7, 7.6, 3.4, 1.0);
-    ctx.fill();
-    ctx.fillStyle = '#94a3b8';
-    ctx.fillRect(11.6, -2.2, 2.4, 4.4);
-    ctx.fillStyle = hasLight ? '#fef08a' : '#1e293b';
-    ctx.fillRect(13.8, -1.7, 1.4, 3.4);
-    if (hasLight) {
-      const lensGlow = ctx.createRadialGradient(14.8, 0, 0.5, 14.8, 0, 6);
-      lensGlow.addColorStop(0, 'rgba(254, 249, 195, 0.85)');
-      lensGlow.addColorStop(1, 'rgba(253, 224, 71, 0)');
-      ctx.fillStyle = lensGlow;
-      ctx.beginPath();
-      ctx.arc(14.8, 0, 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-
-    // 6. Weathered Maritime Oilskin Deck Jacket Torso
-    const shoulderRadiusY = (p.crouching ? 9.8 : 11.8) + idleBreath;
-    const torsoRadiusX = (p.crouching ? 7.2 : 7.6) + idleBreath * 0.6;
-    const jacketGrad = ctx.createLinearGradient(-7, -shoulderRadiusY, 7, shoulderRadiusY);
-    jacketGrad.addColorStop(0, '#1e3a5f');
-    jacketGrad.addColorStop(0.5, '#254a78');
-    jacketGrad.addColorStop(1, '#172c49');
-    ctx.fillStyle = jacketGrad;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, torsoRadiusX, shoulderRadiusY, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.4;
-    ctx.stroke();
-
-    // High-vis SOLAS maritime reflective shoulder & collar stripes
-    ctx.strokeStyle = 'rgba(251, 146, 60, 0.85)';
-    ctx.lineWidth = 2.0;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(-2.2, -shoulderRadiusY + 2.3);
-    ctx.lineTo(2.4, -shoulderRadiusY + 3.4);
-    ctx.moveTo(-2.2, shoulderRadiusY - 2.3);
-    ctx.lineTo(2.4, shoulderRadiusY - 3.4);
-    ctx.stroke();
-
-    // Jacket storm collar fold
-    ctx.fillStyle = '#0f223d';
-    ctx.beginPath();
-    ctx.ellipse(0.6, 0, 5.2, 6.8 * crouchScale, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // 7. Sculpted Head with Knit Watch Cap
-    const headX = p.crouching ? 2.4 : p.sprinting ? 2.0 : 1.0;
-    const headR = p.crouching ? 6.1 : 6.6;
-
-    // Subtle facial/forehead edge under cap brim
-    ctx.fillStyle = '#cfa987';
-    ctx.beginPath();
-    ctx.arc(headX + 1.4, 0, headR * 0.86, -0.7, 0.7);
-    ctx.fill();
-
-    // Ribbed knit watch cap crown
-    const capGrad = ctx.createRadialGradient(headX - 1.2, -1.2, 1, headX, 0, headR);
-    capGrad.addColorStop(0, '#64748b');
-    capGrad.addColorStop(0.65, '#334155');
-    capGrad.addColorStop(1, '#1e293b');
-    ctx.fillStyle = capGrad;
-    ctx.beginPath();
-    ctx.arc(headX, 0, headR, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // Rolled watch-cap cuff band & crown knit seams
-    ctx.strokeStyle = '#475569';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(headX, 0, headR - 1.3, -1.15, 1.15);
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.45)';
-    ctx.lineWidth = 0.9;
-    ctx.beginPath();
-    ctx.moveTo(headX - headR * 0.75, 0);
-    ctx.lineTo(headX + headR * 0.45, 0);
-    ctx.moveTo(headX - 1.2, -headR * 0.65);
-    ctx.lineTo(headX - 1.2, headR * 0.65);
-    ctx.stroke();
-
-    ctx.restore();
-  }
-
-  private drawBrute(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number
-  ): void {
-    const b = engine.brute;
-    // Hidden inside companionway shaft while climbing between decks
-    if (b.stairClimbTimer > 0) return;
-
-    const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
-    const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
-    const isStunned = b.state === 'STUNNED';
-    const isLunging =
-      b.state === 'SMASH_DOOR' ||
-      (b.state === 'CHECK_HIDING' && b.inspectTimer > 0 && b.inspectTimer < 0.72);
-
-    const stride = isStunned ? 0 : Math.sin(b.walkPhase);
-    const torsoTwist = isStunned
-      ? Math.sin(timeSec * 16) * 0.05
-      : stride * (isChasing ? 0.11 : 0.06);
-    const ventPulse = isStunned
-      ? 0.25
-      : 0.65 + 0.35 * Math.sin(timeSec * (isChasing ? 13 : 5.5));
-
-    ctx.save();
-    ctx.translate(b.x, b.y);
-    ctx.rotate(b.angle + torsoTwist);
-
-    // Ground contact shadow
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.58)';
-    ctx.beginPath();
-    ctx.ellipse(-2, 3, 18, 25, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Articulated Arms & Triple Iron Claws (velocity-synced stride or forward door-smash lunge)
-    const leftReach = isLunging ? 11 : stride * (isChasing ? 8 : 5);
-    const rightReach = isLunging ? 11 : -stride * (isChasing ? 8 : 5);
-
-    const drawClawArm = (side: -1 | 1, reach: number) => {
-      ctx.save();
-      ctx.translate(reach * 0.5, side * 18);
-
-      // Piston arm joint
-      ctx.fillStyle = '#2d1c18';
-      ctx.strokeStyle = isChasing ? '#c2410c' : '#573326';
-      ctx.lineWidth = 1.6;
-      traceRoundedRect(ctx, -4, -4.5, 16 + Math.max(0, reach * 0.35), 9, 3);
-      ctx.fill();
-      ctx.stroke();
-
-      // Heavy iron gauntlet
-      const gx = 12 + reach * 0.45;
-      ctx.fillStyle = '#3f241c';
-      ctx.beginPath();
-      ctx.arc(gx, 0, 6.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = isChasing ? '#fb923c' : '#9a3412';
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-
-      // Curved triple iron claws
-      ctx.fillStyle = '#cbd5e1';
-      for (const cy of [-3.2, 0, 3.2]) {
-        ctx.beginPath();
-        ctx.moveTo(gx + 3, cy - 1.2);
-        ctx.lineTo(gx + 10.5, cy * 0.85);
-        ctx.lineTo(gx + 3, cy + 1.2);
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.restore();
-    };
-
-    drawClawArm(-1, leftReach);
-    drawClawArm(1, rightReach);
-
-    // Massive Hulking Biomechanical Torso Carapace
-    ctx.fillStyle = isChasing ? '#341610' : isStalking ? '#2a1612' : '#211513';
-    ctx.beginPath();
-    ctx.moveTo(-16, -12);
-    ctx.quadraticCurveTo(-18, 0, -16, 12);
-    ctx.lineTo(-4, 22);
-    ctx.quadraticCurveTo(8, 22, 13, 13);
-    ctx.lineTo(13, -13);
-    ctx.quadraticCurveTo(8, -22, -4, -22);
-    ctx.closePath();
-    ctx.fill();
-
-    ctx.strokeStyle = isChasing ? '#ea580c' : isStalking ? '#c2410c' : '#7c2d12';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Layered riveted shoulder pauldrons
-    ctx.fillStyle = '#2d1c19';
-    ctx.strokeStyle = '#64748b';
-    ctx.lineWidth = 1.1;
-    for (const side of [-1, 1]) {
-      ctx.beginPath();
-      ctx.ellipse(0, side * 14.5, 9.5, 6.2, side * 0.25, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    // Glowing Molten Vent Fissures along chest/shoulder armor
-    const ventAlpha = isChasing ? 0.95 * ventPulse : isStalking ? 0.72 * ventPulse : 0.45 * ventPulse;
-    ctx.fillStyle = `rgba(255, 107, 0, ${ventAlpha})`;
-    for (const side of [-1, 1]) {
-      for (let v = 0; v < 3; v++) {
-        ctx.save();
-        ctx.translate(-3 + v * 4.5, side * (11.5 - v * 0.7));
-        ctx.rotate(side * 0.35);
-        ctx.fillRect(-1.2, -3, 2.4, 6);
-        ctx.restore();
-      }
-    }
-
-    // Dorsal spine plates & glowing furnace core
-    for (let s = 0; s < 3; s++) {
-      const sx = -12 + s * 5.2;
-      ctx.fillStyle = `rgba(249, 115, 22, ${ventAlpha * 0.85})`;
-      ctx.fillRect(sx - 1.5, -2.5, 3, 5);
-      ctx.fillStyle = '#18100f';
-      ctx.fillRect(sx - 2.5, -4, 2.2, 8);
-    }
-
-    // Armored Furnace Head & Iconic Projector Visor
-    ctx.fillStyle = '#191110';
-    ctx.beginPath();
-    ctx.arc(6, 0, 10, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = isChasing ? '#fb923c' : '#9a3412';
-    ctx.lineWidth = 1.6;
-    ctx.stroke();
-
-    // Forward brow cowl
-    ctx.fillStyle = '#2b1b17';
-    ctx.beginPath();
-    ctx.arc(8.5, 0, 7.2, -Math.PI * 0.45, Math.PI * 0.45);
-    ctx.fill();
-
-    // Twin Blazing Molten Optic Lenses / Projector Slit
-    if (!isStunned) {
-      ctx.fillStyle = isChasing ? '#ffedd5' : '#fdba74';
-      ctx.beginPath();
-      ctx.arc(12.5, -3.5, 2.4, 0, Math.PI * 2);
-      ctx.arc(12.5, 3.5, 2.4, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = `rgba(255, 95, 0, ${0.85 * ventPulse})`;
-      ctx.fillRect(10.5, -5.5, 3, 11);
-    }
-
-    ctx.restore();
   }
 
   private findNearestWalkableInRoom(
-    engine: MonstrumGameEngine,
+    map: ShipMap,
     roomId: number,
     targetX: number,
     targetY: number
   ): { x: number; y: number } {
-    const { map } = engine;
     const ts = map.tileSize;
     const tTx = Math.max(0, Math.min(map.width - 1, Math.floor(targetX / ts)));
     const tTy = Math.max(0, Math.min(map.height - 1, Math.floor(targetY / ts)));
@@ -3179,12 +1181,12 @@ export class GameRenderer {
     return bestPt;
   }
 
-  private getRoomLightFixtures(
-    engine: MonstrumGameEngine,
+  private computeRoomLightFixturesOnce(
+    map: ShipMap,
     sw: RoomLightSwitch
   ): Array<{ x: number; y: number; range: number }> {
-    const ts = engine.map.tileSize;
-    const rm = engine.map.rooms.find((r) => r.id === sw.roomId);
+    const ts = map.tileSize;
+    const rm = map.rooms.find((r) => r.id === sw.roomId);
     if (!rm) {
       return [{ x: sw.x, y: sw.y, range: 360 }];
     }
@@ -3193,27 +1195,16 @@ export class GameRenderer {
     const rH = (rm.y2 - rm.y1 + 1) * ts;
     const rcx = ((rm.x1 + rm.x2 + 1) / 2) * ts;
     const rcy = ((rm.y1 + rm.y2 + 1) / 2) * ts;
-    const centerPt = this.findNearestWalkableInRoom(engine, sw.roomId, rcx, rcy);
+    const centerPt = this.findNearestWalkableInRoom(map, sw.roomId, rcx, rcy);
     const range = Math.max(310, Math.hypot(rW, rH) * 0.65 + 175);
 
     const fixtures: Array<{ x: number; y: number; range: number }> = [
       { x: centerPt.x, y: centerPt.y, range },
     ];
 
-    // Add secondary ceiling fixture for wide rooms so internal props do not cast harsh blind spots
     if (rm.x2 - rm.x1 >= 7) {
-      const leftPt = this.findNearestWalkableInRoom(
-        engine,
-        sw.roomId,
-        (rm.x1 + 1.5) * ts,
-        rcy
-      );
-      const rightPt = this.findNearestWalkableInRoom(
-        engine,
-        sw.roomId,
-        (rm.x2 - 0.5) * ts,
-        rcy
-      );
+      const leftPt = this.findNearestWalkableInRoom(map, sw.roomId, (rm.x1 + 1.5) * ts, rcy);
+      const rightPt = this.findNearestWalkableInRoom(map, sw.roomId, (rm.x2 - 0.5) * ts, rcy);
       if (Math.hypot(leftPt.x - centerPt.x, leftPt.y - centerPt.y) > ts * 1.8) {
         fixtures.push({ x: leftPt.x, y: leftPt.y, range: range * 0.9 });
       }
@@ -3225,74 +1216,1337 @@ export class GameRenderer {
     return fixtures;
   }
 
-  private computeLitRoomPolygons(
+  private getTextBadge(
+    key: string,
+    text: string,
+    options: {
+      font: string;
+      textColor: string;
+      bgColor?: string;
+      borderColor?: string;
+      padX?: number;
+      height?: number;
+    }
+  ): SpriteEntry {
+    const existing = this.textBadgeCache.get(key);
+    if (existing) return existing;
+
+    const c = document.createElement('canvas');
+    const measureCtx = c.getContext('2d')!;
+    measureCtx.font = options.font;
+    const textW = measureCtx.measureText(text).width;
+    const padX = options.padX ?? 9;
+    const w = Math.ceil(textW + padX * 2);
+    const h = options.height ?? 22;
+    const scale = 2;
+    c.width = w * scale;
+    c.height = h * scale;
+    const ctx = c.getContext('2d')!;
+    ctx.scale(scale, scale);
+
+    if (options.bgColor) {
+      ctx.fillStyle = options.bgColor;
+      ctx.beginPath();
+      ctx.roundRect(0.5, 0.5, w - 1, h - 1, 3);
+      ctx.fill();
+    }
+    if (options.borderColor) {
+      ctx.strokeStyle = options.borderColor;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.roundRect(0.5, 0.5, w - 1, h - 1, 3);
+      ctx.stroke();
+    }
+
+    ctx.font = options.font;
+    ctx.fillStyle = options.textColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, h / 2 + 0.5);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+
+    const entry: SpriteEntry = { texture: tex, w, h };
+    this.textBadgeCache.set(key, entry);
+    return entry;
+  }
+
+  private buildDynamicFan(
+    slotKey: string,
+    ox: number,
+    oy: number,
+    poly: Array<{ x: number; y: number }>,
+    closedLoop: boolean
+  ): FanMeshData {
+    const prev = this.dynamicFansCache.get(slotKey);
+    const next = buildVisibilityFanBuffers(ox, oy, poly, closedLoop, prev);
+    this.dynamicFansCache.set(slotKey, next);
+    return next;
+  }
+
+  public render(
     engine: MonstrumGameEngine,
+    width: number,
+    height: number,
     timeSec: number
-  ): RayLightPoly[] {
-    const polys: RayLightPoly[] = [];
-    const b = engine.brute;
+  ): void {
+    if (!this.initialized || !this.renderer || !this.sprites) return;
+    if (width <= 0 || height <= 0) return;
+
+    this.lastScreenWidth = width;
+    this.lastScreenHeight = height;
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.ensureRenderTargets(width, height, dpr);
+    this.ensureMapBaked(engine.map);
+
+    const renderer = this.renderer;
+    const shakeX = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
+    const shakeY = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
+    const zoom = engine.getEffectiveZoom(width, height);
+    const camWorldX = engine.cameraX - shakeX / zoom;
+    const camWorldY = engine.cameraY - shakeY / zoom;
+    const viewCenterX = width / 2 + shakeX;
+    const viewCenterY = height / 2 + shakeY;
+
+    const halfW = width / (2 * zoom);
+    const halfH = height / (2 * zoom);
+    this.worldCamera.left = -halfW;
+    this.worldCamera.right = halfW;
+    this.worldCamera.top = halfH;
+    this.worldCamera.bottom = -halfH;
+    this.worldCamera.position.set(camWorldX, -camWorldY, 100);
+    this.worldCamera.updateProjectionMatrix();
+
+    if (this.oceanBundle && this.oceanMesh) {
+      this.oceanBundle.uTime.value = timeSec;
+      this.oceanMesh.position.set(camWorldX, -camWorldY, 0);
+      this.oceanMesh.scale.set(halfW * 2.4, halfH * 2.4, 1);
+    }
+
     const activeDeck = engine.getCurrentDeck();
-    const peekStair = engine.player.peekingStairId
-      ? engine.map.stairwells.find((s) => s.id === engine.player.peekingStairId)
-      : undefined;
+    const incomingStairId = engine.getBruteIncomingStairDestId();
+
+    const peekStair =
+      engine.player.peekingStairId !== null &&
+      engine.player.hidingSpotId === null &&
+      engine.player.climbingStairId === null
+        ? engine.map.stairwells.find((s) => s.id === engine.player.peekingStairId)
+        : undefined;
     const peekDest = peekStair
       ? engine.map.stairwells.find((s) => s.id === peekStair.targetStairId)
       : undefined;
 
+    const activeDeckPowered = engine.poweredDecks[activeDeck];
+    if (activeDeckPowered) {
+      this.ensureDeckPoweredLightmap(engine, activeDeck);
+    }
+
+    // Precompute raycasted lighting polygons (skipped on activeDeck when pre-baked by Master Fuse!)
+    const litRoomPolys = this.computeLitRoomPolygons(
+      engine,
+      timeSec,
+      activeDeck,
+      camWorldX,
+      camWorldY,
+      halfW,
+      halfH,
+      peekDest,
+      activeDeckPowered
+    );
+    const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec);
+    const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec);
+    const doorPeekData = this.computeDoorPeekBeam(engine);
+
+    // 1. Populate & render WORLD SCENE -> sceneTarget
+    this.populateWorldScene(
+      engine,
+      activeDeck,
+      camWorldX,
+      camWorldY,
+      width,
+      height,
+      zoom,
+      timeSec,
+      incomingStairId,
+      litRoomPolys,
+      bruteBeam,
+      stairGlow,
+      doorPeekData,
+      true
+    );
+
+    renderer.autoClear = true;
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.sceneTarget);
+    renderer.render(this.worldScene, this.worldCamera);
+
+    // 2. Populate & render PLAYER LoS MASK -> losTarget
+    const sightPolys = this.computePlayerSightPolys(
+      engine,
+      width,
+      height,
+      zoom,
+      doorPeekData
+    );
+    this.lastPlayerSightPolys = sightPolys;
+    this.populateLosScene(sightPolys, engine.player.x, engine.player.y);
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.losTarget);
+    renderer.render(this.losScene, this.worldCamera);
+
+    // 3. Populate & render LIGHT MASK -> lightMaskTarget
+    this.populateLightMaskScene(
+      engine,
+      timeSec,
+      litRoomPolys,
+      bruteBeam,
+      stairGlow,
+      doorPeekData
+    );
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.lightMaskTarget);
+    renderer.render(this.lightMaskScene, this.worldCamera);
+
+    // 4. Composite scene * (los * light) -> finalTarget
+    renderer.setRenderTarget(this.finalTarget);
+    renderer.render(this.compositeScene, this.ndcCamera);
+
+    // 5. Post-darkness perceptual overlays (switch LEDs, stair beacons, Brute eyes, ripples, halo, debug)
+    this.populatePostScene(
+      engine,
+      width,
+      height,
+      zoom,
+      camWorldX,
+      camWorldY,
+      timeSec,
+      incomingStairId
+    );
+    renderer.autoClear = false;
+    renderer.render(this.postScene, this.worldCamera);
+
+    // 6. Optional circular stairwell landing peek portal
+    this.screenSprites?.beginFrame();
+    if (this.portalQuad) this.portalQuad.visible = false;
+
+    if (peekStair && peekDest) {
+      this.renderStairPeekPortalPass(
+        engine,
+        peekStair,
+        peekDest,
+        viewCenterX,
+        viewCenterY,
+        zoom,
+        width,
+        height,
+        dpr,
+        timeSec,
+        litRoomPolys,
+        bruteBeam
+      );
+    }
+
+    this.screenSprites?.endFrame();
+    if (peekStair && peekDest) {
+      this.screenCamera.left = 0;
+      this.screenCamera.right = width;
+      this.screenCamera.top = 0;
+      this.screenCamera.bottom = -height;
+      this.screenCamera.updateProjectionMatrix();
+      renderer.setRenderTarget(this.finalTarget);
+      renderer.autoClear = false;
+      renderer.render(this.screenOverlayScene, this.screenCamera);
+    }
+
+    // 7. Screen vignette & LoS-clipped danger / steam condensation fog
+    this.updateVignetteUniforms(engine, width, height, timeSec);
+    renderer.setRenderTarget(this.finalTarget);
+    renderer.autoClear = false;
+    renderer.render(this.vignetteScene, this.ndcCamera);
+
+    // 8. Final screen blit -> canvas (null)
+    renderer.autoClear = true;
+    renderer.setRenderTarget(null);
+    renderer.render(this.blitScene, this.ndcCamera);
+  }
+
+  private setDeckChunksVisible(deck: ShipDeck): void {
+    for (const ch of this.deckChunkMeshes) {
+      ch.mesh.visible = ch.deck === deck;
+    }
+  }
+
+  private populateWorldScene(
+    engine: MonstrumGameEngine,
+    renderDeck: ShipDeck,
+    camX: number,
+    camY: number,
+    width: number,
+    height: number,
+    zoom: number,
+    timeSec: number,
+    incomingStairId: string | null,
+    litRoomPolys: RayLightPoly[],
+    bruteBeam: BruteBeamData | null,
+    stairGlow: StairGlowData | null,
+    doorPeekData: DoorPeekBeamData | null,
+    includePlayer: boolean
+  ): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const swf = this.staticWarmFans!;
+    const wf = this.worldWarmFans!;
+
+    ws.beginFrame();
+    swf.beginFrame();
+    wf.beginFrame();
+    this.wakeLines!.beginFrame();
+    this.worldLinesDark!.beginFrame();
+    this.worldLinesSteel!.beginFrame();
+    this.worldLinesLight!.beginFrame();
+    this.worldLinesTeal!.beginFrame();
+
+    this.setDeckChunksVisible(renderDeck);
+    if (this.deckWarmQuad) {
+      this.deckWarmQuad.visible =
+        renderDeck === this.bakedLightDeck && engine.poweredDecks[renderDeck];
+    }
+
+    const ts = engine.map.tileSize;
+    const halfW = width / (2 * zoom) + 140;
+    const halfH = height / (2 * zoom) + 140;
+
+    // Hull-hugging sea-foam wake on active deck
+    if (this.bakedShip) {
+      const bounds = engine.map.deckBounds[renderDeck];
+      if (
+        camY + halfH >= bounds.y1 * ts - 40 &&
+        camY - halfH <= (bounds.y2 + 1) * ts + 40
+      ) {
+        for (const we of this.bakedShip.wakeEdges) {
+          if (we.deck !== renderDeck) continue;
+          if (
+            we.x2 < camX - halfW ||
+            we.x1 > camX + halfW ||
+            we.y1 < camY - halfH - 20 ||
+            we.y1 > camY + halfH + 20
+          ) {
+            continue;
+          }
+          const wave = Math.sin(timeSec * 1.8 + we.phase) * 2.5;
+          const midX = (we.x1 + we.x2) * 0.5;
+          const midY = we.y1 + we.midYOffset - (we.midYOffset < 0 ? wave : -wave);
+          const endY = we.midYOffset < 0 ? we.y1 + wave : we.y1 - wave;
+          this.wakeLines!.addSegment(we.x1, endY, midX, midY);
+          this.wakeLines!.addSegment(midX, midY, we.x2, endY);
+        }
+      }
+    }
+
+    // Floodgate lever dynamic sprite (Deck 1)
+    for (const prop of engine.map.props) {
+      if (prop.deck !== renderDeck || prop.kind !== 'FLOODGATE_LEVER') continue;
+      const lx = (prop.tx + 0.5) * ts;
+      const ly = (prop.ty + 0.5) * ts;
+      if (Math.abs(lx - camX) > halfW || Math.abs(ly - camY) > halfH) continue;
+      const subPartsDone = engine.escape.submarineParts.length === 3;
+      const subActiveOrReady = engine.escape.submarineState !== 'IDLE';
+      const mode = subActiveOrReady ? 'active' : subPartsDone ? 'ready' : 'idle';
+      ws.place(sp.floodgateLeverBase[mode], lx, ly, { renderOrder: 8 });
+    }
+
+    // Escape Zones (only on their respective decks)
+    if (renderDeck === 'DECK_3') {
+      this.drawHelideckSprites(engine, timeSec);
+    } else if (renderDeck === 'DECK_2') {
+      this.drawLifeboatSprites(engine, timeSec);
+    } else if (renderDeck === 'DECK_1') {
+      this.drawSubmarineSprites(engine, timeSec);
+    }
+
+    // Stairwells
+    for (const st of engine.map.stairwells) {
+      if (st.deck !== renderDeck) continue;
+      if (Math.abs(st.x - camX) > halfW || Math.abs(st.y - camY) > halfH) continue;
+      const isBruteComing = st.id === incomingStairId;
+      const mode = isBruteComing ? 'COMING' : st.direction;
+      if (isBruteComing) {
+        const pulse = 0.65 + 0.35 * Math.sin(timeSec * 10);
+        ws.place(sp.softDisc, st.x, st.y, {
+          scaleX: 68 / sp.softDisc.w,
+          scaleY: 68 / sp.softDisc.h,
+          tint: 0xff7300,
+          opacity: 0.78 * pulse,
+          renderOrder: 6,
+        });
+      }
+      ws.place(sp.stairwell[mode], st.x, st.y, { renderOrder: 6 });
+    }
+
+    // Steam Pipes
+    for (const pipe of engine.map.steamPipes) {
+      if (pipe.deck !== renderDeck) continue;
+      if (Math.abs(pipe.x - camX) > halfW + 100 || Math.abs(pipe.y - camY) > halfH + 100) {
+        continue;
+      }
+      const wallCx = (pipe.wallTx + 0.5) * ts;
+      const wallCy = (pipe.wallTy + 0.5) * ts;
+      const edgeX = wallCx + pipe.dirX * (ts * 0.48);
+      const edgeY = wallCy + pipe.dirY * (ts * 0.48);
+      const angle = Math.atan2(pipe.dirY, pipe.dirX);
+      const isWarn = pipe.warningTimer > 0;
+      const isActive = pipe.activeTimer > 0;
+      const mode = isActive ? 'active' : isWarn ? 'warn' : 'idle';
+      ws.place(sp.steamNozzle[mode], edgeX, edgeY, { rot2d: angle, renderOrder: 7 });
+
+      if (isWarn) {
+        const wPulse = 0.35 + 0.25 * Math.sin(timeSec * 24);
+        ws.place(sp.softDisc, edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10, {
+          scaleX: 52 / sp.softDisc.w,
+          scaleY: 52 / sp.softDisc.h,
+          tint: 0xfde047,
+          opacity: wPulse,
+          renderOrder: 7,
+        });
+      }
+
+      if (isActive) {
+        const clippedTiles = engine.getSteamPipeClippedRangeTiles(pipe);
+        if (clippedTiles > 0) {
+          const jetLen = clippedTiles * ts - 4;
+          const wobble = Math.sin(timeSec * 36 + pipe.wallTx) * 0.08;
+          ws.place(
+            sp.steamJet,
+            edgeX + pipe.dirX * (jetLen * 0.5),
+            edgeY + pipe.dirY * (jetLen * 0.5),
+            {
+              rot2d: angle,
+              scaleX: jetLen / sp.steamJet.w,
+              scaleY: 1 + wobble,
+              renderOrder: 7,
+            }
+          );
+        }
+      }
+    }
+
+    // Paper Map Stands
+    for (const stand of engine.map.paperMaps) {
+      if (stand.deck !== renderDeck) continue;
+      if (Math.abs(stand.x - camX) > halfW || Math.abs(stand.y - camY) > halfH) continue;
+      ws.place(sp.paperMapBase, stand.x, stand.y, { renderOrder: 8 });
+      const pulse = 0.65 + 0.35 * Math.sin(timeSec * 4.5);
+      ws.place(sp.softDisc, stand.x + 2, stand.y - 1, {
+        scaleX: 4.8 / sp.softDisc.w,
+        scaleY: 4.8 / sp.softDisc.h,
+        tint: 0xdc2626,
+        opacity: pulse,
+        renderOrder: 8,
+      });
+    }
+
+    // Fuse Sockets
+    for (const fs of engine.map.fuseSockets) {
+      if (fs.deck !== renderDeck) continue;
+      if (Math.abs(fs.x - camX) > halfW || Math.abs(fs.y - camY) > halfH) continue;
+      ws.place(fs.hasFuse ? sp.fuseSocketLoaded : sp.fuseSocketEmpty, fs.x, fs.y, {
+        renderOrder: 8,
+      });
+      if (fs.hasFuse) {
+        const arc = 0.72 + 0.28 * Math.sin(timeSec * 8);
+        ws.place(sp.softDisc, fs.x, fs.y, {
+          scaleX: 5.5 / sp.softDisc.w,
+          scaleY: 5.5 / sp.softDisc.h,
+          tint: 0x34d399,
+          opacity: arc,
+          renderOrder: 8,
+        });
+      } else {
+        const blink = Math.sin(timeSec * 4.5) > 0;
+        ws.place(sp.softDisc, fs.x, fs.y - 10, {
+          scaleX: 4.5 / sp.softDisc.w,
+          scaleY: 4.5 / sp.softDisc.h,
+          tint: blink ? 0xef4444 : 0x7f1d1d,
+          opacity: 1,
+          renderOrder: 8,
+        });
+      }
+    }
+
+    // Containers
+    for (const c of engine.map.containers) {
+      if ((engine.map.deckGrid[c.ty]?.[c.tx] ?? 'DECK_2') !== renderDeck) continue;
+      if (Math.abs(c.x - camX) > halfW || Math.abs(c.y - camY) > halfH) continue;
+      const key = `${c.type}:${c.searched ? 1 : 0}` as const;
+      ws.place(sp.containers[key], c.x, c.y, { renderOrder: 8 });
+    }
+
+    // Hiding Spots
+    for (const s of engine.map.hidingSpots) {
+      if ((engine.map.deckGrid[s.ty]?.[s.tx] ?? 'DECK_2') !== renderDeck) continue;
+      if (Math.abs(s.x - camX) > halfW || Math.abs(s.y - camY) > halfH) continue;
+      const mode =
+        s.checkedFlash > 0 ? 'flash' : engine.player.hidingSpotId === s.id ? 'occupied' : 'normal';
+      const key = `${s.type}:${mode}` as const;
+      ws.place(sp.hidingSpots[key], s.x, s.y, { renderOrder: 8 });
+    }
+
+    // Light Switches
+    for (const sw of engine.map.lightSwitches) {
+      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      if (swDeck !== renderDeck) continue;
+      if (Math.abs(sw.x - camX) > halfW || Math.abs(sw.y - camY) > halfH) continue;
+      const deckPowered = engine.poweredDecks[swDeck];
+      const mode = deckPowered ? 'powered' : sw.isOn ? 'on' : 'off';
+      ws.place(sp.lightSwitchBase[mode], sw.x, sw.y, { renderOrder: 8 });
+    }
+
+    // Doors
+    for (const d of engine.map.doors) {
+      if ((engine.map.deckGrid[d.ty]?.[d.tx] ?? 'DECK_2') !== renderDeck) continue;
+      const cx = (d.tx + 0.5) * ts;
+      const cy = (d.ty + 0.5) * ts;
+      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
+
+      if (d.isBroken) {
+        ws.place(d.orientation === 'H' ? sp.doorBrokenH : sp.doorBrokenV, cx, cy, {
+          renderOrder: 9,
+        });
+        continue;
+      }
+
+      const baseRot = d.orientation === 'V' ? Math.PI / 2 : 0;
+      ws.place(sp.doorThreshold, cx, cy, { rot2d: baseRot, renderOrder: 9 });
+
+      const kind = d.isLocked ? 'locked' : d.isWatertight ? 'watertight' : 'normal';
+      if (d.openProgress > 0.02) {
+        const hingeOffset = -ts / 2 + 4;
+        const hx = d.orientation === 'H' ? cx + hingeOffset : cx;
+        const hy = d.orientation === 'H' ? cy : cy + hingeOffset;
+        ws.place(sp.doorLeaf[kind], hx, hy, {
+          rot2d: baseRot - d.openProgress * 1.38,
+          renderOrder: 9,
+        });
+      } else {
+        ws.place(sp.doorClosed[kind], cx, cy, { rot2d: baseRot, renderOrder: 9 });
+      }
+
+      if (d.lockCut) {
+        ws.place(sp.doorPadlockDebris, cx, cy, { rot2d: baseRot, renderOrder: 9 });
+      }
+    }
+
+    // Dropped Lights
+    for (const l of engine.droppedLights) {
+      const lTx = Math.floor(l.x / ts);
+      const lTy = Math.floor(l.y / ts);
+      if ((engine.map.deckGrid[lTy]?.[lTx] ?? 'DECK_2') !== renderDeck) continue;
+      if (Math.abs(l.x - camX) > halfW || Math.abs(l.y - camY) > halfH) continue;
+      if (l.type === 'GLOWSTICK') {
+        ws.place(sp.glowstick, l.x, l.y, { renderOrder: 10 });
+      } else {
+        const flicker = (4 + Math.sin(timeSec * 28) * 1.5) * 2;
+        ws.place(sp.softDisc, l.x, l.y, {
+          scaleX: flicker / sp.softDisc.w,
+          scaleY: flicker / sp.softDisc.h,
+          tint: 0xfb7185,
+          opacity: 1,
+          renderOrder: 10,
+        });
+      }
+    }
+
+    // World Pickups
+    for (const wp of engine.worldPickups) {
+      if (wp.deck !== renderDeck) continue;
+      if (Math.abs(wp.x - camX) > halfW || Math.abs(wp.y - camY) > halfH) continue;
+      const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
+      const haloColor =
+        wp.item === 'BACKPACK'
+          ? 0xf97316
+          : wp.item === 'MASTER_FUSE' ||
+              wp.item === 'AVIATION_FUEL' ||
+              wp.item === 'IGNITION_KEY' ||
+              wp.item === 'ROTOR_FUSE'
+            ? 0xfbbf24
+            : wp.item === 'WINCH_CRANK' ||
+                wp.item === 'MARINE_BATTERY' ||
+                wp.item === 'HULL_PATCH'
+              ? 0x38bdf8
+              : wp.item === 'SUB_BATTERY' ||
+                  wp.item === 'BALLAST_PUMP' ||
+                  wp.item === 'DIVE_KEY'
+                ? 0x2dd4bf
+                : 0xa3e635;
+      ws.place(sp.softRing, wp.x, wp.y, {
+        scaleX: (24 * pulse) / sp.softRing.w,
+        scaleY: (24 * pulse) / sp.softRing.h,
+        tint: haloColor,
+        opacity: wp.item === 'MASTER_FUSE' ? 0.85 : 0.65,
+        renderOrder: 10,
+      });
+      ws.place(sp.pickups[wp.item], wp.x, wp.y, { renderOrder: 10 });
+    }
+
+    // Particles (filtered to renderDeck bounds)
+    const bounds = engine.map.deckBounds[renderDeck];
+    const deckMinY = bounds.y1 * ts;
+    const deckMaxY = (bounds.y2 + 1) * ts;
+    for (const pt of engine.particles) {
+      if (pt.y < deckMinY || pt.y > deckMaxY) continue;
+      if (Math.abs(pt.x - camX) > halfW || Math.abs(pt.y - camY) > halfH) continue;
+      const alpha = Math.max(0, pt.life / pt.maxLife);
+      this.setColorFromCss(this.tmpColor, pt.color);
+      ws.place(sp.softDisc, pt.x, pt.y, {
+        scaleX: (pt.size * 2.2) / sp.softDisc.w,
+        scaleY: (pt.size * 2.2) / sp.softDisc.h,
+        tint: this.tmpColor.getHex(),
+        opacity: alpha,
+        renderOrder: 11,
+      });
+    }
+
+    // Player
+    if (includePlayer && engine.player.hidingSpotId === null) {
+      this.drawPlayerSprites(engine, timeSec);
+    }
+
+    // Brute (only if on renderDeck & not climbing)
+    const b = engine.brute;
+    const bTy = Math.floor(b.y / ts);
+    if (b.stairClimbTimer <= 0 && bTy >= bounds.y1 && bTy <= bounds.y2) {
+      this.drawBruteSprites(engine, timeSec);
+    }
+
+    // Warm Lighting Tints (wall-blocked visibility fans)
+    this.populateWarmLightingTints(
+      engine,
+      renderDeck,
+      litRoomPolys,
+      bruteBeam,
+      stairGlow,
+      doorPeekData,
+      timeSec
+    );
+
+    ws.endFrame();
+    swf.endFrame();
+    wf.endFrame();
+    this.wakeLines!.endFrame();
+    this.worldLinesDark!.endFrame();
+    this.worldLinesSteel!.endFrame();
+    this.worldLinesLight!.endFrame();
+    this.worldLinesTeal!.endFrame();
+  }
+
+  private drawHelideckSprites(engine: MonstrumGameEngine, timeSec: number): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const esc = engine.escape;
+
+    const hx = engine.map.heliPos.x + 14;
+    const hy = engine.map.heliPos.y;
+    const hasFuel = esc.heliParts.includes('AVIATION_FUEL');
+    const hasFuse = esc.heliParts.includes('ROTOR_FUSE');
+    const hasKey = esc.heliParts.includes('IGNITION_KEY');
+    const heliReady = esc.heliState === 'READY';
+    const heliActivating = esc.heliState === 'ACTIVATING';
+    const heliSpool = heliReady ? 1 : heliActivating ? esc.heliActivationProgress : 0;
+
+    const padMode = heliReady ? 'ready' : esc.heliParts.length === 3 ? 'parts3' : 'idle';
+    ws.place(sp.heliPad[padMode], hx, hy, { renderOrder: 3 });
+
+    // Corner strobes
+    const strobeOn = Math.sin(timeSec * (heliReady ? 6 : 12)) > 0;
+    for (const [sx, sy] of [
+      [-52, -48],
+      [52, -48],
+      [-52, 48],
+      [52, 48],
+    ]) {
+      if (heliReady || (heliActivating && strobeOn)) {
+        ws.place(sp.softDisc, hx + sx, hy + sy, {
+          scaleX: 6 / sp.softDisc.w,
+          scaleY: 6 / sp.softDisc.h,
+          tint: heliReady ? 0x34d399 : 0xf59e0b,
+          opacity: 1,
+          renderOrder: 3,
+        });
+      } else {
+        ws.place(sp.softDisc, hx + sx, hy + sy, {
+          scaleX: 4.5 / sp.softDisc.w,
+          scaleY: 4.5 / sp.softDisc.h,
+          tint: hasFuse ? 0xfbbf24 : 0x334155,
+          opacity: hasFuse ? 0.45 : 1,
+          renderOrder: 3,
+        });
+      }
+    }
+
+    const lx = engine.map.heliPos.x;
+    const ly = engine.map.heliPos.y;
+    const heliVibX = heliSpool > 0.15 ? Math.sin(timeSec * 52) * heliSpool * 0.9 : 0;
+    const heliVibY = heliSpool > 0.15 ? Math.cos(timeSec * 46) * heliSpool * 0.9 : 0;
+    const cx = lx + heliVibX;
+    const cy = ly + heliVibY;
+
+    ws.place(sp.heliFuselage, cx, cy, { renderOrder: 4 });
+    ws.place(sp.heliFuelPort[hasFuel ? 'filled' : 'empty'], cx - 6, cy - 15, {
+      renderOrder: 4,
+    });
+    ws.place(sp.heliFuseBay[hasFuse ? 'filled' : 'empty'], cx - 1.5, cy + 14.75, {
+      renderOrder: 4,
+    });
+    if (!hasFuse && Math.sin(timeSec * 19) > 0.78) {
+      ws.place(sp.softDisc, cx - 2, cy + 14.5, {
+        scaleX: 5 / sp.softDisc.w,
+        scaleY: 5 / sp.softDisc.h,
+        tint: 0xfde047,
+        opacity: 1,
+        renderOrder: 5,
+      });
+    }
+    ws.place(sp.heliCockpit[hasKey ? 'filled' : 'empty'], cx + 22, cy, { renderOrder: 4 });
+
+    if (hasKey && Math.sin(timeSec * 5) > -0.3) {
+      ws.place(sp.softDisc, cx + 8, cy - 14.5, {
+        scaleX: 5 / sp.softDisc.w,
+        scaleY: 5 / sp.softDisc.h,
+        tint: 0xef4444,
+        opacity: 1,
+        renderOrder: 5,
+      });
+      ws.place(sp.softDisc, cx + 8, cy + 14.5, {
+        scaleX: 5 / sp.softDisc.w,
+        scaleY: 5 / sp.softDisc.h,
+        tint: 0x22c55e,
+        opacity: 1,
+        renderOrder: 5,
+      });
+    }
+
+    // 6 Tie-Down Chains
+    const chainSpecs: Array<{ fx: number; fy: number; bx: number; by: number }> = [
+      { fx: 20, fy: -12, bx: 44, by: -36 },
+      { fx: 20, fy: 12, bx: 44, by: 36 },
+      { fx: 2, fy: -15, bx: 4, by: -44 },
+      { fx: 2, fy: 15, bx: 4, by: 44 },
+      { fx: -18, fy: -11, bx: -42, by: -36 },
+      { fx: -18, fy: 11, bx: -42, by: 36 },
+    ];
+    for (let i = 0; i < chainSpecs.length; i++) {
+      const cs = chainSpecs[i];
+      const intact = i < esc.heliChainsRemaining;
+      ws.place(sp.heliBollard[intact ? 'intact' : 'cut'], cx + cs.bx, cy + cs.by, {
+        renderOrder: 3,
+      });
+      if (intact) {
+        this.worldLinesDark!.addSegment(cx + cs.fx, cy + cs.fy, cx + cs.bx, cy + cs.by);
+        this.worldLinesLight!.addDashedSegment(
+          cx + cs.fx,
+          cy + cs.fy,
+          cx + cs.bx,
+          cy + cs.by,
+          4,
+          3
+        );
+        ws.place(
+          sp.softDisc,
+          cx + (cs.fx + cs.bx) * 0.5,
+          cy + (cs.fy + cs.by) * 0.5,
+          {
+            scaleX: 6 / sp.softDisc.w,
+            scaleY: 6 / sp.softDisc.h,
+            tint: 0xf59e0b,
+            opacity: 1,
+            renderOrder: 5,
+          }
+        );
+      } else {
+        const dx = cs.fx - cs.bx;
+        const dy = cs.fy - cs.by;
+        const d = Math.hypot(dx, dy) || 1;
+        this.worldLinesSteel!.addSegment(
+          cx + cs.bx,
+          cy + cs.by,
+          cx + cs.bx + (dx / d) * 7,
+          cy + cs.by + (dy / d) * 7
+        );
+      }
+    }
+
+    // Rotor assembly
+    const rotorAngle = heliSpool > 0 ? timeSec * (2 + heliSpool * 24) : 0.42;
+    if (heliSpool > 0.22) {
+      const discAlpha = Math.min(0.32, (heliSpool - 0.22) * 0.42) / 0.35;
+      ws.place(sp.heliRotorDisc, cx, cy, {
+        opacity: Math.min(1, discAlpha),
+        renderOrder: 5,
+      });
+    }
+    const bladeAlpha = heliSpool > 0.5 ? 0.45 : 0.85;
+    ws.place(sp.heliRotorBlades, cx, cy, {
+      rot2d: rotorAngle,
+      opacity: bladeAlpha,
+      renderOrder: 5,
+    });
+  }
+
+  private drawLifeboatSprites(engine: MonstrumGameEngine, timeSec: number): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const ts = engine.map.tileSize;
+    const esc = engine.escape;
+
+    const bx = engine.map.lifeboatPos.x;
+    const by = engine.map.lifeboatPos.y;
+    const bTx = engine.map.lifeboatPos.tx;
+    const bTy = engine.map.lifeboatPos.ty;
+    const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
+    const outSign = voidNorth ? -1 : 1;
+
+    const hasPatch = esc.lifeboatParts.includes('HULL_PATCH');
+    const hasCrank = esc.lifeboatParts.includes('WINCH_CRANK');
+    const hasBattery = esc.lifeboatParts.includes('MARINE_BATTERY');
+    const boatReady = esc.lifeboatState === 'READY';
+    const boatActivating = esc.lifeboatState === 'ACTIVATING';
+    const craneSwing = boatReady ? 1 : boatActivating ? esc.lifeboatActivationProgress : 0;
+
+    const inboardY = by - outSign * 14;
+    const swingOutDist = craneSwing * 36;
+    const boatY = by - outSign * 2 + outSign * swingOutDist;
+    const boatX = bx + 16;
+    const boatBob = boatReady ? Math.sin(timeSec * 2.8) * 1.4 : 0;
+
+    const plateMode = boatReady ? 'ready' : esc.lifeboatParts.length === 3 ? 'parts3' : 'idle';
+    ws.place(sp.lifeboatDeckPlate[plateMode], bx + ts * 0.5 - 2, by + ts * 0.5 - 16, {
+      renderOrder: 3,
+    });
+
+    const leftPedX = bx - 8;
+    const rightPedX = bx + 40;
+    const armReach = 12 + swingOutDist * 1.05;
+    const tipY = inboardY + outSign * armReach;
+    for (const px of [leftPedX, rightPedX]) {
+      ws.place(sp.lifeboatPedestal, px, inboardY, { renderOrder: 4 });
+      this.worldLinesDark!.addSegment(px + 2, inboardY + 2, px + 2, tipY + 2);
+      this.worldLinesSteel!.addSegment(px, inboardY, px, tipY);
+      ws.place(sp.softDisc, px, tipY, {
+        scaleX: 7 / sp.softDisc.w,
+        scaleY: 7 / sp.softDisc.h,
+        tint: 0xf59e0b,
+        opacity: 1,
+        renderOrder: 5,
+      });
+    }
+
+    const winchX = (leftPedX + rightPedX) / 2;
+    ws.place(sp.lifeboatWinch, winchX, inboardY, { renderOrder: 4 });
+    if (hasCrank) {
+      const crankAng = boatActivating ? timeSec * 9 : 0.6;
+      ws.place(sp.softRing, winchX + 12, inboardY, {
+        scaleX: 11 / sp.softRing.w,
+        scaleY: 11 / sp.softRing.h,
+        tint: 0xcbd5e1,
+        opacity: 1,
+        renderOrder: 5,
+      });
+      this.worldLinesLight!.addSegment(
+        winchX + 12,
+        inboardY,
+        winchX + 12 + Math.cos(crankAng) * 7,
+        inboardY + Math.sin(crankAng) * 7
+      );
+    }
+
+    const batX = bx - 14;
+    const batY = inboardY - outSign * 4;
+    ws.place(sp.lifeboatBattery[hasBattery ? 'filled' : 'empty'], batX, batY, {
+      renderOrder: 4,
+    });
+    if (hasBattery && (boatActivating || boatReady)) {
+      ws.place(sp.softDisc, boatX, boatY, {
+        scaleX: 84 / sp.softDisc.w,
+        scaleY: 84 / sp.softDisc.h,
+        tint: boatReady ? 0x34d399 : 0x38bdf8,
+        opacity: boatReady ? 0.25 : 0.22,
+        renderOrder: 4,
+      });
+    }
+
+    const hullMode = boatReady ? 'ready' : hasPatch ? 'patched' : 'cracked';
+    ws.place(sp.lifeboatHull[hullMode], boatX, boatY + boatBob, { renderOrder: 5 });
+
+    // Hoist cables
+    const cableLines = hasCrank ? this.worldLinesLight! : this.worldLinesSteel!;
+    cableLines.addSegment(boatX - 22, boatY + boatBob, leftPedX, tipY);
+    cableLines.addSegment(boatX + 22, boatY + boatBob, rightPedX, tipY);
+  }
+
+  private drawSubmarineSprites(engine: MonstrumGameEngine, timeSec: number): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const ts = engine.map.tileSize;
+    const esc = engine.escape;
+
+    const subPos = engine.map.submarinePos;
+    const poolX = 102 * ts;
+    const poolY = 92 * ts;
+    const poolW = 4 * ts;
+    const poolH = 6 * ts;
+
+    const hasSubBat = esc.submarineParts.includes('SUB_BATTERY');
+    const hasBallast = esc.submarineParts.includes('BALLAST_PUMP');
+    const hasDiveKey = esc.submarineParts.includes('DIVE_KEY');
+    const subReady = esc.submarineState === 'READY';
+    const subActivating = esc.submarineState === 'ACTIVATING';
+
+    const poolMode = subReady ? 'ready' : esc.submarineParts.length === 3 ? 'parts3' : 'idle';
+    ws.place(sp.subMoonpool[poolMode], poolX + poolW * 0.5, poolY + poolH * 0.5, {
+      renderOrder: 3,
+    });
+
+    // Moonpool animated wave ripples
+    for (let wy = poolY + 24; wy < poolY + poolH - 18; wy += 36) {
+      const drift = Math.sin(timeSec * (subActivating ? 8 : 2.1) + wy * 0.05) * 6;
+      const midX = poolX + poolW * 0.5;
+      this.worldLinesTeal!.addSegment(poolX + 16 + drift, wy, midX, wy - 4);
+      this.worldLinesTeal!.addSegment(midX, wy - 4, poolX + poolW - 16 + drift, wy);
+    }
+
+    ws.place(sp.subApron[subReady ? 'ready' : 'idle'], subPos.x, subPos.y, {
+      renderOrder: 3,
+    });
+
+    const subCx = poolX + poolW * 0.5;
+    const subCy = poolY + poolH * 0.5 + (subReady ? Math.sin(timeSec * 3) * 2.5 : 0);
+    ws.place(sp.subHull[subReady ? 'ready' : 'idle'], subCx, subCy, { renderOrder: 4 });
+    ws.place(sp.subBattery[hasSubBat ? 'filled' : 'empty'], subCx - 23, subCy, {
+      renderOrder: 5,
+    });
+    ws.place(sp.subBallast[hasBallast ? 'filled' : 'empty'], subCx + 23.5, subCy + 31, {
+      renderOrder: 5,
+    });
+    ws.place(sp.subDiveKey[hasDiveKey ? 'filled' : 'empty'], subCx, subCy - 4, {
+      renderOrder: 5,
+    });
+
+    const leverRingColor =
+      esc.submarineState === 'READY'
+        ? 0x34d399
+        : esc.submarineParts.length === 3
+          ? 0x2dd4bf
+          : 0x94a3b8;
+    const leverRingAlpha =
+      esc.submarineState === 'READY'
+        ? 0.75
+        : esc.submarineParts.length === 3
+          ? 0.45 + 0.35 * Math.sin(timeSec * 6)
+          : 0.32;
+    ws.place(sp.softRing, subPos.leverX, subPos.leverY, {
+      scaleX: 52 / sp.softRing.w,
+      scaleY: 52 / sp.softRing.h,
+      tint: leverRingColor,
+      opacity: leverRingAlpha,
+      renderOrder: 3,
+    });
+  }
+
+  private drawPlayerSprites(engine: MonstrumGameEngine, timeSec: number): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const p = engine.player;
+    const stride = p.isMoving ? Math.sin(p.walkPhase) : 0;
+    const crouchScale = p.crouching ? 0.87 : 1.0;
+    const torsoTwist = p.isMoving ? stride * (p.sprinting ? 0.1 : 0.055) : 0;
+    const idleBreath = p.isMoving
+      ? 0
+      : Math.sin(timeSec * (p.exhausted ? 7.2 : 2.5)) * (p.exhausted ? 0.45 : 0.18);
+    const hasLight = p.flashlightOn && p.battery > 0;
+    const rot = p.angle + torsoTwist;
+    const cos = Math.cos(rot);
+    const sin = Math.sin(rot);
+
+    const placeLocal = (
+      entry: SpriteEntry,
+      lx: number,
+      ly: number,
+      localRot = 0,
+      scaleX = 1,
+      scaleY = 1
+    ) => {
+      const wx = p.x + lx * cos - ly * sin;
+      const wy = p.y + lx * sin + ly * cos;
+      ws.place(entry, wx, wy, {
+        rot2d: rot + localRot,
+        scaleX,
+        scaleY,
+        renderOrder: 12,
+      });
+    };
+
+    placeLocal(sp.playerShadow, 0, 0, 0, crouchScale, p.crouching ? 11 / 13.5 : 1);
+
+    const leftStride = stride * (p.crouching ? 3.2 : p.sprinting ? 6.2 : 4.8);
+    placeLocal(sp.playerBoot, leftStride, -4.4 * crouchScale);
+    placeLocal(sp.playerBoot, -leftStride, 4.4 * crouchScale);
+
+    if (p.hasBackpack) {
+      placeLocal(sp.playerBackpack, -5.8 * crouchScale, 0, 0, 1, crouchScale);
+    } else {
+      placeLocal(
+        sp.playerSatchel[p.inventory.length > 1 ? 'loaded' : 'empty'],
+        -5.8 * crouchScale,
+        0,
+        0,
+        1,
+        crouchScale
+      );
+    }
+
+    const leftArmForward = -stride * (p.crouching ? 2.4 : p.sprinting ? 5.2 : 3.8);
+    placeLocal(sp.playerLeftArm, leftArmForward * 0.45, -10.5 * crouchScale, -stride * 0.16);
+
+    const rightArmBob = stride * (p.crouching ? 1.2 : 2.1);
+    placeLocal(
+      sp.playerRightArm[hasLight ? 'on' : 'off'],
+      rightArmBob * 0.35,
+      9.6 * crouchScale,
+      -0.12 + stride * 0.06
+    );
+
+    const shoulderScaleY = ((p.crouching ? 9.8 : 11.8) + idleBreath) / 11.8;
+    const torsoScaleX = ((p.crouching ? 7.2 : 7.6) + idleBreath * 0.6) / 7.6;
+    placeLocal(sp.playerTorso, 0, 0, 0, torsoScaleX, shoulderScaleY);
+
+    const headX = p.crouching ? 2.4 : p.sprinting ? 2.0 : 1.0;
+    const headScale = p.crouching ? 6.1 / 6.6 : 1;
+    placeLocal(sp.playerHead, headX, 0, 0, headScale, headScale);
+  }
+
+  private drawBruteSprites(engine: MonstrumGameEngine, timeSec: number): void {
+    const sp = this.sprites!;
+    const ws = this.worldSprites!;
+    const b = engine.brute;
+    const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
+    const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
+    const isStunned = b.state === 'STUNNED';
+    const isLunging =
+      b.state === 'SMASH_DOOR' ||
+      (b.state === 'CHECK_HIDING' && b.inspectTimer > 0 && b.inspectTimer < 0.72);
+
+    const stride = isStunned ? 0 : Math.sin(b.walkPhase);
+    const torsoTwist = isStunned
+      ? Math.sin(timeSec * 16) * 0.05
+      : stride * (isChasing ? 0.11 : 0.06);
+    const rot = b.angle + torsoTwist;
+    const cos = Math.cos(rot);
+    const sin = Math.sin(rot);
+
+    const placeLocal = (entry: SpriteEntry, lx: number, ly: number, scaleX = 1) => {
+      const wx = b.x + lx * cos - ly * sin;
+      const wy = b.y + lx * sin + ly * cos;
+      ws.place(entry, wx, wy, { rot2d: rot, scaleX, renderOrder: 13 });
+    };
+
+    placeLocal(sp.bruteShadow, 0, 0);
+
+    const leftReach = isLunging ? 11 : stride * (isChasing ? 8 : 5);
+    const rightReach = isLunging ? 11 : -stride * (isChasing ? 8 : 5);
+    const armMode = isChasing ? 'chase' : 'normal';
+    placeLocal(sp.bruteClawArm[armMode], leftReach * 0.5, -18);
+    placeLocal(sp.bruteClawArm[armMode], rightReach * 0.5, 18);
+
+    const torsoMode = isStunned
+      ? 'stunned'
+      : isChasing
+        ? 'chase'
+        : isStalking
+          ? 'stalk'
+          : 'roam';
+    placeLocal(sp.bruteTorso[torsoMode], 0, 0);
+
+    const headMode = isStunned ? 'stunned' : isChasing ? 'chase' : 'roam';
+    placeLocal(sp.bruteHead[headMode], 0, 0);
+  }
+
+  private ensureDeckPoweredLightmap(engine: MonstrumGameEngine, deck: ShipDeck): void {
+    const renderer = this.renderer;
+    const warmFans = this.deckBakeWarmFans;
+    const maskFans = this.deckBakeMaskFans;
+    if (!renderer || !warmFans || !maskFans) return;
+
+    const map = engine.map;
+    const bounds = map.deckBounds[deck];
+    let h1 = 2166136261;
+    let h2 = 0x9e3779b9;
+    for (let i = 0; i < map.doors.length; i++) {
+      const d = map.doors[i];
+      if (d.ty < bounds.y1 || d.ty > bounds.y2) continue;
+      const code = d.isBroken ? 2 : d.openProgress > 0.35 ? 1 : 0;
+      const token = ((i + 1) << 2) | code;
+      h1 = Math.imul(h1 ^ token, 16777619);
+      h2 = Math.imul(h2 ^ (token + i * 31), 2246822519);
+    }
+
+    if (
+      this.bakedLightMapRef === map &&
+      this.bakedLightDeck === deck &&
+      this.bakedLightDoorHash1 === h1 &&
+      this.bakedLightDoorHash2 === h2 &&
+      this.deckWarmTarget &&
+      this.deckMaskTarget
+    ) {
+      return;
+    }
+
+    const ts = map.tileSize;
+    const worldW = map.width * ts;
+    const yMin = bounds.y1 * ts;
+    const yMax = (bounds.y2 + 1) * ts;
+    const worldH = yMax - yMin;
+    const bakeScale = 0.5;
+    const pw = Math.max(64, Math.round(worldW * bakeScale));
+    const ph = Math.max(64, Math.round(worldH * bakeScale));
+
+    if (!this.deckWarmTarget || !this.deckMaskTarget || this.deckWarmPixelW !== pw || this.deckWarmPixelH !== ph) {
+      this.deckWarmPixelW = pw;
+      this.deckWarmPixelH = ph;
+      this.deckWarmTarget?.dispose();
+      this.deckMaskTarget?.dispose();
+      this.deckWarmTarget = this.createRt(pw, ph, THREE.HalfFloatType);
+      this.deckMaskTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
+
+      if (!this.deckWarmQuad) {
+        const wb = createBakedLightmapQuadMaterial(this.deckWarmTarget.texture, true);
+        this.deckWarmMat = wb.material;
+        this.deckWarmTexNode = wb.texNode;
+        this.deckWarmQuad = new THREE.Mesh(this.unitQuadGeom, wb.material);
+        this.deckWarmQuad.frustumCulled = false;
+        this.deckWarmQuad.renderOrder = 19;
+        this.deckWarmQuad.visible = false;
+        this.worldScene.add(this.deckWarmQuad);
+      } else if (this.deckWarmTexNode) {
+        this.deckWarmTexNode.value = this.deckWarmTarget.texture;
+      }
+
+      if (!this.deckMaskQuad) {
+        const mb = createBakedLightmapQuadMaterial(this.deckMaskTarget.texture, false);
+        this.deckMaskMat = mb.material;
+        this.deckMaskTexNode = mb.texNode;
+        this.deckMaskQuad = new THREE.Mesh(this.unitQuadGeom, mb.material);
+        this.deckMaskQuad.frustumCulled = false;
+        this.deckMaskQuad.renderOrder = 0;
+        this.deckMaskQuad.visible = false;
+        this.lightMaskScene.add(this.deckMaskQuad);
+      } else if (this.deckMaskTexNode) {
+        this.deckMaskTexNode.value = this.deckMaskTarget.texture;
+      }
+    }
+
+    this.deckBakeCamera.left = 0;
+    this.deckBakeCamera.right = worldW;
+    this.deckBakeCamera.top = -yMin;
+    this.deckBakeCamera.bottom = -yMax;
+    this.deckBakeCamera.position.set(0, 0, 100);
+    this.deckBakeCamera.updateProjectionMatrix();
+
+    warmFans.beginFrame();
+    maskFans.beginFrame();
+
+    for (const sw of map.lightSwitches) {
+      const swDeck = map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      if (swDeck !== deck || !sw.isOn) continue;
+      const fixtures = this.roomFixturesCache.get(sw.id) ?? [{ x: sw.x, y: sw.y, range: 360 }];
+      for (let i = 0; i < fixtures.length; i++) {
+        const fx = fixtures[i];
+        const cached = this.lightPolyCache.getOrCompute(
+          `sw:${sw.id}:${i}`,
+          map,
+          engine.doorsByTile,
+          fx.x,
+          fx.y,
+          fx.range,
+          56
+        );
+        if (cached.poly.length < 3) continue;
+        warmFans.addFan(cached.fan, 14, fx.range, 0.55, 0xfef0c7, 0.145, 0xfde09b, 0.085, 0xfde09b, 0);
+        this.addMaskFan(maskFans, cached.fan, 20, fx.range, 0.65, 0.96, 0.78);
+      }
+    }
+
+    for (let i = 0; i < map.corridorLights.length; i++) {
+      const cl = map.corridorLights[i];
+      if (cl.deck !== deck) continue;
+      const cached = this.lightPolyCache.getOrCompute(
+        `cl:${cl.deck}:${i}`,
+        map,
+        engine.doorsByTile,
+        cl.x,
+        cl.y,
+        cl.range,
+        36
+      );
+      if (cached.poly.length < 3) continue;
+      warmFans.addFan(
+        cached.fan,
+        14,
+        cl.range,
+        0.55,
+        0xfef0c7,
+        0.145 * 0.94,
+        0xfde09b,
+        0.085 * 0.94,
+        0xfde09b,
+        0
+      );
+      this.addMaskFan(maskFans, cached.fan, 20, cl.range, 0.65, 0.96 * 0.94, 0.78 * 0.94);
+    }
+
+    warmFans.endFrame();
+    maskFans.endFrame();
+
+    renderer.autoClear = true;
+    renderer.setClearColor(0x000000, 0);
+    renderer.setRenderTarget(this.deckWarmTarget);
+    renderer.render(this.deckBakeWarmScene, this.deckBakeCamera);
+
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.deckMaskTarget);
+    renderer.render(this.deckBakeMaskScene, this.deckBakeCamera);
+
+    renderer.setRenderTarget(null);
+
+    if (this.deckWarmQuad) {
+      this.deckWarmQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0);
+      this.deckWarmQuad.scale.set(worldW, worldH, 1);
+    }
+    if (this.deckMaskQuad) {
+      this.deckMaskQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0);
+      this.deckMaskQuad.scale.set(worldW, worldH, 1);
+    }
+
+    this.bakedLightMapRef = map;
+    this.bakedLightDeck = deck;
+    this.bakedLightDoorHash1 = h1;
+    this.bakedLightDoorHash2 = h2;
+  }
+
+  private computeLitRoomPolygons(
+    engine: MonstrumGameEngine,
+    timeSec: number,
+    activeDeck: ShipDeck,
+    camX: number,
+    camY: number,
+    halfW: number,
+    halfH: number,
+    peekDest?: { deck: ShipDeck; x: number; y: number },
+    skipActiveDeckStatic = false
+  ): RayLightPoly[] {
+    const polys: RayLightPoly[] = [];
+    const b = engine.brute;
+
     for (const sw of engine.map.lightSwitches) {
       if (!sw.isOn) continue;
       const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
-      if (swDeck !== activeDeck && (!peekDest || swDeck !== peekDest.deck)) continue;
-      const deckPowered = engine.poweredDecks[swDeck];
-      const bruteDist = Math.hypot(b.x - sw.x, b.y - sw.y);
-      const { intensity, sputterAmount } = deckPowered
-        ? { intensity: 1, sputterAmount: 0 }
-        : getRoomLightFlicker(sw.id, timeSec, bruteDist);
-      const fixtures = this.getRoomLightFixtures(engine, sw);
-      for (const fx of fixtures) {
-        const poly = computeVisibilityPolygon(
+      const allowActive = !skipActiveDeckStatic && swDeck === activeDeck;
+      const allowPeek = peekDest !== undefined && swDeck === peekDest.deck;
+      if (!allowActive && !allowPeek) continue;
+
+      const fixtures = this.roomFixturesCache.get(sw.id) ?? [
+        { x: sw.x, y: sw.y, range: 360 },
+      ];
+      let cachedIntensity = -1;
+      let cachedSputter = 0;
+
+      for (let i = 0; i < fixtures.length; i++) {
+        const fx = fixtures[i];
+        const dx = Math.max(0, Math.abs(fx.x - camX) - halfW);
+        const dy = Math.max(0, Math.abs(fx.y - camY) - halfH);
+        const onPlayerView =
+          allowActive && dx * dx + dy * dy <= fx.range * fx.range;
+        const onPeekView =
+          allowPeek &&
+          Math.hypot(fx.x - peekDest!.x, fx.y - peekDest!.y) <= 640 + fx.range;
+        if (!onPlayerView && !onPeekView) continue;
+
+        if (cachedIntensity < 0) {
+          const deckPowered = engine.poweredDecks[swDeck];
+          const bruteDist = Math.hypot(b.x - sw.x, b.y - sw.y);
+          const flk = deckPowered
+            ? { intensity: 1, sputterAmount: 0 }
+            : getRoomLightFlicker(sw.id, timeSec, bruteDist);
+          cachedIntensity = flk.intensity;
+          cachedSputter = flk.sputterAmount;
+        }
+
+        const key = `sw:${sw.id}:${i}`;
+        const cached = this.lightPolyCache.getOrCompute(
+          key,
           engine.map,
           engine.doorsByTile,
           fx.x,
           fx.y,
-          0,
-          Math.PI * 2,
           fx.range,
-          84
+          56
         );
-        polys.push({ x: fx.x, y: fx.y, range: fx.range, intensity, sputterAmount, poly });
+        polys.push({
+          cacheKey: key,
+          deck: swDeck,
+          x: fx.x,
+          y: fx.y,
+          range: fx.range,
+          intensity: cachedIntensity,
+          sputterAmount: cachedSputter,
+          fan: cached.fan,
+          poly: cached.poly,
+        });
       }
     }
 
-    // Master-Fuse Powered Hallway/Corridor Ceiling Fixtures
-    for (const cl of engine.map.corridorLights) {
+    // Master-Fuse Powered Hallway/Corridor Ceiling Fixtures (only computed when not pre-baked!)
+    for (let i = 0; i < engine.map.corridorLights.length; i++) {
+      const cl = engine.map.corridorLights[i];
       if (!engine.poweredDecks[cl.deck]) continue;
+      const allowActive = !skipActiveDeckStatic && cl.deck === activeDeck;
+      const allowPeek = peekDest !== undefined && cl.deck === peekDest.deck;
+      if (!allowActive && !allowPeek) continue;
+
+      const dx = Math.max(0, Math.abs(cl.x - camX) - halfW);
+      const dy = Math.max(0, Math.abs(cl.y - camY) - halfH);
       const onPlayerView =
-        cl.deck === activeDeck &&
-        Math.hypot(cl.x - engine.cameraX, cl.y - engine.cameraY) <= 1050;
+        allowActive && dx * dx + dy * dy <= cl.range * cl.range;
       const onPeekView =
-        peekDest &&
-        cl.deck === peekDest.deck &&
-        Math.hypot(cl.x - peekDest.x, cl.y - peekDest.y) <= 720;
+        allowPeek &&
+        Math.hypot(cl.x - peekDest!.x, cl.y - peekDest!.y) <= 640 + cl.range;
       if (!onPlayerView && !onPeekView) continue;
 
-      const poly = computeVisibilityPolygon(
+      const key = `cl:${cl.deck}:${i}`;
+      const cached = this.lightPolyCache.getOrCompute(
+        key,
         engine.map,
         engine.doorsByTile,
         cl.x,
         cl.y,
-        0,
-        Math.PI * 2,
         cl.range,
-        64
+        36
       );
       polys.push({
+        cacheKey: key,
+        deck: cl.deck,
         x: cl.x,
         y: cl.y,
         range: cl.range,
         intensity: 0.94,
         sputterAmount: 0,
-        poly,
+        fan: cached.fan,
+        poly: cached.poly,
       });
     }
 
@@ -3328,16 +2582,9 @@ export class GameRenderer {
       range,
       72
     );
-
-    return {
-      ox,
-      oy,
-      angle: b.angle,
-      range,
-      intensity,
-      isChasing,
-      poly: [{ x: ox, y: oy }, ...rayPts],
-    };
+    const poly = [{ x: ox, y: oy }, ...rayPts];
+    const fan = this.buildDynamicFan('bruteBeam', ox, oy, rayPts, false);
+    return { ox, oy, angle: b.angle, range, intensity, isChasing, fan, poly };
   }
 
   private computeIncomingStairGlow(
@@ -3360,7 +2607,8 @@ export class GameRenderer {
       range,
       64
     );
-    return { x: st.x, y: st.y, range, intensity, poly };
+    const fan = this.buildDynamicFan('stairGlow', st.x, st.y, poly, true);
+    return { x: st.x, y: st.y, range, intensity, fan, poly };
   }
 
   private computeDoorPeekBeam(engine: MonstrumGameEngine): DoorPeekBeamData | null {
@@ -3384,7 +2632,7 @@ export class GameRenderer {
     const oy = door.orientation === 'H' ? dcy + crossSign * 10 : dcy;
     const coneWidth = ((isLitSide ? 54 : 40) * Math.PI) / 180;
     const range = isLitSide ? 420 : 440;
-    const poly = computeVisibilityPolygon(
+    const rayPts = computeVisibilityPolygon(
       engine.map,
       engine.doorsByTile,
       ox,
@@ -3395,108 +2643,109 @@ export class GameRenderer {
       44,
       door.ty * engine.map.width + door.tx
     );
-    return { ox, oy, range, isLitSide, poly: [{ x: ox, y: oy }, ...poly] };
+    const poly = [{ x: ox, y: oy }, ...rayPts];
+    const fan = this.buildDynamicFan('doorPeek', ox, oy, rayPts, false);
+    return { ox, oy, range, isLitSide, fan, poly };
   }
 
-  private drawWarmLightingTints(
-    ctx: CanvasRenderingContext2D,
+  private populateWarmLightingTints(
     engine: MonstrumGameEngine,
+    renderDeck: ShipDeck,
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null,
     stairGlow: StairGlowData | null,
     doorPeekData: DoorPeekBeamData | null,
     timeSec: number
   ): void {
+    const swf = this.staticWarmFans!;
+    const wf = this.worldWarmFans!;
+
     for (const lp of litRoomPolys) {
-      if (lp.poly.length < 3) continue;
-      const g = ctx.createRadialGradient(lp.x, lp.y, 14, lp.x, lp.y, lp.range);
-      const warmA0 = (0.145 * lp.intensity).toFixed(3);
-      const warmA1 = (0.085 * lp.intensity).toFixed(3);
+      if (lp.poly.length < 3 || lp.deck !== renderDeck) continue;
+
       if (lp.sputterAmount > 0.35) {
-        // Brief aging fluorescent ballast cool-white sag tint during voltage dip
-        g.addColorStop(0, `rgba(226, 232, 240, ${warmA0})`);
-        g.addColorStop(0.55, `rgba(203, 213, 225, ${warmA1})`);
-        g.addColorStop(1, 'rgba(203, 213, 225, 0)');
+        swf.addFan(
+          lp.fan,
+          14,
+          lp.range,
+          0.55,
+          0xe2e8f0,
+          0.145 * lp.intensity,
+          0xcbd5e1,
+          0.085 * lp.intensity,
+          0xcbd5e1,
+          0
+        );
       } else {
-        g.addColorStop(0, `rgba(254, 240, 199, ${warmA0})`);
-        g.addColorStop(0.55, `rgba(253, 224, 155, ${warmA1})`);
-        g.addColorStop(1, 'rgba(253, 224, 155, 0)');
+        swf.addFan(
+          lp.fan,
+          14,
+          lp.range,
+          0.55,
+          0xfef0c7,
+          0.145 * lp.intensity,
+          0xfde09b,
+          0.085 * lp.intensity,
+          0xfde09b,
+          0
+        );
       }
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(lp.poly[0].x, lp.poly[0].y);
-      for (let i = 1; i < lp.poly.length; i++) {
-        ctx.lineTo(lp.poly[i].x, lp.poly[i].y);
-      }
-      ctx.closePath();
-      ctx.fill();
     }
 
-    // Iconic Monstrum Brute orange searchlight beam (strictly wall-blocked via raycast)
     if (bruteBeam && bruteBeam.poly.length >= 3) {
-      const g = ctx.createRadialGradient(
-        bruteBeam.ox,
-        bruteBeam.oy,
-        6,
-        bruteBeam.ox,
-        bruteBeam.oy,
-        bruteBeam.range
-      );
-      const a0 = (bruteBeam.isChasing ? 0.44 : 0.34) * bruteBeam.intensity;
-      const a1 = (bruteBeam.isChasing ? 0.24 : 0.17) * bruteBeam.intensity;
-      g.addColorStop(0, `rgba(255, 195, 105, ${a0})`);
-      g.addColorStop(0.5, `rgba(249, 115, 22, ${a1})`);
-      g.addColorStop(1, 'rgba(234, 88, 12, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(bruteBeam.poly[0].x, bruteBeam.poly[0].y);
-      for (let i = 1; i < bruteBeam.poly.length; i++) {
-        ctx.lineTo(bruteBeam.poly[i].x, bruteBeam.poly[i].y);
+      const ty = Math.floor(bruteBeam.oy / engine.map.tileSize);
+      if ((engine.map.deckGrid[ty]?.[0] ?? renderDeck) === renderDeck) {
+        wf.addFan(
+          bruteBeam.fan,
+          6,
+          bruteBeam.range,
+          0.5,
+          0xffc369,
+          (bruteBeam.isChasing ? 0.44 : 0.34) * bruteBeam.intensity,
+          0xf97316,
+          (bruteBeam.isChasing ? 0.24 : 0.17) * bruteBeam.intensity,
+          0xea580c,
+          0
+        );
       }
-      ctx.closePath();
-      ctx.fill();
     }
 
-    // Pulsing orange stairwell spill when Brute is climbing toward this hatch
     if (stairGlow && stairGlow.poly.length >= 3) {
-      const g = ctx.createRadialGradient(stairGlow.x, stairGlow.y, 10, stairGlow.x, stairGlow.y, stairGlow.range);
-      g.addColorStop(0, `rgba(255, 140, 30, ${0.42 * stairGlow.intensity})`);
-      g.addColorStop(0.55, `rgba(234, 88, 12, ${0.18 * stairGlow.intensity})`);
-      g.addColorStop(1, 'rgba(234, 88, 12, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(stairGlow.poly[0].x, stairGlow.poly[0].y);
-      for (let i = 1; i < stairGlow.poly.length; i++) {
-        ctx.lineTo(stairGlow.poly[i].x, stairGlow.poly[i].y);
-      }
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    // Focused flashlight beam projecting past closed door during Q keyhole peek (dark side only)
-    if (doorPeekData && !doorPeekData.isLitSide && doorPeekData.poly.length >= 3) {
-      const g = ctx.createRadialGradient(
-        doorPeekData.ox,
-        doorPeekData.oy,
-        6,
-        doorPeekData.ox,
-        doorPeekData.oy,
-        doorPeekData.range
+      wf.addFan(
+        stairGlow.fan,
+        10,
+        stairGlow.range,
+        0.55,
+        0xff8c1e,
+        0.42 * stairGlow.intensity,
+        0xea580c,
+        0.18 * stairGlow.intensity,
+        0xea580c,
+        0
       );
-      g.addColorStop(0, 'rgba(254, 249, 224, 0.22)');
-      g.addColorStop(0.55, 'rgba(226, 232, 240, 0.09)');
-      g.addColorStop(1, 'rgba(226, 232, 240, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(doorPeekData.poly[0].x, doorPeekData.poly[0].y);
-      for (let i = 1; i < doorPeekData.poly.length; i++) {
-        ctx.lineTo(doorPeekData.poly[i].x, doorPeekData.poly[i].y);
-      }
-      ctx.closePath();
-      ctx.fill();
     }
 
-    for (const l of engine.droppedLights) {
+    if (doorPeekData && !doorPeekData.isLitSide && doorPeekData.poly.length >= 3) {
+      wf.addFan(
+        doorPeekData.fan,
+        6,
+        doorPeekData.range,
+        0.55,
+        0xfef9e0,
+        0.22,
+        0xe2e8f0,
+        0.09,
+        0xe2e8f0,
+        0
+      );
+    }
+
+    const ts = engine.map.tileSize;
+    for (let i = 0; i < engine.droppedLights.length; i++) {
+      const l = engine.droppedLights[i];
+      const lTx = Math.floor(l.x / ts);
+      const lTy = Math.floor(l.y / ts);
+      if ((engine.map.deckGrid[lTy]?.[lTx] ?? 'DECK_2') !== renderDeck) continue;
       const r = l.type === 'FLARE' ? 220 + Math.sin(timeSec * 22) * 14 : 140;
       const poly = computeVisibilityPolygon(
         engine.map,
@@ -3509,62 +2758,28 @@ export class GameRenderer {
         56
       );
       if (poly.length < 3) continue;
-      const g = ctx.createRadialGradient(l.x, l.y, 4, l.x, l.y, r);
+      const fan = this.buildDynamicFan(`dropped:${l.id}`, l.x, l.y, poly, true);
       if (l.type === 'FLARE') {
-        g.addColorStop(0, 'rgba(251, 113, 133, 0.24)');
-        g.addColorStop(0.6, 'rgba(244, 63, 94, 0.09)');
-        g.addColorStop(1, 'rgba(244, 63, 94, 0)');
+        wf.addFan(fan, 4, r, 0.6, 0xfb7185, 0.24, 0xf43f5e, 0.09, 0xf43f5e, 0);
       } else {
-        g.addColorStop(0, 'rgba(52, 211, 153, 0.18)');
-        g.addColorStop(0.6, 'rgba(16, 185, 129, 0.07)');
-        g.addColorStop(1, 'rgba(16, 185, 129, 0)');
+        wf.addFan(fan, 4, r, 0.6, 0x34d399, 0.18, 0x10b981, 0.07, 0x10b981, 0);
       }
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i++) {
-        ctx.lineTo(poly[i].x, poly[i].y);
-      }
-      ctx.closePath();
-      ctx.fill();
     }
   }
 
-  private renderLightingMask(
+  private computePlayerSightPolys(
     engine: MonstrumGameEngine,
     width: number,
     height: number,
-    viewCenterX: number,
-    viewCenterY: number,
     zoom: number,
-    timeSec: number,
-    litRoomPolys: RayLightPoly[],
-    bruteBeam: BruteBeamData | null,
-    stairGlow: StairGlowData | null,
     doorPeekData: DoorPeekBeamData | null
-  ): void {
-    const lctx = this.lightCtx;
-    lctx.globalCompositeOperation = 'source-over';
-    lctx.clearRect(0, 0, width, height);
-
-    // Pure #000000 OLED/MiniLED darkness mask (100% opaque outside player LoS & lights)
-    lctx.fillStyle = '#000000';
-    lctx.fillRect(0, 0, width, height);
-
-    lctx.save();
-    lctx.translate(viewCenterX, viewCenterY);
-    lctx.scale(zoom, zoom);
-    lctx.translate(-engine.cameraX, -engine.cameraY);
-
+  ): Array<Array<{ x: number; y: number }>> {
     const p = engine.player;
     const isHiding = p.hidingSpotId !== null;
     const isPeekingSpot = p.peekingSpotId !== null;
-
-    // A. Build strict Player Line-of-Sight Clip Polygons (nothing outside these can EVER be seen!)
     const sightPolys: Array<Array<{ x: number; y: number }>> = [];
 
     if (isHiding && !isPeekingSpot) {
-      // Unpeeked inside hiding spot: tiny interior awareness only; cannot see lit room outside
       sightPolys.push(
         computeVisibilityPolygon(
           engine.map,
@@ -3578,7 +2793,6 @@ export class GameRenderer {
         )
       );
     } else if (isHiding && isPeekingSpot) {
-      // Vent-peeking from hiding spot: tiny locker interior + narrow 54° vent cone
       sightPolys.push(
         computeVisibilityPolygon(
           engine.map,
@@ -3606,7 +2820,6 @@ export class GameRenderer {
         ),
       ]);
     } else {
-      // Full 360° player line-of-sight polygon strictly clipped to inner wall edges & closed doors
       const maxSightDist = Math.hypot(width, height) / (2 * zoom) + 260;
       sightPolys.push(
         computeVisibilityPolygon(
@@ -3622,45 +2835,104 @@ export class GameRenderer {
       );
     }
 
-    // Add keyhole peek polygon when peeking a closed door (requires flashlight battery > 0)
     if (doorPeekData) {
       sightPolys.push(doorPeekData.poly);
     }
 
-    this.lastPlayerSightPolys = sightPolys;
+    return sightPolys;
+  }
 
-    // B. Hard-clip ALL light cutouts to the Player's True Sight Polygon
-    lctx.save();
-    lctx.beginPath();
-    for (const poly of sightPolys) {
+  private populateLosScene(
+    sightPolys: Array<Array<{ x: number; y: number }>>,
+    playerX: number,
+    playerY: number
+  ): void {
+    const lf = this.losFans!;
+    lf.beginFrame();
+    this.portalLosFans?.clear();
+
+    for (let i = 0; i < sightPolys.length; i++) {
+      const poly = sightPolys[i];
       if (poly.length < 3) continue;
-      lctx.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i++) {
-        lctx.lineTo(poly[i].x, poly[i].y);
-      }
-      lctx.closePath();
+      // poly[0] is the closed 360-deg visibility loop cast around (playerX, playerY);
+      // subsequent entries (vent/door peek cones) start with their exact ray origin vertex.
+      const ox = poly[0].x;
+      const oy = poly[0].y;
+      const isClosedLoop = i === 0;
+      const fanPts = isClosedLoop ? poly : poly.slice(1);
+      const centerX = isClosedLoop ? playerX : ox;
+      const centerY = isClosedLoop ? playerY : oy;
+      const fan = this.buildDynamicFan(`los:${i}`, centerX, centerY, fanPts, isClosedLoop);
+      lf.addFan(fan, 1, 4000, 0.5, 0xffffff, 1, 0xffffff, 1, 0xffffff, 1);
     }
-    lctx.clip();
 
-    lctx.globalCompositeOperation = 'destination-out';
+    lf.endFrame();
+  }
 
-    // 1. Short 360° close tactile ambient awareness around player (clipped by walls)
+  private addMaskFan(
+    batch: FanBatch,
+    fan: FanMeshData,
+    innerR: number,
+    range: number,
+    stopPos: number,
+    a0: number,
+    a1: number
+  ): void {
+    batch.addFan(fan, innerR, range, stopPos, 0xffffff, a0, 0xffffff, a1, 0xffffff, 0);
+  }
+
+  private populateLightMaskScene(
+    engine: MonstrumGameEngine,
+    timeSec: number,
+    litRoomPolys: RayLightPoly[],
+    bruteBeam: BruteBeamData | null,
+    stairGlow: StairGlowData | null,
+    doorPeekData: DoorPeekBeamData | null
+  ): void {
+    const smf = this.staticMaskFans!;
+    const mf = this.lightMaskFans!;
+    smf.beginFrame();
+    mf.beginFrame();
+
+    const p = engine.player;
+    const isHiding = p.hidingSpotId !== null;
+    const isPeekingSpot = p.peekingSpotId !== null;
+    const activeDeck = engine.getCurrentDeck();
+    if (this.deckMaskQuad) {
+      this.deckMaskQuad.visible =
+        activeDeck === this.bakedLightDeck && engine.poweredDecks[activeDeck];
+    }
+
+    // 1. Close tactile ambient awareness around player
     const ambientRadius = isHiding ? 34 : 92;
-    const ambGrad = lctx.createRadialGradient(p.x, p.y, 6, p.x, p.y, ambientRadius);
-    ambGrad.addColorStop(0, isHiding ? 'rgba(0,0,0,0.86)' : 'rgba(0,0,0,0.9)');
-    ambGrad.addColorStop(0.55, isHiding ? 'rgba(0,0,0,0.34)' : 'rgba(0,0,0,0.44)');
-    ambGrad.addColorStop(1, 'rgba(0,0,0,0)');
-    lctx.fillStyle = ambGrad;
-    lctx.beginPath();
-    lctx.arc(p.x, p.y, ambientRadius, 0, Math.PI * 2);
-    lctx.fill();
+    const ambPoly = computeVisibilityPolygon(
+      engine.map,
+      engine.doorsByTile,
+      p.x,
+      p.y,
+      0,
+      Math.PI * 2,
+      ambientRadius,
+      36
+    );
+    if (ambPoly.length >= 3) {
+      const fan = this.buildDynamicFan('mask:ambient', p.x, p.y, ambPoly, true);
+      this.addMaskFan(
+        mf,
+        fan,
+        6,
+        ambientRadius,
+        0.55,
+        isHiding ? 0.86 : 0.9,
+        isHiding ? 0.34 : 0.44
+      );
+    }
 
-    // 2. Raycast Flashlight Cone (or silent ambient vent-peek cutout when hiding in a lit room)
+    // 2. Flashlight Cone or silent lit-room vent peek
     if (p.flashlightOn && p.battery > 0 && (!isHiding || isPeekingSpot)) {
       const range = isPeekingSpot ? 460 : 520;
       const coneWidth = ((isPeekingSpot ? 54 : 82) * Math.PI) / 180;
       const flicker = p.battery < 18 && Math.sin(timeSec * 37) > 0.72 ? 0.45 : 1.0;
-
       const conePoly = computeVisibilityPolygon(
         engine.map,
         engine.doorsByTile,
@@ -3671,18 +2943,18 @@ export class GameRenderer {
         range,
         72
       );
-
-      const coneGrad = lctx.createRadialGradient(p.x, p.y, 12, p.x, p.y, range);
-      coneGrad.addColorStop(0, `rgba(0,0,0,${0.98 * flicker})`);
-      coneGrad.addColorStop(0.68, `rgba(0,0,0,${0.82 * flicker})`);
-      coneGrad.addColorStop(1, 'rgba(0,0,0,0)');
-
-      lctx.fillStyle = coneGrad;
-      lctx.beginPath();
-      lctx.moveTo(p.x, p.y);
-      for (const pt of conePoly) lctx.lineTo(pt.x, pt.y);
-      lctx.closePath();
-      lctx.fill();
+      if (conePoly.length >= 2) {
+        const fan = this.buildDynamicFan('mask:flashlight', p.x, p.y, conePoly, false);
+        this.addMaskFan(
+          mf,
+          fan,
+          12,
+          range,
+          0.68,
+          0.98 * flicker,
+          0.82 * flicker
+        );
+      }
     } else if (
       isHiding &&
       isPeekingSpot &&
@@ -3701,98 +2973,75 @@ export class GameRenderer {
         range,
         56
       );
-      const ventGrad = lctx.createRadialGradient(p.x, p.y, 12, p.x, p.y, range);
-      ventGrad.addColorStop(0, 'rgba(0,0,0,0.74)');
-      ventGrad.addColorStop(0.65, 'rgba(0,0,0,0.48)');
-      ventGrad.addColorStop(1, 'rgba(0,0,0,0)');
-
-      lctx.fillStyle = ventGrad;
-      lctx.beginPath();
-      lctx.moveTo(p.x, p.y);
-      for (const pt of conePoly) lctx.lineTo(pt.x, pt.y);
-      lctx.closePath();
-      lctx.fill();
+      if (conePoly.length >= 2) {
+        const fan = this.buildDynamicFan('mask:ventPeek', p.x, p.y, conePoly, false);
+        this.addMaskFan(mf, fan, 12, range, 0.65, 0.74, 0.48);
+      }
     }
 
-    // 3. Closed-Door Keyhole/Crack Peek Cone (full beam on dark side; subtle threshold crack fill on lit side)
-    if (doorPeekData) {
-      const { ox, oy, range, isLitSide, poly } = doorPeekData;
-      const cutRange = isLitSide ? 115 : range;
-      const peekGrad = lctx.createRadialGradient(ox, oy, 10, ox, oy, cutRange);
-      peekGrad.addColorStop(0, isLitSide ? 'rgba(0,0,0,0.42)' : 'rgba(0,0,0,0.95)');
-      peekGrad.addColorStop(0.7, isLitSide ? 'rgba(0,0,0,0.16)' : 'rgba(0,0,0,0.74)');
-      peekGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = peekGrad;
-      lctx.beginPath();
-      lctx.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i++) lctx.lineTo(poly[i].x, poly[i].y);
-      lctx.closePath();
-      lctx.fill();
-    }
-
-    // 4. Overhead Room Lights & Doorway Spill Cones (flicker-modulated, strictly clipped to player LoS!)
-    for (const lp of litRoomPolys) {
-      if (lp.poly.length < 3) continue;
-      const rGrad = lctx.createRadialGradient(lp.x, lp.y, 20, lp.x, lp.y, lp.range);
-      rGrad.addColorStop(0, `rgba(0,0,0,${(0.96 * lp.intensity).toFixed(3)})`);
-      rGrad.addColorStop(0.65, `rgba(0,0,0,${(0.78 * lp.intensity).toFixed(3)})`);
-      rGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = rGrad;
-      lctx.beginPath();
-      lctx.moveTo(lp.poly[0].x, lp.poly[0].y);
-      for (let i = 1; i < lp.poly.length; i++) lctx.lineTo(lp.poly[i].x, lp.poly[i].y);
-      lctx.closePath();
-      lctx.fill();
-    }
-
-    // 5. Brute Iconic Orange Searchlight Beam (spills around open corners into player LoS, wall-blocked!)
-    if (bruteBeam && bruteBeam.poly.length >= 3) {
-      const bGrad = lctx.createRadialGradient(
-        bruteBeam.ox,
-        bruteBeam.oy,
+    // 3. Closed-door keyhole/crack peek cone
+    if (doorPeekData && doorPeekData.poly.length >= 3) {
+      const cutRange = doorPeekData.isLitSide ? 115 : doorPeekData.range;
+      this.addMaskFan(
+        mf,
+        doorPeekData.fan,
         10,
-        bruteBeam.ox,
-        bruteBeam.oy,
-        bruteBeam.range
+        cutRange,
+        0.7,
+        doorPeekData.isLitSide ? 0.42 : 0.95,
+        doorPeekData.isLitSide ? 0.16 : 0.74
       );
-      bGrad.addColorStop(0, `rgba(0,0,0,${0.97 * bruteBeam.intensity})`);
-      bGrad.addColorStop(0.66, `rgba(0,0,0,${0.76 * bruteBeam.intensity})`);
-      bGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = bGrad;
-      lctx.beginPath();
-      lctx.moveTo(bruteBeam.poly[0].x, bruteBeam.poly[0].y);
-      for (let i = 1; i < bruteBeam.poly.length; i++) {
-        lctx.lineTo(bruteBeam.poly[i].x, bruteBeam.poly[i].y);
-      }
-      lctx.closePath();
-      lctx.fill();
     }
 
-    // 6. Pulsing Incoming Brute Stairwell Glow (clipped strictly to player LoS!)
+    // 4. Overhead room lights & powered corridor fixtures (viewport-culled, statically cached & batched!)
+    for (const lp of litRoomPolys) {
+      if (lp.poly.length < 3 || lp.deck !== activeDeck) continue;
+      this.addMaskFan(
+        smf,
+        lp.fan,
+        20,
+        lp.range,
+        0.65,
+        0.96 * lp.intensity,
+        0.78 * lp.intensity
+      );
+    }
+
+    // 5. Brute Searchlight Beam
+    if (bruteBeam && bruteBeam.poly.length >= 3) {
+      const ty = Math.floor(bruteBeam.oy / engine.map.tileSize);
+      if ((engine.map.deckGrid[ty]?.[0] ?? activeDeck) === activeDeck) {
+        this.addMaskFan(
+          mf,
+          bruteBeam.fan,
+          10,
+          bruteBeam.range,
+          0.66,
+          0.97 * bruteBeam.intensity,
+          0.76 * bruteBeam.intensity
+        );
+      }
+    }
+
+    // 6. Incoming Brute Stairwell Glow
     if (stairGlow && stairGlow.poly.length >= 3) {
-      const sGrad = lctx.createRadialGradient(
-        stairGlow.x,
-        stairGlow.y,
+      this.addMaskFan(
+        mf,
+        stairGlow.fan,
         8,
-        stairGlow.x,
-        stairGlow.y,
-        stairGlow.range
+        stairGlow.range,
+        0.58,
+        0.92 * stairGlow.intensity,
+        0.56 * stairGlow.intensity
       );
-      sGrad.addColorStop(0, `rgba(0,0,0,${0.92 * stairGlow.intensity})`);
-      sGrad.addColorStop(0.58, `rgba(0,0,0,${0.56 * stairGlow.intensity})`);
-      sGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = sGrad;
-      lctx.beginPath();
-      lctx.moveTo(stairGlow.poly[0].x, stairGlow.poly[0].y);
-      for (let i = 1; i < stairGlow.poly.length; i++) {
-        lctx.lineTo(stairGlow.poly[i].x, stairGlow.poly[i].y);
-      }
-      lctx.closePath();
-      lctx.fill();
     }
 
-    // 7. Raycasted Dropped Glowsticks & Flares (never bleed behind walls!)
+    // 7. Dropped Glowsticks & Flares
+    const ts = engine.map.tileSize;
     for (const l of engine.droppedLights) {
+      const lTx = Math.floor(l.x / ts);
+      const lTy = Math.floor(l.y / ts);
+      if ((engine.map.deckGrid[lTy]?.[lTx] ?? 'DECK_2') !== activeDeck) continue;
       const r = l.type === 'FLARE' ? 220 + Math.sin(timeSec * 22) * 14 : 140;
       const lightPoly = computeVisibilityPolygon(
         engine.map,
@@ -3805,78 +3054,76 @@ export class GameRenderer {
         56
       );
       if (lightPoly.length < 3) continue;
-      const g = lctx.createRadialGradient(l.x, l.y, 6, l.x, l.y, r);
-      g.addColorStop(0, 'rgba(0,0,0,0.94)');
-      g.addColorStop(0.7, 'rgba(0,0,0,0.65)');
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = g;
-      lctx.beginPath();
-      lctx.moveTo(lightPoly[0].x, lightPoly[0].y);
-      for (let i = 1; i < lightPoly.length; i++) lctx.lineTo(lightPoly[i].x, lightPoly[i].y);
-      lctx.closePath();
-      lctx.fill();
+      const fan = this.buildDynamicFan(`mask:drop:${l.id}`, l.x, l.y, lightPoly, true);
+      this.addMaskFan(mf, fan, 6, r, 0.7, 0.94, 0.65);
     }
 
-    // 8. Raycasted Escape Zone Beacons (only visible within player LoS, never through walls)
+    // 8. Escape Zone Beacons (only active deck)
+    const esc = engine.escape;
     const bTx = engine.map.lifeboatPos.tx;
     const bTy = engine.map.lifeboatPos.ty;
     const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
     const outSign = voidNorth ? -1 : 1;
     const boatSwing =
-      engine.escape.lifeboatState === 'READY'
+      esc.lifeboatState === 'READY'
         ? 1
-        : engine.escape.lifeboatState === 'ACTIVATING'
-          ? engine.escape.lifeboatActivationProgress
+        : esc.lifeboatState === 'ACTIVATING'
+          ? esc.lifeboatActivationProgress
           : 0;
-    const hasBoatBattery = engine.escape.lifeboatParts.includes('MARINE_BATTERY');
-    const boatBeaconX = engine.map.lifeboatPos.x + 14;
-    const boatBeaconY = engine.map.lifeboatPos.y + outSign * boatSwing * 32;
+    const hasBoatBattery = esc.lifeboatParts.includes('MARINE_BATTERY');
 
-    const beacons = [
+    const beacons: Array<{ deck: ShipDeck; key: string; x: number; y: number; r: number; alpha: number }> = [
       {
-        x: boatBeaconX,
-        y: boatBeaconY,
+        deck: 'DECK_2',
+        key: 'beacon:lifeboat',
+        x: engine.map.lifeboatPos.x + 14,
+        y: engine.map.lifeboatPos.y + outSign * boatSwing * 32,
         r: hasBoatBattery ? 145 : 115,
         alpha: hasBoatBattery ? 0.85 : 0.65,
       },
       {
+        deck: 'DECK_3',
+        key: 'beacon:heli',
         x: engine.map.heliPos.x,
         y: engine.map.heliPos.y,
-        r: engine.escape.heliState !== 'IDLE' ? 150 : 120,
-        alpha: engine.escape.heliState !== 'IDLE' ? 0.82 : 0.65,
+        r: esc.heliState !== 'IDLE' ? 150 : 120,
+        alpha: esc.heliState !== 'IDLE' ? 0.82 : 0.65,
       },
       {
+        deck: 'DECK_1',
+        key: 'beacon:sub',
         x: engine.map.submarinePos.x,
         y: engine.map.submarinePos.y,
-        r: engine.escape.submarineState !== 'IDLE' ? 165 : 130,
-        alpha: engine.escape.submarineState !== 'IDLE' ? 0.85 : 0.68,
+        r: esc.submarineState !== 'IDLE' ? 165 : 130,
+        alpha: esc.submarineState !== 'IDLE' ? 0.85 : 0.68,
       },
     ];
+
     for (const bc of beacons) {
-      const bPoly = computeVisibilityPolygon(
+      if (bc.deck !== activeDeck) continue;
+      const cached = this.lightPolyCache.getOrCompute(
+        bc.key,
         engine.map,
         engine.doorsByTile,
         bc.x,
         bc.y,
-        0,
-        Math.PI * 2,
         bc.r,
         40
       );
-      if (bPoly.length < 3) continue;
-      const g = lctx.createRadialGradient(bc.x, bc.y, 6, bc.x, bc.y, bc.r);
-      g.addColorStop(0, `rgba(0,0,0,${bc.alpha})`);
-      g.addColorStop(1, 'rgba(0,0,0,0)');
-      lctx.fillStyle = g;
-      lctx.beginPath();
-      lctx.moveTo(bPoly[0].x, bPoly[0].y);
-      for (let i = 1; i < bPoly.length; i++) lctx.lineTo(bPoly[i].x, bPoly[i].y);
-      lctx.closePath();
-      lctx.fill();
+      if (cached.poly.length < 3) continue;
+      this.addMaskFan(
+        smf,
+        cached.fan,
+        6,
+        bc.r,
+        0.5,
+        bc.alpha,
+        bc.alpha * 0.5
+      );
     }
 
-    lctx.restore(); // pop LoS clip
-    lctx.restore(); // pop camera transform
+    smf.endFrame();
+    mf.endFrame();
   }
 
   private isWithinVentPeekCone(p: MonstrumGameEngine['player'], tx: number, ty: number): boolean {
@@ -3887,132 +3134,244 @@ export class GameRenderer {
     return Math.abs(diff) <= (28 * Math.PI) / 180;
   }
 
-  private drawLightSwitchBeacons(
-    ctx: CanvasRenderingContext2D,
+  private populatePostScene(
     engine: MonstrumGameEngine,
-    timeSec: number
+    width: number,
+    height: number,
+    zoom: number,
+    camX: number,
+    camY: number,
+    timeSec: number,
+    incomingStairId: string | null
   ): void {
+    const sp = this.sprites!;
+    const ps = this.postSprites!;
+    ps.beginFrame();
+    this.postLinesSlate!.beginFrame();
+    this.postLinesCyan!.beginFrame();
+    this.postLinesAmber!.beginFrame();
+    this.postLinesRose!.beginFrame();
+    this.postLinesOrange!.beginFrame();
+    this.postLinesEmerald!.beginFrame();
+    this.postLinesRed!.beginFrame();
+    this.postLinesWhite!.beginFrame();
+    this.ringBatch?.beginFrame();
+    this.bruteFovFanBatch?.clear();
+
     const p = engine.player;
     const b = engine.brute;
-    if (p.hidingSpotId !== null && p.peekingSpotId === null) return;
-    for (const sw of engine.map.lightSwitches) {
-      const dist = Math.hypot(sw.x - p.x, sw.y - p.y);
-      if (dist > 460) continue;
-      if (p.peekingSpotId !== null && dist > 48 && !this.isWithinVentPeekCone(p, sw.x, sw.y)) {
-        continue;
+    const activeDeck = engine.getCurrentDeck();
+    const canSeeOut = !(p.hidingSpotId !== null && p.peekingSpotId === null);
+
+    // 1. Light switch beacons
+    if (canSeeOut) {
+      for (const sw of engine.map.lightSwitches) {
+        const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+        if (swDeck !== activeDeck) continue;
+        const dist = Math.hypot(sw.x - p.x, sw.y - p.y);
+        if (dist > 460) continue;
+        if (p.peekingSpotId !== null && dist > 48 && !this.isWithinVentPeekCone(p, sw.x, sw.y)) {
+          continue;
+        }
+        if (!hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, sw.x, sw.y)) {
+          continue;
+        }
+        const deckPowered = engine.poweredDecks[swDeck];
+        const flk = deckPowered
+          ? { intensity: 1 }
+          : sw.isOn
+            ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
+            : { intensity: 1 };
+        const color = deckPowered ? 0xfbbf24 : sw.isOn ? 0x34d399 : 0xf59e0b;
+        const opacity = deckPowered ? 0.92 : sw.isOn ? 0.4 + 0.55 * flk.intensity : 0.72;
+        ps.place(sp.softDisc, sw.x, sw.y, {
+          scaleX: 5 / sp.softDisc.w,
+          scaleY: 5 / sp.softDisc.h,
+          tint: color,
+          opacity,
+          renderOrder: 0,
+        });
       }
-      if (!hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, sw.x, sw.y)) continue;
-      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
-      const deckPowered = engine.poweredDecks[swDeck];
-      const flk = deckPowered
-        ? { intensity: 1, sputterAmount: 0 }
-        : sw.isOn
-          ? getRoomLightFlicker(sw.id, timeSec, Math.hypot(b.x - sw.x, b.y - sw.y))
-          : { intensity: 1, sputterAmount: 0 };
-      ctx.save();
-      ctx.fillStyle = deckPowered
-        ? 'rgba(251, 191, 36, 0.92)'
-        : sw.isOn
-          ? `rgba(52, 211, 153, ${(0.4 + 0.55 * flk.intensity).toFixed(2)})`
-          : 'rgba(245, 158, 11, 0.72)';
-      ctx.beginPath();
-      ctx.arc(sw.x, sw.y, 2.1, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+
+      // 2. Stairwell beacons
+      for (const st of engine.map.stairwells) {
+        if (st.deck !== activeDeck) continue;
+        const dist = Math.hypot(st.x - p.x, st.y - p.y);
+        if (dist > 460) continue;
+        if (p.peekingSpotId !== null && dist > 48 && !this.isWithinVentPeekCone(p, st.x, st.y)) {
+          continue;
+        }
+        if (!hasLineOfSight(engine.map, engine.doorsByTile, p.x, p.y, st.x, st.y)) continue;
+        if (st.id === incomingStairId) {
+          const pulse = 0.65 + 0.35 * Math.sin(timeSec * 10);
+          ps.place(sp.softDisc, st.x, st.y, {
+            scaleX: 64 / sp.softDisc.w,
+            scaleY: 64 / sp.softDisc.h,
+            tint: 0xff8214,
+            opacity: 0.75 * pulse,
+            renderOrder: 0,
+          });
+          ps.place(sp.softDisc, st.x, st.y, {
+            scaleX: 8 / sp.softDisc.w,
+            scaleY: 8 / sp.softDisc.h,
+            tint: 0xffedd5,
+            opacity: 1,
+            renderOrder: 0,
+          });
+        } else {
+          ps.place(sp.softDisc, st.x, st.y, {
+            scaleX: 6 / sp.softDisc.w,
+            scaleY: 6 / sp.softDisc.h,
+            tint: st.direction === 'DOWN' ? 0x38bdf8 : 0xfbbf24,
+            opacity: 0.75,
+            renderOrder: 0,
+          });
+        }
+      }
     }
-  }
 
-  private drawStairwellBeacons(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    incomingStairId: string | null,
-    timeSec: number
-  ): void {
-    const p = engine.player;
-    if (p.hidingSpotId !== null && p.peekingSpotId === null) return;
-    for (const st of engine.map.stairwells) {
-      const dist = Math.hypot(st.x - p.x, st.y - p.y);
-      if (dist > 460) continue;
-      if (p.peekingSpotId !== null && dist > 48 && !this.isWithinVentPeekCone(p, st.x, st.y)) {
-        continue;
+    // 3. Stair climb ring
+    if (p.climbingStairId) {
+      const st = engine.map.stairwells.find((s) => s.id === p.climbingStairId);
+      if (st) {
+        const progress = Math.max(0, Math.min(1, p.climbProgress));
+        const ringBatch =
+          st.direction === 'DOWN' ? this.postLinesCyan! : this.postLinesAmber!;
+        const segs = 28;
+        for (let i = 0; i < segs; i++) {
+          const a0 = -Math.PI / 2 + (Math.PI * 2 * i) / segs;
+          const a1 = -Math.PI / 2 + (Math.PI * 2 * (i + 1)) / segs;
+          this.postLinesSlate!.addSegment(
+            st.x + Math.cos(a0) * 30,
+            st.y + Math.sin(a0) * 30,
+            st.x + Math.cos(a1) * 30,
+            st.y + Math.sin(a1) * 30
+          );
+        }
+        const activeSegs = Math.max(1, Math.round(segs * progress));
+        for (let i = 0; i < activeSegs; i++) {
+          const t0 = i / activeSegs;
+          const t1 = (i + 1) / activeSegs;
+          const a0 = -Math.PI / 2 + Math.PI * 2 * progress * t0;
+          const a1 = -Math.PI / 2 + Math.PI * 2 * progress * t1;
+          ringBatch.addSegment(
+            st.x + Math.cos(a0) * 30,
+            st.y + Math.sin(a0) * 30,
+            st.x + Math.cos(a1) * 30,
+            st.y + Math.sin(a1) * 30
+          );
+        }
       }
-      if (!hasLineOfSight(engine.map, engine.doorsByTile, p.x, p.y, st.x, st.y)) continue;
-      const isBruteComing = st.id === incomingStairId;
-      ctx.save();
-      if (isBruteComing) {
-        const pulse = 0.65 + 0.35 * Math.sin(timeSec * 10);
-        const aura = ctx.createRadialGradient(st.x, st.y, 2, st.x, st.y, 32);
-        aura.addColorStop(0, `rgba(255, 130, 20, ${0.75 * pulse})`);
-        aura.addColorStop(1, 'rgba(234, 88, 12, 0)');
-        ctx.fillStyle = aura;
-        ctx.beginPath();
-        ctx.arc(st.x, st.y, 32, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = '#ffedd5';
-        ctx.beginPath();
-        ctx.arc(st.x, st.y, 3.6, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.fillStyle = st.direction === 'DOWN' ? 'rgba(56, 189, 248, 0.75)' : 'rgba(251, 191, 36, 0.75)';
-        ctx.beginPath();
-        ctx.arc(st.x, st.y, 2.6, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
     }
+
+    // 4. Brute eyes in darkness (LoS-gated)
+    this.addBruteEyesPostSprites(engine, timeSec, ps);
+
+    // 5. Acoustic ripples (constant crisp thin stroke width across all radii)
+    const ringHalfThick = 0.68 / Math.max(0.75, zoom);
+    const ringFeather = 0.52 / Math.max(0.75, zoom);
+    for (const r of engine.ripples) {
+      this.setColorFromCss(this.tmpColor, r.color);
+      this.ringBatch?.addRing(
+        r.x,
+        r.y,
+        r.radius,
+        ringHalfThick,
+        ringFeather,
+        this.tmpColor,
+        Math.max(0, r.alpha)
+      );
+    }
+
+    // 6. Interact halo
+    const nearest = engine.findNearestInteractable();
+    if (nearest) {
+      let tx = 0;
+      let ty = 0;
+      if (nearest.kind === 'CONTAINER') {
+        tx = nearest.container.x;
+        ty = nearest.container.y;
+      } else if (nearest.kind === 'PICKUP') {
+        tx = nearest.pickup.x;
+        ty = nearest.pickup.y;
+      } else if (nearest.kind === 'HIDING') {
+        tx = nearest.spot.x;
+        ty = nearest.spot.y;
+      } else if (nearest.kind === 'PAPER_MAP') {
+        tx = nearest.stand.x;
+        ty = nearest.stand.y;
+      } else if (nearest.kind === 'FUSE_SOCKET') {
+        tx = nearest.fuseSocket.x;
+        ty = nearest.fuseSocket.y;
+      } else if (nearest.kind === 'LIGHT_SWITCH') {
+        tx = nearest.lightSwitch.x;
+        ty = nearest.lightSwitch.y;
+      } else if (nearest.kind === 'STAIRWELL') {
+        tx = nearest.stairwell.x;
+        ty = nearest.stairwell.y;
+      } else if (nearest.kind === 'DOOR') {
+        tx = (nearest.door.tx + 0.5) * engine.map.tileSize;
+        ty = (nearest.door.ty + 0.5) * engine.map.tileSize;
+      } else if (nearest.kind === 'ESCAPE_LIFEBOAT') {
+        tx = engine.map.lifeboatPos.x;
+        ty = engine.map.lifeboatPos.y;
+      } else if (nearest.kind === 'ESCAPE_HELI') {
+        tx = engine.map.heliPos.x;
+        ty = engine.map.heliPos.y;
+      } else if (nearest.kind === 'ESCAPE_SUBMARINE') {
+        tx =
+          nearest.subTarget === 'LEVER'
+            ? engine.map.submarinePos.leverX
+            : engine.map.submarinePos.x;
+        ty =
+          nearest.subTarget === 'LEVER'
+            ? engine.map.submarinePos.leverY
+            : engine.map.submarinePos.y;
+      }
+      const pulse = 18 + Math.sin(timeSec * 6) * 2.5;
+      ps.place(sp.softRing, tx, ty, {
+        scaleX: (pulse * 2) / sp.softRing.w,
+        scaleY: (pulse * 2) / sp.softRing.h,
+        tint: 0xf8fafc,
+        opacity: 0.72,
+        renderOrder: 2,
+      });
+    }
+
+    // 7. Debug Overlays
+    if (engine.debugConfig.enabled) {
+      this.populateDebugOverlays(engine, width, height, zoom, camX, camY);
+    }
+
+    ps.endFrame();
+    this.postLinesSlate!.endFrame();
+    this.postLinesCyan!.endFrame();
+    this.postLinesAmber!.endFrame();
+    this.postLinesRose!.endFrame();
+    this.postLinesOrange!.endFrame();
+    this.postLinesEmerald!.endFrame();
+    this.postLinesRed!.endFrame();
+    this.postLinesWhite!.endFrame();
+    this.ringBatch?.endFrame();
   }
 
-  private drawStairClimbRing(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
-    const p = engine.player;
-    if (!p.climbingStairId) return;
-    const st = engine.map.stairwells.find((s) => s.id === p.climbingStairId);
-    if (!st) return;
-
-    const progress = Math.max(0, Math.min(1, p.climbProgress));
-    const color = st.direction === 'DOWN' ? '#38bdf8' : '#fbbf24';
-    ctx.save();
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.85)';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(st.x, st.y, 30, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.arc(st.x, st.y, 30, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * progress);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawBruteEyesInDarkness(
-    ctx: CanvasRenderingContext2D,
+  private addBruteEyesPostSprites(
     engine: MonstrumGameEngine,
-    timeSec: number
+    timeSec: number,
+    ps: SpritePool
   ): void {
+    const sp = this.sprites!;
     const b = engine.brute;
     const p = engine.player;
     if (b.state === 'STUNNED' || b.stairClimbTimer > 0) return;
 
     const dist = Math.hypot(b.x - p.x, b.y - p.y);
     if (dist > 620) return;
-
-    // Inside a hiding spot without peeking, you cannot see the Brute's eyes beyond immediate slats
-    if (p.hidingSpotId !== null && p.peekingSpotId === null && dist > 48) {
-      return;
-    }
+    if (p.hidingSpotId !== null && p.peekingSpotId === null && dist > 48) return;
 
     let visible = hasLineOfSight(engine.map, engine.doorsByTile, p.x, p.y, b.x, b.y);
     if (visible && p.hidingSpotId !== null && p.peekingSpotId !== null && dist > 48) {
-      const toBrute = Math.atan2(b.y - p.y, b.x - p.x);
-      let angleDiff = toBrute - p.angle;
-      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-      if (Math.abs(angleDiff) > (28 * Math.PI) / 180) {
-        visible = false;
-      }
+      if (!this.isWithinVentPeekCone(p, b.x, b.y)) visible = false;
     }
     if (!visible && p.peekingDoorId) {
       const door = engine.map.doors.find(
@@ -4042,117 +3401,39 @@ export class GameRenderer {
     const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
     const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
     const pulse = 0.75 + Math.sin(timeSec * 10) * 0.2;
+    const glowR = isChasing ? 34 : isStalking ? 26 : 20;
+    const cos = Math.cos(b.angle);
+    const sin = Math.sin(b.angle);
 
-    ctx.save();
-    ctx.translate(b.x, b.y);
-    ctx.rotate(b.angle);
+    const placeEye = (lx: number, ly: number, size: number, tint: number, opacity: number) => {
+      ps.place(sp.softDisc, b.x + lx * cos - ly * sin, b.y + lx * sin + ly * cos, {
+        scaleX: size / sp.softDisc.w,
+        scaleY: size / sp.softDisc.h,
+        tint,
+        opacity,
+        renderOrder: 1,
+      });
+    };
 
-    // Glowing ember aura around Brute's visor when in LoS
-    const glowRadius = isChasing ? 34 : isStalking ? 26 : 20;
-    const glow = ctx.createRadialGradient(12, 0, 1, 12, 0, glowRadius);
-    glow.addColorStop(
+    placeEye(
+      12,
       0,
-      isChasing
-        ? `rgba(255, 85, 0, ${0.7 * pulse})`
-        : isStalking
-          ? `rgba(251, 146, 60, ${0.52 * pulse})`
-          : 'rgba(249, 115, 22, 0.36)'
+      glowR * 2,
+      isChasing ? 0xff5500 : isStalking ? 0xfb923c : 0xf97316,
+      isChasing ? 0.7 * pulse : isStalking ? 0.52 * pulse : 0.36
     );
-    glow.addColorStop(1, 'rgba(249, 115, 22, 0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(12, 0, glowRadius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = isChasing ? '#ffedd5' : isStalking ? '#fdba74' : '#fb923c';
-    ctx.beginPath();
-    ctx.arc(12.5, -3.5, 2.4, 0, Math.PI * 2);
-    ctx.arc(12.5, 3.5, 2.4, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.restore();
+    const eyeTint = isChasing ? 0xffedd5 : isStalking ? 0xfdba74 : 0xfb923c;
+    placeEye(12.5, -3.5, 5.2, eyeTint, 1);
+    placeEye(12.5, 3.5, 5.2, eyeTint, 1);
   }
 
-  private drawRipples(ctx: CanvasRenderingContext2D, engine: MonstrumGameEngine): void {
-    for (const r of engine.ripples) {
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, r.alpha);
-      ctx.strokeStyle = r.color;
-      ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }
-
-  private drawInteractHalo(
-    ctx: CanvasRenderingContext2D,
-    engine: MonstrumGameEngine,
-    timeSec: number
-  ): void {
-    const nearest = engine.findNearestInteractable();
-    if (!nearest) return;
-
-    let tx = 0;
-    let ty = 0;
-    if (nearest.kind === 'CONTAINER') {
-      tx = nearest.container.x;
-      ty = nearest.container.y;
-    } else if (nearest.kind === 'PICKUP') {
-      tx = nearest.pickup.x;
-      ty = nearest.pickup.y;
-    } else if (nearest.kind === 'HIDING') {
-      tx = nearest.spot.x;
-      ty = nearest.spot.y;
-    } else if (nearest.kind === 'PAPER_MAP') {
-      tx = nearest.stand.x;
-      ty = nearest.stand.y;
-    } else if (nearest.kind === 'FUSE_SOCKET') {
-      tx = nearest.fuseSocket.x;
-      ty = nearest.fuseSocket.y;
-    } else if (nearest.kind === 'LIGHT_SWITCH') {
-      tx = nearest.lightSwitch.x;
-      ty = nearest.lightSwitch.y;
-    } else if (nearest.kind === 'STAIRWELL') {
-      tx = nearest.stairwell.x;
-      ty = nearest.stairwell.y;
-    } else if (nearest.kind === 'DOOR') {
-      tx = (nearest.door.tx + 0.5) * engine.map.tileSize;
-      ty = (nearest.door.ty + 0.5) * engine.map.tileSize;
-    } else if (nearest.kind === 'ESCAPE_LIFEBOAT') {
-      tx = engine.map.lifeboatPos.x;
-      ty = engine.map.lifeboatPos.y;
-    } else if (nearest.kind === 'ESCAPE_HELI') {
-      tx = engine.map.heliPos.x;
-      ty = engine.map.heliPos.y;
-    } else if (nearest.kind === 'ESCAPE_SUBMARINE') {
-      tx =
-        nearest.subTarget === 'LEVER'
-          ? engine.map.submarinePos.leverX
-          : engine.map.submarinePos.x;
-      ty =
-        nearest.subTarget === 'LEVER'
-          ? engine.map.submarinePos.leverY
-          : engine.map.submarinePos.y;
-    }
-
-    const pulse = 18 + Math.sin(timeSec * 6) * 2.5;
-    ctx.save();
-    ctx.strokeStyle = 'rgba(248, 250, 252, 0.72)';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.arc(tx, ty, pulse, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawDebugOverlays(
-    ctx: CanvasRenderingContext2D,
+  private populateDebugOverlays(
     engine: MonstrumGameEngine,
     width: number,
     height: number,
-    zoom: number
+    zoom: number,
+    camX: number,
+    camY: number
   ): void {
     const cfg = engine.debugConfig;
     const halfW = width / (2 * zoom) + 80;
@@ -4162,38 +3443,24 @@ export class GameRenderer {
       const segs = getLocalOccluders(
         engine.map,
         engine.doorsByTile,
-        engine.cameraX - halfW,
-        engine.cameraY - halfH,
-        engine.cameraX + halfW,
-        engine.cameraY + halfH
+        camX - halfW,
+        camY - halfH,
+        camX + halfW,
+        camY + halfH
       );
-      ctx.save();
-      ctx.lineWidth = 2;
       for (const s of segs) {
-        ctx.strokeStyle = s.kind === 'DOOR' ? 'rgba(251, 191, 36, 0.9)' : 'rgba(244, 63, 94, 0.78)';
-        ctx.beginPath();
-        ctx.moveTo(s.x1, s.y1);
-        ctx.lineTo(s.x2, s.y2);
-        ctx.stroke();
+        if (s.kind === 'DOOR') {
+          this.postLinesAmber!.addSegment(s.x1, s.y1, s.x2, s.y2);
+        } else {
+          this.postLinesRose!.addSegment(s.x1, s.y1, s.x2, s.y2);
+        }
       }
-      ctx.restore();
     }
 
     if (cfg.showPlayerLos) {
-      ctx.save();
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
-      ctx.lineWidth = 1.4;
       for (const poly of this.lastPlayerSightPolys) {
-        if (poly.length < 3) continue;
-        ctx.beginPath();
-        ctx.moveTo(poly[0].x, poly[0].y);
-        for (let i = 1; i < poly.length; i++) {
-          ctx.lineTo(poly[i].x, poly[i].y);
-        }
-        ctx.closePath();
-        ctx.stroke();
+        this.postLinesCyan!.addPolyLoop(poly);
       }
-      ctx.restore();
     }
 
     if (cfg.showBruteFov) {
@@ -4201,94 +3468,145 @@ export class GameRenderer {
       const senses = getSensesProfile(engine.difficulty, engine.bruteTuning);
       const halfFovRad = (senses.halfFovDeg * Math.PI) / 180;
       const fovRange = 345 * senses.sightMult;
-      ctx.save();
-      ctx.strokeStyle = 'rgba(249, 115, 22, 0.72)';
-      ctx.fillStyle = 'rgba(249, 115, 22, 0.08)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(b.x, b.y);
-      ctx.arc(b.x, b.y, fovRange, b.angle - halfFovRad, b.angle + halfFovRad);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      const arcPts: Array<{ x: number; y: number }> = [];
+      const steps = 28;
+      for (let i = 0; i <= steps; i++) {
+        const a = b.angle - halfFovRad + (2 * halfFovRad * i) / steps;
+        arcPts.push({ x: b.x + Math.cos(a) * fovRange, y: b.y + Math.sin(a) * fovRange });
+      }
+      if (this.bruteFovFanBatch) {
+        const fan = this.buildDynamicFan('debugBruteFov', b.x, b.y, arcPts, false);
+        this.bruteFovFanBatch.beginFrame();
+        this.bruteFovFanBatch.addFan(
+          fan,
+          1,
+          fovRange,
+          0.5,
+          0xf97316,
+          0.08,
+          0xf97316,
+          0.08,
+          0xf97316,
+          0.08
+        );
+        this.bruteFovFanBatch.endFrame();
+      }
+
+      this.postLinesOrange!.addSegment(b.x, b.y, arcPts[0].x, arcPts[0].y);
+      this.postLinesOrange!.addSegment(b.x, b.y, arcPts[arcPts.length - 1].x, arcPts[arcPts.length - 1].y);
+      for (let i = 0; i < arcPts.length - 1; i++) {
+        this.postLinesOrange!.addSegment(arcPts[i].x, arcPts[i].y, arcPts[i + 1].x, arcPts[i + 1].y);
+      }
 
       if (b.path.length > 0) {
         const ts = engine.map.tileSize;
-        ctx.strokeStyle = 'rgba(251, 146, 60, 0.85)';
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath();
-        ctx.moveTo(b.x, b.y);
+        let px = b.x;
+        let py = b.y;
         for (const wp of b.path) {
-          ctx.lineTo((wp.tx + 0.5) * ts, (wp.ty + 0.5) * ts);
+          const nx = (wp.tx + 0.5) * ts;
+          const ny = (wp.ty + 0.5) * ts;
+          this.postLinesOrange!.addDashedSegment(px, py, nx, ny, 5, 4);
+          px = nx;
+          py = ny;
         }
-        ctx.stroke();
-        ctx.setLineDash([]);
       }
 
       if (b.currentInspectSpotId) {
         const spot = engine.map.hidingSpots.find((s) => s.id === b.currentInspectSpotId);
         if (spot) {
-          ctx.strokeStyle = '#ef4444';
-          ctx.lineWidth = 2;
-          ctx.strokeRect(spot.x - 18, spot.y - 18, 36, 36);
+          this.postLinesRed!.addRect(spot.x - 18, spot.y - 18, 36, 36);
         }
       }
-      ctx.restore();
     }
 
     if (cfg.showBlackProbes && engine.debugProbePoints.length > 0) {
-      ctx.save();
-      ctx.font = '600 10px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
       for (let idx = 0; idx < engine.debugProbePoints.length; idx++) {
         const pt = engine.debugProbePoints[idx];
-        ctx.strokeStyle = 'rgba(52, 211, 153, 0.85)';
-        ctx.lineWidth = 1.2;
-        ctx.beginPath();
-        ctx.moveTo(pt.x - 9, pt.y);
-        ctx.lineTo(pt.x - 4, pt.y);
-        ctx.moveTo(pt.x + 4, pt.y);
-        ctx.lineTo(pt.x + 9, pt.y);
-        ctx.moveTo(pt.x, pt.y - 9);
-        ctx.lineTo(pt.x, pt.y - 4);
-        ctx.moveTo(pt.x, pt.y + 4);
-        ctx.lineTo(pt.x, pt.y + 9);
-        ctx.stroke();
+        this.postLinesEmerald!.addSegment(pt.x - 9, pt.y, pt.x - 4, pt.y);
+        this.postLinesEmerald!.addSegment(pt.x + 4, pt.y, pt.x + 9, pt.y);
+        this.postLinesEmerald!.addSegment(pt.x, pt.y - 9, pt.x, pt.y - 4);
+        this.postLinesEmerald!.addSegment(pt.x, pt.y + 4, pt.x, pt.y + 9);
         const labelOffsetY = idx % 2 === 0 ? -16 : 16;
-        ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
-        ctx.fillText(pt.label, pt.x, pt.y + labelOffsetY);
+        const badge = this.getTextBadge(`probe:${pt.label}`, pt.label, {
+          font: '600 10px "JetBrains Mono", monospace',
+          textColor: 'rgba(148, 163, 184, 0.95)',
+          padX: 4,
+          height: 14,
+        });
+        this.postSprites!.place(badge, pt.x, pt.y + labelOffsetY, { renderOrder: 6 });
       }
-      ctx.restore();
     }
   }
 
-  private drawStairPeekPortal(
-    ctx: CanvasRenderingContext2D,
+  private renderStairPeekPortalPass(
     engine: MonstrumGameEngine,
+    st: MonstrumGameEngine['map']['stairwells'][number],
+    dest: MonstrumGameEngine['map']['stairwells'][number],
     viewCenterX: number,
     viewCenterY: number,
     zoom: number,
     width: number,
     height: number,
+    dpr: number,
     timeSec: number,
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null
   ): void {
-    const st = engine.map.stairwells.find((s) => s.id === engine.player.peekingStairId);
-    const dest = st ? engine.map.stairwells.find((s) => s.id === st.targetStairId) : undefined;
-    if (!st || !dest) return;
-
+    const renderer = this.renderer!;
+    const sp = this.sprites!;
     const rawPortalX = viewCenterX + (st.x - engine.cameraX) * zoom;
     const rawPortalY = viewCenterY + (st.y - engine.cameraY) * zoom;
     const portalRadius = Math.max(145, Math.min(280, Math.round(200 * zoom)));
     const margin = portalRadius + 16;
     const portalX = Math.max(margin, Math.min(width - margin, rawPortalX));
     const portalY = Math.max(margin, Math.min(height - margin, rawPortalY));
-    const viewWorldRadius = portalRadius / zoom + 28;
-    const peekRange = Math.min(600, viewWorldRadius);
+    const viewWorldRadius = portalRadius / zoom;
+    const peekRange = Math.min(600, viewWorldRadius + 28);
 
-    // Raycasted Line-of-Sight polygon from the destination landing (walls & closed doors strictly clip to #000000!)
+    this.ensurePortalTargets(portalRadius * 2 * dpr);
+
+    // 1. Render destination world into portalTarget
+    this.portalCamera.left = -viewWorldRadius;
+    this.portalCamera.right = viewWorldRadius;
+    this.portalCamera.top = viewWorldRadius;
+    this.portalCamera.bottom = -viewWorldRadius;
+    this.portalCamera.position.set(dest.x, -dest.y, 100);
+    this.portalCamera.updateProjectionMatrix();
+
+    const destLitPolys = litRoomPolys.filter(
+      (lp) =>
+        lp.deck === dest.deck &&
+        Math.hypot(lp.x - dest.x, lp.y - dest.y) < lp.range + peekRange
+    );
+    const destBeam =
+      bruteBeam &&
+      Math.hypot(bruteBeam.ox - dest.x, bruteBeam.oy - dest.y) < bruteBeam.range + peekRange
+        ? bruteBeam
+        : null;
+
+    this.populateWorldScene(
+      engine,
+      dest.deck,
+      dest.x,
+      dest.y,
+      portalRadius * 2,
+      portalRadius * 2,
+      zoom,
+      timeSec,
+      null,
+      destLitPolys,
+      destBeam,
+      null,
+      null,
+      false
+    );
+
+    renderer.autoClear = true;
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.portalTarget);
+    renderer.render(this.worldScene, this.portalCamera);
+
+    // 2. Render destination LoS clip into portalLosTarget
     const destSightPoly = computeVisibilityPolygon(
       engine.map,
       engine.doorsByTile,
@@ -4299,275 +3617,313 @@ export class GameRenderer {
       peekRange,
       128
     );
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
-    ctx.clip();
-
-    // Pure #000000 abyss behind destination-deck walls
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(
-      portalX - portalRadius,
-      portalY - portalRadius,
-      portalRadius * 2,
-      portalRadius * 2
-    );
-
+    const plf = this.portalLosFans!;
+    plf.beginFrame();
+    this.losFans!.clear();
     if (destSightPoly.length >= 3) {
-      ctx.save();
-      ctx.translate(portalX, portalY);
-      ctx.scale(zoom, zoom);
-      ctx.translate(-dest.x, -dest.y);
+      const fan = this.buildDynamicFan('portalLos', dest.x, dest.y, destSightPoly, true);
+      plf.addFan(fan, 1, peekRange + 100, 0.5, 0xffffff, 1, 0xffffff, 1, 0xffffff, 1);
+    }
+    plf.endFrame();
 
-      // Strict LoS clip on destination deck
-      ctx.beginPath();
-      ctx.moveTo(destSightPoly[0].x, destSightPoly[0].y);
-      for (let i = 1; i < destSightPoly.length; i++) {
-        ctx.lineTo(destSightPoly[i].x, destSightPoly[i].y);
-      }
-      ctx.closePath();
-      ctx.clip();
+    renderer.setClearColor(0x000000, 1);
+    renderer.setRenderTarget(this.portalLosTarget);
+    renderer.render(this.losScene, this.portalCamera);
 
-      const worldSpan = viewWorldRadius * 2.2;
-      this.drawTiles(ctx, engine, worldSpan, worldSpan, timeSec, 1, dest.x, dest.y);
-      this.drawRoomStencils(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawBloodStreaks(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawStairwells(ctx, engine, null, timeSec);
-      this.drawBulkheads(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawShipProps(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawSteamPipes(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
-      this.drawPaperMaps(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
-      this.drawFuseSockets(ctx, engine, worldSpan, worldSpan, 1, timeSec, dest.x, dest.y);
-      this.drawContainers(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawHidingSpots(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawLightSwitches(ctx, engine, timeSec, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawDoors(ctx, engine, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawDroppedLights(ctx, engine, timeSec, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawWorldPickups(ctx, engine, timeSec, dest.deck, worldSpan, worldSpan, 1, dest.x, dest.y);
-      this.drawParticles(ctx, engine);
-
-      // Render Brute inside landing portal if on destination deck and inside LoS
-      const b = engine.brute;
-      const bDist = Math.hypot(b.x - dest.x, b.y - dest.y);
-      const bInView =
-        b.stairClimbTimer <= 0 &&
-        bDist <= peekRange + 28 &&
-        hasLineOfSight(engine.map, engine.doorsByTile, dest.x, dest.y, b.x, b.y);
-      if (bInView) {
-        this.drawBrute(ctx, engine, timeSec);
-      }
-
-      // Apply warm tints if lit rooms / Brute searchlight intersect the destination landing
-      const destLitPolys = litRoomPolys.filter(
-        (lp) => Math.hypot(lp.x - dest.x, lp.y - dest.y) < lp.range + peekRange
-      );
-      const destBeam =
-        bruteBeam && Math.hypot(bruteBeam.ox - dest.x, bruteBeam.oy - dest.y) < bruteBeam.range + peekRange
-          ? bruteBeam
-          : null;
-      this.drawWarmLightingTints(ctx, engine, destLitPolys, destBeam, null, null, timeSec);
-
-      // Shadowed landing visibility falloff (brighter when flashlight ON or destination room lit)
+    // 3. Configure portalQuad in screenOverlayScene
+    if (this.portalBundle && this.portalQuad) {
       const hasTorch = engine.player.flashlightOn && engine.player.battery > 0;
       const roomLitNearDest = destLitPolys.some(
         (lp) => Math.hypot(lp.x - dest.x, lp.y - dest.y) < lp.range * 0.9
       );
-      const centerShadowAlpha = roomLitNearDest ? 0.05 : hasTorch ? 0.14 : 0.48;
-      const midShadowAlpha = roomLitNearDest ? 0.25 : hasTorch ? 0.56 : 0.8;
-      const dimGrad = ctx.createRadialGradient(
-        dest.x,
-        dest.y,
-        14,
-        dest.x,
-        dest.y,
-        peekRange
+      this.portalBundle.uCenterDim.value = roomLitNearDest ? 0.05 : hasTorch ? 0.14 : 0.48;
+      this.portalBundle.uMidDim.value = roomLitNearDest ? 0.25 : hasTorch ? 0.56 : 0.8;
+      this.portalBundle.uAccentColor.value.setHex(
+        st.direction === 'DOWN' ? 0x38bdf8 : 0xfbbf24
       );
-      dimGrad.addColorStop(0, `rgba(0, 0, 0, ${centerShadowAlpha})`);
-      dimGrad.addColorStop(0.58, `rgba(0, 0, 0, ${midShadowAlpha})`);
-      dimGrad.addColorStop(1, 'rgba(0, 0, 0, 0.96)');
-      ctx.fillStyle = dimGrad;
-      ctx.fillRect(dest.x - peekRange, dest.y - peekRange, peekRange * 2, peekRange * 2);
+      this.portalBundle.uPixelSpan.value = portalRadius * 2;
 
-      // Re-emphasize glowing Brute eyes & light switch LEDs piercing darkness in destination LoS
-      for (const sw of engine.map.lightSwitches) {
-        if (Math.hypot(sw.x - dest.x, sw.y - dest.y) <= peekRange) {
-          if (hasLineOfSightToEntity(engine.map, engine.doorsByTile, dest.x, dest.y, sw.x, sw.y)) {
-            ctx.fillStyle = sw.isOn ? 'rgba(52, 211, 153, 0.9)' : 'rgba(245, 158, 11, 0.85)';
-            ctx.beginPath();
-            ctx.arc(sw.x, sw.y, 2.3, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-      }
-
-      if (bInView && b.state !== 'STUNNED') {
-        const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
-        ctx.save();
-        ctx.translate(b.x, b.y);
-        ctx.rotate(b.angle);
-        const eyeGlow = ctx.createRadialGradient(12, 0, 1, 12, 0, isChasing ? 32 : 22);
-        eyeGlow.addColorStop(0, isChasing ? 'rgba(255, 85, 0, 0.72)' : 'rgba(249, 115, 22, 0.45)');
-        eyeGlow.addColorStop(1, 'rgba(249, 115, 22, 0)');
-        ctx.fillStyle = eyeGlow;
-        ctx.beginPath();
-        ctx.arc(12, 0, isChasing ? 32 : 22, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.fillStyle = isChasing ? '#ffedd5' : '#fdba74';
-        ctx.beginPath();
-        ctx.arc(12.5, -3.5, 2.4, 0, Math.PI * 2);
-        ctx.arc(12.5, 3.5, 2.4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      ctx.restore(); // pop world transform & LoS clip
+      this.portalQuad.position.set(portalX, -portalY, 0);
+      this.portalQuad.scale.set(portalRadius * 2, portalRadius * 2, 1);
+      this.portalQuad.visible = true;
     }
 
-    // Soft circular tunnel vignette inside portal
-    const portalVignette = ctx.createRadialGradient(
-      portalX,
-      portalY,
-      portalRadius * 0.62,
-      portalX,
-      portalY,
-      portalRadius
-    );
-    portalVignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
-    portalVignette.addColorStop(1, 'rgba(0, 0, 0, 0.88)');
-    ctx.fillStyle = portalVignette;
-    ctx.beginPath();
-    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
-    ctx.fill();
+    // 4. Destination Switch LEDs & Brute Eyes in screenOverlayScene (above portal dim)
+    const ss = this.screenSprites!;
+    for (const sw of engine.map.lightSwitches) {
+      const sx = portalX + (sw.x - dest.x) * zoom;
+      const sy = portalY + (sw.y - dest.y) * zoom;
+      if (Math.hypot(sx - portalX, sy - portalY) >= portalRadius - 8) continue;
+      if (
+        Math.hypot(sw.x - dest.x, sw.y - dest.y) <= peekRange &&
+        hasLineOfSightToEntity(engine.map, engine.doorsByTile, dest.x, dest.y, sw.x, sw.y)
+      ) {
+        ss.place(sp.softDisc, sx, sy, {
+          scaleX: 5 * zoom / sp.softDisc.w,
+          scaleY: 5 * zoom / sp.softDisc.h,
+          tint: sw.isOn ? 0x34d399 : 0xf59e0b,
+          opacity: sw.isOn ? 0.9 : 0.85,
+          renderOrder: 1,
+        });
+      }
+    }
 
-    ctx.restore(); // pop circular clip
+    const b = engine.brute;
+    const bDist = Math.hypot(b.x - dest.x, b.y - dest.y);
+    const bInView =
+      b.stairClimbTimer <= 0 &&
+      bDist <= peekRange + 28 &&
+      hasLineOfSight(engine.map, engine.doorsByTile, dest.x, dest.y, b.x, b.y);
+    if (bInView && b.state !== 'STUNNED') {
+      const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
+      const cos = Math.cos(b.angle);
+      const sin = Math.sin(b.angle);
+      const placePortalEye = (lx: number, ly: number, sz: number, tint: number, op: number) => {
+        const wx = b.x + lx * cos - ly * sin;
+        const wy = b.y + lx * sin + ly * cos;
+        const sx = portalX + (wx - dest.x) * zoom;
+        const sy = portalY + (wy - dest.y) * zoom;
+        if (Math.hypot(sx - portalX, sy - portalY) < portalRadius - 8) {
+          ss.place(sp.softDisc, sx, sy, {
+            scaleX: (sz * zoom) / sp.softDisc.w,
+            scaleY: (sz * zoom) / sp.softDisc.h,
+            tint,
+            opacity: op,
+            renderOrder: 1,
+          });
+        }
+      };
+      placePortalEye(12, 0, isChasing ? 64 : 44, isChasing ? 0xff5500 : 0xf97316, isChasing ? 0.72 : 0.45);
+      placePortalEye(12.5, -3.5, 5, isChasing ? 0xffedd5 : 0xfdba74, 1);
+      placePortalEye(12.5, 3.5, 5, isChasing ? 0xffedd5 : 0xfdba74, 1);
+    }
 
-    // Crisp outer companionway peephole ring & destination badge
-    const accent = st.direction === 'DOWN' ? '#38bdf8' : '#fbbf24';
-    ctx.save();
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.92)';
-    ctx.lineWidth = 6;
-    ctx.beginPath();
-    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 2.2;
-    ctx.beginPath();
-    ctx.arc(portalX, portalY, portalRadius, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Subtle rectangular deck header bar just above portal rim
+    // 5. Header badge just above portal rim
     const badgeText = `${getDeckLabel(dest.deck).toUpperCase()} · ${dest.room.toUpperCase()}`;
-    ctx.font = '600 11px "JetBrains Mono", monospace';
-    const textW = ctx.measureText(badgeText).width;
-    const boxW = textW + 18;
-    const boxH = 22;
-    const boxX = portalX - boxW / 2;
+    const accentHex = st.direction === 'DOWN' ? '#38bdf8' : '#fbbf24';
+    const badge = this.getTextBadge(`portal:${badgeText}:${accentHex}`, badgeText, {
+      font: '600 11px "JetBrains Mono", monospace',
+      textColor: '#f8fafc',
+      bgColor: 'rgba(7, 10, 15, 0.94)',
+      borderColor: accentHex,
+      padX: 9,
+      height: 22,
+    });
     const boxY = Math.max(8, portalY - portalRadius - 14);
-    ctx.fillStyle = 'rgba(7, 10, 15, 0.94)';
-    traceRoundedRect(ctx, boxX, boxY, boxW, boxH, 3);
-    ctx.fill();
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    ctx.fillStyle = '#f8fafc';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(badgeText, portalX, boxY + boxH / 2 + 0.5);
-    ctx.restore();
+    ss.place(badge, portalX, boxY + badge.h * 0.5, { renderOrder: 2 });
   }
 
-  private drawVignetteAndDanger(
-    ctx: CanvasRenderingContext2D,
+  private updateVignetteUniforms(
     engine: MonstrumGameEngine,
     width: number,
     height: number,
-    zoom: number,
     timeSec: number
   ): void {
+    if (!this.vignetteBundle) return;
     const bruteDist = engine.getEffectiveBruteDistance();
     const isChasing = engine.brute.state === 'CHASE' || engine.brute.state === 'SMASH_DOOR';
     const prox = Math.max(0, 1 - bruteDist / 450);
-
     const redBoost = isChasing
       ? 0.28 + Math.sin(timeSec * 10) * 0.08
       : prox > 0.25
         ? (prox - 0.25) * 0.24
         : 0;
 
-    // Pure black edge vignette so unseen OLED/MiniLED pixels remain strictly #000000
-    const grad = ctx.createRadialGradient(
-      width / 2,
-      height / 2,
-      Math.min(width, height) * 0.34,
-      width / 2,
-      height / 2,
-      Math.max(width, height) * 0.74
+    this.vignetteBundle.uResolution.value.set(width, height);
+    this.vignetteBundle.uSteamFog.value = engine.player.steamFogAlpha;
+    this.vignetteBundle.uRedBoost.value = redBoost;
+    this.vignetteBundle.uSpotFlash.value = engine.spotFlashAlpha;
+  }
+
+  private enqueueReadback<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.readbackQueue.then(fn, fn);
+    this.readbackQueue = run.then(
+      () => undefined,
+      () => undefined
     );
-    grad.addColorStop(0, 'rgba(0,0,0,0)');
-    grad.addColorStop(1, 'rgba(0, 0, 0, 0.82)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, width, height);
+    return run;
+  }
 
-    // Clip red danger/chase pulse + steam condensation fog strictly inside player sight polygons
-    const steamFog = engine.player.steamFogAlpha;
-    if ((redBoost > 0 || engine.spotFlashAlpha > 0 || steamFog > 0.01) && this.lastPlayerSightPolys.length > 0) {
-      ctx.save();
-      ctx.translate(width / 2, height / 2);
-      ctx.scale(zoom, zoom);
-      ctx.translate(-engine.cameraX, -engine.cameraY);
-      ctx.beginPath();
-      for (const poly of this.lastPlayerSightPolys) {
-        if (poly.length < 3) continue;
-        ctx.moveTo(poly[0].x, poly[0].y);
-        for (let i = 1; i < poly.length; i++) {
-          ctx.lineTo(poly[i].x, poly[i].y);
-        }
-        ctx.closePath();
-      }
-      ctx.clip();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-
-      if (steamFog > 0.01) {
-        const fogGrad = ctx.createRadialGradient(
-          width / 2,
-          height / 2,
-          Math.min(width, height) * 0.06,
-          width / 2,
-          height / 2,
-          Math.max(width, height) * 0.72
-        );
-        fogGrad.addColorStop(0, `rgba(226, 232, 240, ${(steamFog * 0.56).toFixed(3)})`);
-        fogGrad.addColorStop(0.55, `rgba(203, 213, 225, ${(steamFog * 0.68).toFixed(3)})`);
-        fogGrad.addColorStop(1, `rgba(148, 163, 184, ${(steamFog * 0.74).toFixed(3)})`);
-        ctx.fillStyle = fogGrad;
-        ctx.fillRect(0, 0, width, height);
-      }
-
-      if (redBoost > 0) {
-        const dGrad = ctx.createRadialGradient(
-          width / 2,
-          height / 2,
-          Math.min(width, height) * 0.12,
-          width / 2,
-          height / 2,
-          Math.max(width, height) * 0.65
-        );
-        dGrad.addColorStop(0, 'rgba(185, 15, 10, 0)');
-        dGrad.addColorStop(1, `rgba(185, 15, 10, ${Math.min(0.45, redBoost)})`);
-        ctx.fillStyle = dGrad;
-        ctx.fillRect(0, 0, width, height);
-      }
-
-      if (engine.spotFlashAlpha > 0) {
-        ctx.fillStyle = `rgba(234, 88, 12, ${engine.spotFlashAlpha * 0.25})`;
-        ctx.fillRect(0, 0, width, height);
-      }
-      ctx.restore();
+  public async probePixelsAsync(engine: MonstrumGameEngine): Promise<ProbeReading[]> {
+    if (
+      !this.initialized ||
+      !this.renderer ||
+      !this.probeTarget ||
+      !this.readbackBlitMat ||
+      engine.debugProbePoints.length === 0
+    ) {
+      return [];
     }
+
+    return this.enqueueReadback(async () => {
+      if (this.disposed || !this.initialized || !this.renderer || !this.probeTarget) {
+        return [];
+      }
+      const renderer = this.renderer;
+      renderer.autoClear = true;
+      renderer.setRenderTarget(this.probeTarget);
+      renderer.render(this.readbackScene, this.ndcCamera);
+      renderer.setRenderTarget(null);
+
+      const pw = this.probeTarget.width;
+      const ph = this.probeTarget.height;
+      const w = this.lastScreenWidth;
+      const h = this.lastScreenHeight;
+      const dprX = pw / Math.max(1, w);
+      const dprY = ph / Math.max(1, h);
+      const zoom = engine.getEffectiveZoom(w, h);
+      const results: ProbeReading[] = [];
+
+      for (const pt of engine.debugProbePoints) {
+        const sx = (pt.x - engine.cameraX) * zoom + w / 2;
+        const sy = (pt.y - engine.cameraY) * zoom + h / 2;
+        const px = Math.round(sx * dprX);
+        const py = Math.round(sy * dprY);
+        if (px < 0 || py < 0 || px >= pw || py >= ph) continue;
+
+        // WebGPU copyTextureToBuffer is top-down (py); WebGL2 gl.readPixels is bottom-up (ph - 1 - py)
+        const readY = this.isWebGPU ? py : ph - 1 - py;
+        const data = await renderer.readRenderTargetPixelsAsync(
+          this.probeTarget,
+          px,
+          readY,
+          1,
+          1
+        );
+        const r = data[0] ?? 0;
+        const g = data[1] ?? 0;
+        const b = data[2] ?? 0;
+        results.push({
+          label: pt.label,
+          r,
+          g,
+          b,
+          isPureBlack: r === 0 && g === 0 && b === 0,
+        });
+      }
+
+      return results;
+    });
+  }
+
+  public async capturePngDataUrlAsync(): Promise<string | null> {
+    if (!this.initialized || !this.renderer || !this.probeTarget || !this.readbackBlitMat) {
+      return null;
+    }
+    return this.enqueueReadback(async () => {
+      if (this.disposed || !this.initialized || !this.renderer || !this.probeTarget) {
+        return null;
+      }
+      const renderer = this.renderer;
+      renderer.autoClear = true;
+      renderer.setRenderTarget(this.probeTarget);
+      renderer.render(this.readbackScene, this.ndcCamera);
+      renderer.setRenderTarget(null);
+
+      const pw = this.probeTarget.width;
+      const ph = this.probeTarget.height;
+      const raw = await renderer.readRenderTargetPixelsAsync(this.probeTarget, 0, 0, pw, ph);
+      const bytes = new Uint8ClampedArray(pw * ph * 4);
+      const src = new Uint8Array(raw.buffer, raw.byteOffset, Math.min(raw.byteLength, bytes.length));
+
+      if (this.isWebGPU) {
+        bytes.set(src);
+      } else {
+        const rowBytes = pw * 4;
+        for (let y = 0; y < ph; y++) {
+          const srcRow = (ph - 1 - y) * rowBytes;
+          const dstRow = y * rowBytes;
+          bytes.set(src.subarray(srcRow, srcRow + rowBytes), dstRow);
+        }
+      }
+
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = pw;
+      outCanvas.height = ph;
+      const ctx = outCanvas.getContext('2d');
+      if (!ctx) return null;
+      ctx.putImageData(new ImageData(bytes, pw, ph), 0, 0);
+      return outCanvas.toDataURL('image/png');
+    });
+  }
+
+  public dispose(): void {
+    this.disposed = true;
+    this.initialized = false;
+
+    for (const ch of this.deckChunkMeshes) {
+      this.worldScene.remove(ch.mesh);
+      ch.geom.dispose();
+      ch.mat.dispose();
+    }
+    this.deckChunkMeshes = [];
+    this.bakedShip?.dispose();
+    this.bakedShip = null;
+    this.bakedMapRef = null;
+
+    this.sprites?.dispose();
+    this.sprites = null;
+
+    for (const entry of this.textBadgeCache.values()) {
+      entry.texture.dispose();
+    }
+    this.textBadgeCache.clear();
+
+    this.worldSprites?.dispose();
+    this.postSprites?.dispose();
+    this.screenSprites?.dispose();
+    this.staticWarmFans?.dispose();
+    this.worldWarmFans?.dispose();
+    this.staticMaskFans?.dispose();
+    this.lightMaskFans?.dispose();
+    this.deckBakeWarmFans?.dispose();
+    this.deckBakeMaskFans?.dispose();
+    this.losFans?.dispose();
+    this.portalLosFans?.dispose();
+
+    this.wakeLines?.dispose();
+    this.worldLinesDark?.dispose();
+    this.worldLinesSteel?.dispose();
+    this.worldLinesLight?.dispose();
+    this.worldLinesTeal?.dispose();
+    this.postLinesSlate?.dispose();
+    this.postLinesCyan?.dispose();
+    this.postLinesAmber?.dispose();
+    this.postLinesRose?.dispose();
+    this.postLinesOrange?.dispose();
+    this.postLinesEmerald?.dispose();
+    this.postLinesRed?.dispose();
+    this.postLinesWhite?.dispose();
+    this.ringBatch?.dispose();
+    this.ringBatch = null;
+
+    this.bruteFovFanBatch?.dispose();
+    this.bruteFovFanBatch = null;
+
+    this.sceneTarget?.dispose();
+    this.losTarget?.dispose();
+    this.lightMaskTarget?.dispose();
+    this.finalTarget?.dispose();
+    this.probeTarget?.dispose();
+    this.portalTarget?.dispose();
+    this.portalLosTarget?.dispose();
+    this.deckWarmTarget?.dispose();
+    this.deckMaskTarget?.dispose();
+
+    this.oceanBundle?.material.dispose();
+    this.compositeBundle?.material.dispose();
+    this.vignetteBundle?.material.dispose();
+    this.portalBundle?.material.dispose();
+    this.deckWarmMat?.dispose();
+    this.deckMaskMat?.dispose();
+    this.screenBlitMat?.dispose();
+    this.readbackBlitMat?.dispose();
+
+    this.unitQuadGeom.dispose();
+    this.ndcQuadGeom.dispose();
+
+    this.renderer?.dispose();
+    this.renderer = null;
   }
 }
 

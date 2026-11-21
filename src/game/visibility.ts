@@ -19,6 +19,18 @@ export interface OccluderSegment {
 
 const staticWallSegmentsCache = new WeakMap<ShipMap, OccluderSegment[]>();
 
+interface StaticSegmentGrid {
+  segments: OccluderSegment[];
+  cellTiles: number;
+  cols: number;
+  rows: number;
+  buckets: number[][];
+  seenStamp: Int32Array;
+  stamp: number;
+}
+
+const staticSegmentGridCache = new WeakMap<ShipMap, StaticSegmentGrid>();
+
 export function normalizeAngle(a: number): number {
   while (a > Math.PI) a -= Math.PI * 2;
   while (a < -Math.PI) a += Math.PI * 2;
@@ -115,6 +127,47 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
   return segments;
 }
 
+function getStaticSegmentGrid(map: ShipMap): StaticSegmentGrid {
+  const existing = staticSegmentGridCache.get(map);
+  if (existing) return existing;
+
+  const segments = getStaticWallSegments(map);
+  const cellTiles = 8;
+  const cols = Math.max(1, Math.ceil(map.width / cellTiles));
+  const rows = Math.max(1, Math.ceil(map.height / cellTiles));
+  const buckets: number[][] = Array.from({ length: cols * rows }, () => []);
+  const cellPx = cellTiles * map.tileSize;
+
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    const minX = s.x1 < s.x2 ? s.x1 : s.x2;
+    const maxX = s.x1 > s.x2 ? s.x1 : s.x2;
+    const minY = s.y1 < s.y2 ? s.y1 : s.y2;
+    const maxY = s.y1 > s.y2 ? s.y1 : s.y2;
+    const c0 = Math.max(0, Math.min(cols - 1, Math.floor(minX / cellPx)));
+    const c1 = Math.max(0, Math.min(cols - 1, Math.floor(maxX / cellPx)));
+    const r0 = Math.max(0, Math.min(rows - 1, Math.floor(minY / cellPx)));
+    const r1 = Math.max(0, Math.min(rows - 1, Math.floor(maxY / cellPx)));
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        buckets[r * cols + c].push(i);
+      }
+    }
+  }
+
+  const grid: StaticSegmentGrid = {
+    segments,
+    cellTiles,
+    cols,
+    rows,
+    buckets,
+    seenStamp: new Int32Array(segments.length),
+    stamp: 0,
+  };
+  staticSegmentGridCache.set(map, grid);
+  return grid;
+}
+
 export function getLocalOccluders(
   map: ShipMap,
   doorsByTile: Map<number, Door>,
@@ -124,20 +177,42 @@ export function getLocalOccluders(
   maxY: number,
   ignoreDoorTileKey?: number
 ): OccluderSegment[] {
-  const allWalls = getStaticWallSegments(map);
+  const grid = getStaticSegmentGrid(map);
+  const ts = map.tileSize;
+  const cellPx = grid.cellTiles * ts;
   const result: OccluderSegment[] = [];
 
-  for (let i = 0; i < allWalls.length; i++) {
-    const s = allWalls[i];
-    const sMinX = s.x1 < s.x2 ? s.x1 : s.x2;
-    const sMaxX = s.x1 > s.x2 ? s.x1 : s.x2;
-    const sMinY = s.y1 < s.y2 ? s.y1 : s.y2;
-    const sMaxY = s.y1 > s.y2 ? s.y1 : s.y2;
-    if (sMaxX < minX || sMinX > maxX || sMaxY < minY || sMinY > maxY) continue;
-    result.push(s);
+  const c0 = Math.max(0, Math.min(grid.cols - 1, Math.floor(minX / cellPx)));
+  const c1 = Math.max(0, Math.min(grid.cols - 1, Math.floor(maxX / cellPx)));
+  const r0 = Math.max(0, Math.min(grid.rows - 1, Math.floor(minY / cellPx)));
+  const r1 = Math.max(0, Math.min(grid.rows - 1, Math.floor(maxY / cellPx)));
+
+  grid.stamp++;
+  if (grid.stamp >= 0x7fffffff) {
+    grid.seenStamp.fill(0);
+    grid.stamp = 1;
+  }
+  const stamp = grid.stamp;
+
+  for (let r = r0; r <= r1; r++) {
+    const rowOff = r * grid.cols;
+    for (let c = c0; c <= c1; c++) {
+      const bucket = grid.buckets[rowOff + c];
+      for (let k = 0; k < bucket.length; k++) {
+        const segIdx = bucket[k];
+        if (grid.seenStamp[segIdx] === stamp) continue;
+        grid.seenStamp[segIdx] = stamp;
+        const s = grid.segments[segIdx];
+        const sMinX = s.x1 < s.x2 ? s.x1 : s.x2;
+        const sMaxX = s.x1 > s.x2 ? s.x1 : s.x2;
+        const sMinY = s.y1 < s.y2 ? s.y1 : s.y2;
+        const sMaxY = s.y1 > s.y2 ? s.y1 : s.y2;
+        if (sMaxX < minX || sMinX > maxX || sMaxY < minY || sMinY > maxY) continue;
+        result.push(s);
+      }
+    }
   }
 
-  const ts = map.tileSize;
   const minTx = Math.max(0, Math.floor(minX / ts) - 1);
   const maxTx = Math.min(map.width - 1, Math.ceil(maxX / ts) + 1);
   const minTy = Math.max(0, Math.floor(minY / ts) - 1);
@@ -543,3 +618,181 @@ export function canBruteSeePoint(
 
   return hasLineOfSightToEntity(map, doorsByTile, brute.x, brute.y, targetX, targetY);
 }
+
+export interface FanMeshData {
+  /** Interleaved (wx, -wy, 0) positions for Three.js world plane */
+  positions: Float32Array;
+  /** Radial offset (dx, -dy) from light origin for TSL radial falloff */
+  radialOffsets: Float32Array;
+  vertexCount: number;
+  version: number;
+}
+
+/**
+ * Triangulates a visibility polygon into a non-indexed triangle fan centered at (ox, oy).
+ * Outputs world-space Three.js coordinates (x, -y, 0) and local offsets (x - ox, -(y - oy)).
+ */
+export function buildVisibilityFanBuffers(
+  ox: number,
+  oy: number,
+  poly: Array<{ x: number; y: number }>,
+  closedLoop: boolean,
+  prev?: FanMeshData
+): FanMeshData {
+  const n = poly.length;
+  const triCount = n < 2 ? 0 : closedLoop ? n : n - 1;
+  const vertexCount = triCount * 3;
+  const neededFloats3 = vertexCount * 3;
+  const neededFloats2 = vertexCount * 2;
+
+  const positions =
+    prev && prev.positions.length >= neededFloats3
+      ? prev.positions
+      : new Float32Array(Math.max(neededFloats3, 96 * 3));
+  const radialOffsets =
+    prev && prev.radialOffsets.length >= neededFloats2
+      ? prev.radialOffsets
+      : new Float32Array(Math.max(neededFloats2, 96 * 2));
+
+  let pIdx = 0;
+  let rIdx = 0;
+  const threeOy = -oy;
+
+  for (let i = 0; i < triCount; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % n];
+
+    // Vertex 0: center (ox, oy)
+    positions[pIdx++] = ox;
+    positions[pIdx++] = threeOy;
+    positions[pIdx++] = 0;
+    radialOffsets[rIdx++] = 0;
+    radialOffsets[rIdx++] = 0;
+
+    // Vertex 1: a (Three.js CCW winding: since +Y is flipped from screen +y, (ox,oy) -> a -> b or b -> a; DoubleSide handles both cleanly, keep consistent winding)
+    positions[pIdx++] = a.x;
+    positions[pIdx++] = -a.y;
+    positions[pIdx++] = 0;
+    radialOffsets[rIdx++] = a.x - ox;
+    radialOffsets[rIdx++] = -(a.y - oy);
+
+    // Vertex 2: b
+    positions[pIdx++] = b.x;
+    positions[pIdx++] = -b.y;
+    positions[pIdx++] = 0;
+    radialOffsets[rIdx++] = b.x - ox;
+    radialOffsets[rIdx++] = -(b.y - oy);
+  }
+
+  return {
+    positions,
+    radialOffsets,
+    vertexCount,
+    version: (prev?.version ?? 0) + 1,
+  };
+}
+
+interface CachedLightEntry {
+  x: number;
+  y: number;
+  range: number;
+  rayCount: number;
+  nearbyDoors: Door[];
+  doorHash1: number;
+  doorHash2: number;
+  poly: Array<{ x: number; y: number }>;
+  fan: FanMeshData;
+}
+
+/**
+ * Caches static 360-degree overhead room/corridor light visibility polygons and GPU triangle-fan
+ * buffers, recomputing ONLY when a door within range + margin opens, closes, or breaks.
+ * Eliminates Master Fuse deck lag when ~25-35 corridor fixtures are illuminated simultaneously.
+ */
+export class LightPolygonCache {
+  private mapRef: ShipMap | null = null;
+  private entries = new Map<string, CachedLightEntry>();
+
+  public clear(): void {
+    this.entries.clear();
+  }
+
+  private collectNearbyDoors(map: ShipMap, x: number, y: number, padRange: number): Door[] {
+    const ts = map.tileSize;
+    const nearby: Door[] = [];
+    const doors = map.doors;
+    for (let i = 0; i < doors.length; i++) {
+      const d = doors[i];
+      const dx = (d.tx + 0.5) * ts - x;
+      const dy = (d.ty + 0.5) * ts - y;
+      if (dx < -padRange || dx > padRange || dy < -padRange || dy > padRange) continue;
+      nearby.push(d);
+    }
+    return nearby;
+  }
+
+  private hashDoors(nearbyDoors: Door[]): [number, number] {
+    let h1 = 2166136261;
+    let h2 = 0x9e3779b9;
+    for (let i = 0; i < nearbyDoors.length; i++) {
+      const d = nearbyDoors[i];
+      const stateCode = d.isBroken ? 2 : d.openProgress > 0.35 ? 1 : 0;
+      const token = ((i + 1) << 2) | stateCode;
+      h1 ^= token;
+      h1 = Math.imul(h1, 16777619);
+      h2 ^= token + i * 31;
+      h2 = Math.imul(h2, 2246822519);
+    }
+    return [h1, h2];
+  }
+
+  public getOrCompute(
+    key: string,
+    map: ShipMap,
+    doorsByTile: Map<number, Door>,
+    x: number,
+    y: number,
+    range: number,
+    rayCount: number
+  ): CachedLightEntry {
+    if (this.mapRef !== map) {
+      this.mapRef = map;
+      this.entries.clear();
+    }
+
+    const existing = this.entries.get(key);
+    const sameParams =
+      existing !== undefined &&
+      existing.x === x &&
+      existing.y === y &&
+      existing.range === range &&
+      existing.rayCount === rayCount;
+
+    const nearbyDoors = sameParams
+      ? existing.nearbyDoors
+      : this.collectNearbyDoors(map, x, y, range + map.tileSize * 2.5);
+
+    const [h1, h2] = this.hashDoors(nearbyDoors);
+
+    if (sameParams && existing.doorHash1 === h1 && existing.doorHash2 === h2) {
+      return existing;
+    }
+
+    const poly = computeVisibilityPolygon(map, doorsByTile, x, y, 0, Math.PI * 2, range, rayCount);
+    const fan = buildVisibilityFanBuffers(x, y, poly, true, existing?.fan);
+    const next: CachedLightEntry = {
+      x,
+      y,
+      range,
+      rayCount,
+      nearbyDoors,
+      doorHash1: h1,
+      doorHash2: h2,
+      poly,
+      fan,
+    };
+    this.entries.set(key, next);
+    return next;
+  }
+}
+

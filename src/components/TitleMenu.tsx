@@ -1125,12 +1125,12 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4 space-y-1.5 text-slate-400">
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
                     <ShieldAlert className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>v{GAME_VERSION} Highlights (Final 0.2.x Build)</span>
+                    <span>v{GAME_VERSION} Highlights (Three.js + TSL Foundation)</span>
                   </div>
-                  <p>• Master Fuse spawning &amp; per-deck Fuse Control panels lighting rooms &amp; hallways.</p>
-                  <p>• Tiered Low / Medium / High / Extreme Brute lightswitch-confusion &amp; deduction AI.</p>
-                  <p>• Reusable Bolt Cutters, 6-chain bound Helicopter &amp; padlocked-only vault rooms.</p>
-                  <p>• Lit-side silent door peeking + Monstrum-inspired security desk main menu.</p>
+                  <p>• Migrated gameplay rendering to Three.js (WebGPU default with TSL WebGL2 fallback) on a 2D orthographic plane.</p>
+                  <p>• Viewport-culled, batched light fans eliminating Master Fuse powered-deck framerate lag.</p>
+                  <p>• Preserved strict #000000 raycasted occlusion, Master Fuse AI, Bolt Cutters, and 6-chain Helicopter.</p>
+                  <p>• Title Security Desk CRT feeds preserved with updated expedition dossier &amp; diagnostics.</p>
                 </div>
               </div>
             )}
