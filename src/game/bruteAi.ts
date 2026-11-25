@@ -140,9 +140,24 @@ export class BruteBrain {
     const roomMetaById = new Map<number, { room: RoomName; deck: ShipDeck }>();
     const adjacency = new Map<number, Set<number>>();
 
+    const subPool = this.map.props.find((p) => p.kind === 'SUBMARINE_HULL');
+    const isBrainTileWalkable = (tx: number, ty: number): boolean => {
+      if (!isTileWalkable(this.map.tiles[ty][tx])) return false;
+      if (
+        subPool &&
+        tx >= subPool.tx &&
+        tx < subPool.tx + subPool.tw &&
+        ty >= subPool.ty &&
+        ty < subPool.ty + subPool.th
+      ) {
+        return false;
+      }
+      return true;
+    };
+
     for (let y = 0; y < this.map.height; y++) {
       for (let x = 0; x < this.map.width; x++) {
-        if (!isTileWalkable(this.map.tiles[y][x])) continue;
+        if (!isBrainTileWalkable(x, y)) continue;
         const rId = this.map.roomIdGrid[y][x];
         const rName = this.map.roomGrid[y][x];
         const deck = this.map.deckGrid[y][x];
@@ -161,7 +176,7 @@ export class BruteBrain {
         ];
         for (const [nx, ny] of neighbors) {
           if (nx < 0 || nx >= this.map.width || ny < 0 || ny >= this.map.height) continue;
-          if (!isTileWalkable(this.map.tiles[ny][nx])) continue;
+          if (!isBrainTileWalkable(nx, ny)) continue;
           const nrId = this.map.roomIdGrid[ny][nx];
           if (nrId !== rId) {
             adjacency.get(rId)!.add(nrId);

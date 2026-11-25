@@ -1,4 +1,9 @@
 import type { MonstrumGameEngine } from './engine';
+import {
+  DEFAULT_CAMERA_FOV_DEG,
+  DEFAULT_CAMERA_PITCH_DEG,
+  DEFAULT_CAMERA_YAW_DEG,
+} from './graphicsSettings';
 import { isTileWalkable } from './mapGen';
 import { DebugScenarioId, Door, HidingSpot, RoomLightSwitch } from './types';
 import { hasLineOfSight } from './visibility';
@@ -926,6 +931,17 @@ export function applyDebugScenarioToEngine(
   engine.cameraY = p.y;
   engine.lookAheadX = 0;
   engine.lookAheadY = 0;
+  engine.debugConfig.renderMode = 'NORMAL';
+  engine.debugConfig.cameraPitchDeg = DEFAULT_CAMERA_PITCH_DEG;
+  engine.debugConfig.cameraYawDeg = DEFAULT_CAMERA_YAW_DEG;
+  engine.debugConfig.cameraFovDeg = DEFAULT_CAMERA_FOV_DEG;
+  engine.debugConfig.wireframeStructure = false;
+  engine.debugConfig.hideWallCaps = false;
+  engine.debugConfig.debugDeckOverride = 'AUTO';
+  engine.debugConfig.freeCamEnabled = false;
+  engine.debugConfig.freeCamX = p.x;
+  engine.debugConfig.freeCamY = p.y;
+  engine.debugConfig.freeCamZoom = engine.zoom;
   engine.debugScenario = scenarioId;
   engine.debugProbePoints = probePoints;
   engine.emitHud();

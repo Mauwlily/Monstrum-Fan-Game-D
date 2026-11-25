@@ -8,6 +8,12 @@ import { PaperMapModal } from './components/PaperMapModal';
 import { TitleMenu } from './components/TitleMenu';
 import { HorrorAudioEngine } from './game/audio';
 import { MonstrumGameEngine } from './game/engine';
+import {
+  getDefaultGraphicsSettings,
+  GraphicsSettings,
+  loadGraphicsSettings,
+  saveGraphicsSettings,
+} from './game/graphicsSettings';
 import { GameRenderer } from './game/renderer';
 import {
   BruteTuningNumbers,
@@ -27,6 +33,18 @@ declare global {
     __monstrumDebug?: {
       loadScenario: (id: DebugScenarioId) => void;
       setOverlays: (patch: Partial<DebugOverlayConfig>) => void;
+      setEscapeState: (patch: Partial<{
+        heliParts: ItemId[];
+        heliChainsRemaining: number;
+        heliState: 'IDLE' | 'ACTIVATING' | 'READY';
+        heliActivationProgress: number;
+        lifeboatParts: ItemId[];
+        lifeboatState: 'IDLE' | 'ACTIVATING' | 'READY';
+        lifeboatActivationProgress: number;
+        submarineParts: ItemId[];
+        submarineState: 'IDLE' | 'ACTIVATING' | 'READY';
+        submarineActivationProgress: number;
+      }>) => void;
       step: (dtSec?: number) => void;
       tryInteract: () => void;
       holdInteract: (holding: boolean) => void;
@@ -114,9 +132,83 @@ declare global {
         playerX: number;
         playerY: number;
       } | null;
+      focusDoor: (idxOrId?: number | string) => {
+        id: string;
+        orientation: 'H' | 'V';
+        isLocked: boolean;
+        isWatertight: boolean;
+        isBroken: boolean;
+        isOpen: boolean;
+        x: number;
+        y: number;
+        deck: string;
+      } | null;
+      focusStair: (directionOrId?: 'UP' | 'DOWN' | string, index?: number) => {
+        id: string;
+        direction: 'UP' | 'DOWN';
+        deck: string;
+        x: number;
+        y: number;
+      } | null;
+      toggleNearestDoor: () => {
+        id: string;
+        isOpen: boolean;
+        openProgress: number;
+        isLocked: boolean;
+      } | null;
+      getStructureSummary: () => {
+        doorsTotal: number;
+        doorsByKind: { normal: number; locked: number; watertight: number; broken: number };
+        stairwellsTotal: number;
+        doors: Array<{
+          id: string;
+          deck: string;
+          orientation: 'H' | 'V';
+          isLocked: boolean;
+          isWatertight: boolean;
+          isBroken: boolean;
+          isOpen: boolean;
+          x: number;
+          y: number;
+        }>;
+        stairwells: Array<{
+          id: string;
+          deck: string;
+          direction: 'UP' | 'DOWN';
+          x: number;
+          y: number;
+        }>;
+      } | null;
       getTelemetry: () => DebugTelemetry | null;
       getStatus: () => GameStatus;
       getRendererBackend: () => string;
+      setGraphicsSettings: (patch: Partial<GraphicsSettings>) => void;
+      getGraphicsInfo: () => {
+        settings: GraphicsSettings;
+        display: ReturnType<GameRenderer['getDisplayTelemetry']> | null;
+      };
+      getContainersState: () => {
+        cursorTarget: unknown;
+        containers: Array<{
+          id: string;
+          type: string;
+          deck: string;
+          x: number;
+          y: number;
+          isOpen: boolean;
+          openProgress: number;
+          searched: boolean;
+          item: ItemId | null;
+        }>;
+      } | null;
+      aimAtContainer: (
+        containerId: string,
+        targetPart?: 'CONTAINER' | 'CONTAINER_ITEM'
+      ) => {
+        screenX: number;
+        screenY: number;
+        cursorTarget: unknown;
+      } | null;
       probePixels: () => ProbeReading[];
       probePixelsAsync: () => Promise<ProbeReading[]>;
       captureCanvasDataUrl: () => string | null;
@@ -135,6 +227,9 @@ export default function App() {
     buildBruteTuningFromDifficulty(DIFFICULTY_PRESETS.STANDARD)
   );
   const [customTuningActive, setCustomTuningActive] = useState(false);
+  const [graphicsSettings, setGraphicsSettings] = useState<GraphicsSettings>(() =>
+    loadGraphicsSettings()
+  );
   const [seedInput, setSeedInput] = useState('');
   const [muted, setMuted] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
@@ -152,9 +247,23 @@ export default function App() {
   const probePromiseRef = useRef<Promise<ProbeReading[]> | null>(null);
   const lastProbeTimeRef = useRef(0);
   const lastTelemetryTimeRef = useRef(0);
+  const lastRenderedFrameTimeRef = useRef(0);
+  const groundScratchRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const graphicsSettingsRef = useRef<GraphicsSettings>(graphicsSettings);
   const statusRef = useRef<GameStatus>('TITLE_MENU');
   const debugOpenRef = useRef(false);
   const devModeUnlockedRef = useRef(devModeUnlocked);
+  const doorCycleIdxRef = useRef(-1);
+  const stairCycleIdxRef = useRef<{ UP: number; DOWN: number }>({ UP: -1, DOWN: -1 });
+  const dragOrbitRef = useRef<{
+    active: boolean;
+    mode: 'orbit' | 'pan';
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    moved: boolean;
+  }>({ active: false, mode: 'orbit', startX: 0, startY: 0, lastX: 0, lastY: 0, moved: false });
 
   useEffect(() => {
     statusRef.current = status;
@@ -225,6 +334,8 @@ export default function App() {
       if (!rendererRef.current) {
         rendererRef.current = new GameRenderer();
       }
+      const gfx = graphicsSettingsRef.current;
+      rendererRef.current.applyGraphicsSettings(gfx);
 
       const parsedSeed =
         forcedSeed !== undefined
@@ -252,6 +363,10 @@ export default function App() {
         customTuningActive
       );
 
+      engine.setParticleDensity(gfx.particleDensity);
+      engine.debugConfig.cameraPitchDeg = gfx.cameraPitchDeg;
+      engine.debugConfig.cameraYawDeg = gfx.cameraYawDeg;
+      engine.debugConfig.cameraFovDeg = gfx.cameraFovDeg;
       engine.debugConfig.enabled = openDebugAfter || debugOpenRef.current;
       engineRef.current = engine;
       setRunStats(null);
@@ -301,6 +416,32 @@ export default function App() {
     if (!engine || !renderer || !renderer.isInitialized()) return;
     renderer.render(engine, window.innerWidth, window.innerHeight, performance.now() / 1000);
   }, []);
+
+  const applyGraphicsToRuntime = useCallback((next: GraphicsSettings) => {
+    saveGraphicsSettings(next);
+    graphicsSettingsRef.current = next;
+    rendererRef.current?.applyGraphicsSettings(next);
+    const eng = engineRef.current;
+    if (eng) {
+      eng.setParticleDensity(next.particleDensity);
+      eng.debugConfig.cameraPitchDeg = next.cameraPitchDeg;
+      eng.debugConfig.cameraYawDeg = next.cameraYawDeg;
+      eng.debugConfig.cameraFovDeg = next.cameraFovDeg;
+    }
+  }, []);
+
+  const handleChangeGraphicsSettings = useCallback(
+    (next: GraphicsSettings) => {
+      setGraphicsSettings(next);
+      applyGraphicsToRuntime(next);
+      renderImmediateFrame();
+    },
+    [applyGraphicsToRuntime, renderImmediateFrame]
+  );
+
+  const handleResetGraphicsSettings = useCallback(() => {
+    handleChangeGraphicsSettings(getDefaultGraphicsSettings());
+  }, [handleChangeGraphicsSettings]);
 
   const refreshProbesAsync = useCallback(async (): Promise<ProbeReading[]> => {
     const engine = engineRef.current;
@@ -356,6 +497,11 @@ export default function App() {
     (patch: Partial<DebugOverlayConfig>) => {
       const engine = engineRef.current;
       if (!engine) return;
+      if (patch.freeCamEnabled && !engine.debugConfig.freeCamEnabled) {
+        if (patch.freeCamX === undefined) patch.freeCamX = engine.cameraX;
+        if (patch.freeCamY === undefined) patch.freeCamY = engine.cameraY;
+        if (patch.freeCamZoom === undefined) patch.freeCamZoom = engine.zoom;
+      }
       Object.assign(engine.debugConfig, patch);
       engine.update(0.016, window.innerWidth, window.innerHeight);
       renderImmediateFrame();
@@ -364,6 +510,142 @@ export default function App() {
     },
     [refreshProbesAsync, renderImmediateFrame, syncDebugTelemetry]
   );
+
+  const focusDoorInDebug = useCallback(
+    (idxOrId?: number | string) => {
+      const engine = engineRef.current;
+      if (!engine || engine.map.doors.length === 0) return null;
+      const targetDeck =
+        engine.debugConfig.debugDeckOverride !== 'AUTO'
+          ? engine.debugConfig.debugDeckOverride
+          : engine.getCurrentDeck();
+      const deckDoors = engine.map.doors.filter(
+        (d) => (engine.map.deckGrid[d.ty]?.[d.tx] ?? 'DECK_2') === targetDeck
+      );
+      let door =
+        typeof idxOrId === 'string'
+          ? engine.map.doors.find((d) => d.id === idxOrId)
+          : typeof idxOrId === 'number'
+            ? engine.map.doors[(idxOrId % engine.map.doors.length + engine.map.doors.length) % engine.map.doors.length]
+            : undefined;
+      if (!door) {
+        const list = deckDoors.length > 0 ? deckDoors : engine.map.doors;
+        doorCycleIdxRef.current = (doorCycleIdxRef.current + 1) % list.length;
+        door = list[doorCycleIdxRef.current];
+      }
+      const ts = engine.map.tileSize;
+      const x = (door.tx + 0.5) * ts;
+      const y = (door.ty + 0.5) * ts;
+      const deck = engine.map.deckGrid[door.ty]?.[door.tx] ?? 'DECK_2';
+      handleUpdateDebugConfig({
+        enabled: true,
+        freeCamEnabled: true,
+        freeCamX: x,
+        freeCamY: y,
+        freeCamZoom: Math.max(engine.debugConfig.freeCamZoom, 2.1),
+        debugDeckOverride: deck,
+      });
+      return {
+        id: door.id,
+        orientation: door.orientation,
+        isLocked: door.isLocked,
+        isWatertight: Boolean(door.isWatertight),
+        isBroken: door.isBroken,
+        isOpen: door.isOpen,
+        x,
+        y,
+        deck,
+      };
+    },
+    [handleUpdateDebugConfig]
+  );
+
+  const focusStairInDebug = useCallback(
+    (directionOrId?: 'UP' | 'DOWN' | string, index?: number) => {
+      const engine = engineRef.current;
+      if (!engine || engine.map.stairwells.length === 0) return null;
+      let st =
+        directionOrId && directionOrId !== 'UP' && directionOrId !== 'DOWN'
+          ? engine.map.stairwells.find((s) => s.id === directionOrId)
+          : undefined;
+      if (!st) {
+        const dir: 'UP' | 'DOWN' = directionOrId === 'UP' ? 'UP' : 'DOWN';
+        const targetDeck =
+          engine.debugConfig.debugDeckOverride !== 'AUTO'
+            ? engine.debugConfig.debugDeckOverride
+            : engine.getCurrentDeck();
+        const sameDeck = engine.map.stairwells.filter(
+          (s) => s.direction === dir && s.deck === targetDeck
+        );
+        const list = sameDeck.length > 0 ? sameDeck : engine.map.stairwells.filter((s) => s.direction === dir);
+        if (list.length === 0) return null;
+        if (typeof index === 'number') {
+          st = list[(index % list.length + list.length) % list.length];
+        } else {
+          stairCycleIdxRef.current[dir] = (stairCycleIdxRef.current[dir] + 1) % list.length;
+          st = list[stairCycleIdxRef.current[dir]];
+        }
+      }
+      handleUpdateDebugConfig({
+        enabled: true,
+        freeCamEnabled: true,
+        freeCamX: st.x,
+        freeCamY: st.y,
+        freeCamZoom: Math.max(engine.debugConfig.freeCamZoom, 2.1),
+        debugDeckOverride: st.deck,
+      });
+      return {
+        id: st.id,
+        direction: st.direction,
+        deck: st.deck,
+        x: st.x,
+        y: st.y,
+      };
+    },
+    [handleUpdateDebugConfig]
+  );
+
+  const toggleNearestDoorInDebug = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return null;
+    const refX = engine.debugConfig.freeCamEnabled ? engine.debugConfig.freeCamX : engine.player.x;
+    const refY = engine.debugConfig.freeCamEnabled ? engine.debugConfig.freeCamY : engine.player.y;
+    const targetDeck =
+      engine.debugConfig.debugDeckOverride !== 'AUTO'
+        ? engine.debugConfig.debugDeckOverride
+        : engine.getCurrentDeck();
+    const ts = engine.map.tileSize;
+    let bestDoor = null;
+    let bestD = Infinity;
+    for (const d of engine.map.doors) {
+      const deck = engine.map.deckGrid[d.ty]?.[d.tx] ?? 'DECK_2';
+      if (deck !== targetDeck) continue;
+      const dist = Math.hypot((d.tx + 0.5) * ts - refX, (d.ty + 0.5) * ts - refY);
+      if (dist < bestD) {
+        bestD = dist;
+        bestDoor = d;
+      }
+    }
+    if (!bestDoor) return null;
+    if (bestDoor.isBroken) {
+      return {
+        id: bestDoor.id,
+        isOpen: bestDoor.isOpen,
+        openProgress: bestDoor.openProgress,
+        isLocked: bestDoor.isLocked,
+      };
+    }
+    bestDoor.isOpen = !bestDoor.isOpen;
+    bestDoor.openProgress = bestDoor.isOpen ? 1 : 0;
+    renderImmediateFrame();
+    syncDebugTelemetry();
+    return {
+      id: bestDoor.id,
+      isOpen: bestDoor.isOpen,
+      openProgress: bestDoor.openProgress,
+      isLocked: bestDoor.isLocked,
+    };
+  }, [renderImmediateFrame, syncDebugTelemetry]);
 
   const handleStepDebugFrame = useCallback(() => {
     const engine = engineRef.current;
@@ -446,12 +728,14 @@ export default function App() {
       activeCanvasRef.current = canvas;
     }
     const activeRenderer = rendererRef.current;
+    activeRenderer.applyGraphicsSettings(graphicsSettingsRef.current);
 
     if (!activeRenderer.isInitialized()) {
       void activeRenderer
         .init(canvas)
         .then(() => {
           if (cancelled || activeRenderer !== rendererRef.current) return;
+          activeRenderer.applyGraphicsSettings(graphicsSettingsRef.current);
           const eng = engineRef.current;
           if (eng) {
             activeRenderer.render(eng, window.innerWidth, window.innerHeight, performance.now() / 1000);
@@ -476,7 +760,55 @@ export default function App() {
     syncCanvasCssSize();
     window.addEventListener('resize', syncCanvasCssSize);
 
+    const isSoftwareGl = (() => {
+      try {
+        const probe = document.createElement('canvas');
+        const gl = probe.getContext('webgl2') || probe.getContext('webgl');
+        if (!gl) return false;
+        const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+        const r = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+        return /SwiftShader|llvmpipe|Software Rasterizer/i.test(r);
+      } catch {
+        return false;
+      }
+    })();
+
+    let timerId = 0;
+    const afterDraw = (fn: () => void) => {
+      const gl = canvas.getContext('webgl2') as WebGL2RenderingContext | null;
+      const sync = gl ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
+      if (gl && sync) gl.flush();
+      const poll = () => {
+        if (cancelled) return;
+        if (gl && sync) {
+          const st = gl.getSyncParameter(sync, gl.SYNC_STATUS);
+          if (st === gl.UNSIGNALED) {
+            timerId = window.setTimeout(poll, 5);
+            return;
+          }
+          gl.deleteSync(sync);
+        }
+        timerId = window.setTimeout(() => {
+          if (!cancelled) rafId = requestAnimationFrame(fn);
+        }, 80);
+      };
+      timerId = window.setTimeout(poll, 5);
+    };
+
     const frame = (now: number) => {
+      if (cancelled) return;
+      const fpsCap = graphicsSettingsRef.current.fpsCap;
+      if (
+        !isSoftwareGl &&
+        fpsCap > 0 &&
+        lastRenderedFrameTimeRef.current > 0 &&
+        now - lastRenderedFrameTimeRef.current < 1000 / fpsCap - 0.5
+      ) {
+        rafId = requestAnimationFrame(frame);
+        return;
+      }
+      lastRenderedFrameTimeRef.current = now;
+
       const dt = (now - lastTime) / 1000;
       lastTime = now;
 
@@ -487,24 +819,55 @@ export default function App() {
         const w = window.innerWidth;
         const h = window.innerHeight;
         if (statusRef.current === 'PLAYING') {
+          if (engine.mouseMoved && renderer.isInitialized()) {
+            if (
+              renderer.screenToWorldGround(
+                engine.mouseScreenX,
+                engine.mouseScreenY,
+                w,
+                h,
+                groundScratchRef.current,
+                16
+              )
+            ) {
+              engine.setWorldMouse(groundScratchRef.current.x, groundScratchRef.current.y);
+            } else {
+              engine.clearWorldMouse();
+            }
+          }
           engine.update(dt, w, h);
         }
 
         if (renderer.isInitialized()) {
+          if (statusRef.current === 'PLAYING') {
+            renderer.updatePointerHover(
+              engine,
+              engine.mouseScreenX,
+              engine.mouseScreenY,
+              w,
+              h
+            );
+          }
           renderer.render(engine, w, h, now / 1000);
           if (debugOpenRef.current) {
             if (now - lastTelemetryTimeRef.current >= 100) {
               lastTelemetryTimeRef.current = now;
               syncDebugTelemetry();
             }
-            if (now - lastProbeTimeRef.current >= 500) {
+            if (engine.debugConfig.showBlackProbes && now - lastProbeTimeRef.current >= 500) {
               void refreshProbesAsync();
             }
           }
         }
       }
 
-      rafId = requestAnimationFrame(frame);
+      if (isSoftwareGl) {
+        afterDraw(() => {
+          if (!cancelled) frame(performance.now());
+        });
+      } else {
+        rafId = requestAnimationFrame(frame);
+      }
     };
 
     rafId = requestAnimationFrame(frame);
@@ -512,6 +875,7 @@ export default function App() {
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafId);
+      window.clearTimeout(timerId);
       window.removeEventListener('resize', syncCanvasCssSize);
     };
   }, [refreshProbesAsync, status, syncDebugTelemetry]);
@@ -529,6 +893,14 @@ export default function App() {
     window.__monstrumDebug = {
       loadScenario: (id) => handleLoadScenario(id),
       setOverlays: (patch) => handleUpdateDebugConfig(patch),
+      setEscapeState: (patch) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        Object.assign(engine.escape, patch);
+        engine.emitHud();
+        renderImmediateFrame();
+        syncDebugTelemetry();
+      },
       step: (dtSec = 0.05) => {
         const engine = engineRef.current;
         if (!engine) return;
@@ -538,7 +910,17 @@ export default function App() {
       },
       tryInteract: () => {
         const engine = engineRef.current;
+        const renderer = rendererRef.current;
         if (!engine) return;
+        if (renderer?.isInitialized()) {
+          renderer.updatePointerHover(
+            engine,
+            engine.mouseScreenX,
+            engine.mouseScreenY,
+            window.innerWidth,
+            window.innerHeight
+          );
+        }
         engine.tryInteract();
         engine.update(0.016, window.innerWidth, window.innerHeight);
         renderImmediateFrame();
@@ -745,9 +1127,112 @@ export default function App() {
           playerY: engine.player.y,
         };
       },
+      focusDoor: (idxOrId) => focusDoorInDebug(idxOrId),
+      focusStair: (directionOrId, index) => focusStairInDebug(directionOrId, index),
+      toggleNearestDoor: () => toggleNearestDoorInDebug(),
+      getStructureSummary: () => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        const ts = engine.map.tileSize;
+        let normal = 0;
+        let locked = 0;
+        let watertight = 0;
+        let broken = 0;
+        const doors = engine.map.doors.map((d) => {
+          if (d.isBroken) broken++;
+          else if (d.isLocked) locked++;
+          else if (d.isWatertight) watertight++;
+          else normal++;
+          return {
+            id: d.id,
+            deck: engine.map.deckGrid[d.ty]?.[d.tx] ?? 'DECK_2',
+            orientation: d.orientation,
+            isLocked: d.isLocked,
+            isWatertight: Boolean(d.isWatertight),
+            isBroken: d.isBroken,
+            isOpen: d.isOpen,
+            x: (d.tx + 0.5) * ts,
+            y: (d.ty + 0.5) * ts,
+          };
+        });
+        return {
+          doorsTotal: doors.length,
+          doorsByKind: { normal, locked, watertight, broken },
+          stairwellsTotal: engine.map.stairwells.length,
+          doors,
+          stairwells: engine.map.stairwells.map((s) => ({
+            id: s.id,
+            deck: s.deck,
+            direction: s.direction,
+            x: s.x,
+            y: s.y,
+          })),
+        };
+      },
       getTelemetry: () => syncDebugTelemetry(),
       getStatus: () => statusRef.current,
       getRendererBackend: () => rendererRef.current?.getBackendLabel() ?? 'Uninitialized',
+      setGraphicsSettings: (patch) => {
+        const next = { ...graphicsSettingsRef.current, ...patch };
+        handleChangeGraphicsSettings(next);
+      },
+      getGraphicsInfo: () => ({
+        settings: { ...graphicsSettingsRef.current },
+        display: rendererRef.current?.getDisplayTelemetry() ?? null,
+      }),
+      getContainersState: () => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        return {
+          cursorTarget: engine.cursorTarget ? { ...engine.cursorTarget } : null,
+          containers: engine.map.containers.map((c) => ({
+            id: c.id,
+            type: c.type,
+            deck: engine.map.deckGrid[c.ty]?.[c.tx] ?? 'DECK_2',
+            x: c.x,
+            y: c.y,
+            isOpen: c.isOpen,
+            openProgress: c.openProgress,
+            searched: c.searched,
+            item: c.item,
+          })),
+        };
+      },
+      aimAtContainer: (containerId: string, targetPart: 'CONTAINER' | 'CONTAINER_ITEM' = 'CONTAINER') => {
+        const engine = engineRef.current;
+        const renderer = rendererRef.current;
+        if (!engine || !renderer || !renderer.isInitialized()) return null;
+        renderImmediateFrame();
+        const pt = renderer.getContainerScreenPoint(
+          containerId,
+          targetPart,
+          window.innerWidth,
+          window.innerHeight
+        );
+        if (!pt) return null;
+        engine.mouseScreenX = pt.x;
+        engine.mouseScreenY = pt.y;
+        engine.mouseMoved = true;
+        if (
+          renderer.screenToWorldGround(
+            pt.x,
+            pt.y,
+            window.innerWidth,
+            window.innerHeight,
+            groundScratchRef.current,
+            16
+          )
+        ) {
+          engine.setWorldMouse(groundScratchRef.current.x, groundScratchRef.current.y);
+        }
+        renderer.updatePointerHover(engine, pt.x, pt.y, window.innerWidth, window.innerHeight);
+        renderImmediateFrame();
+        return {
+          screenX: pt.x,
+          screenY: pt.y,
+          cursorTarget: engine.cursorTarget ? { ...engine.cursorTarget } : null,
+        };
+      },
       probePixels: () => {
         renderImmediateFrame();
         void refreshProbesAsync();
@@ -770,11 +1255,15 @@ export default function App() {
       delete window.__monstrumDebug;
     };
   }, [
+    focusDoorInDebug,
+    focusStairInDebug,
+    handleChangeGraphicsSettings,
     handleLoadScenario,
     handleUpdateDebugConfig,
     refreshProbesAsync,
     renderImmediateFrame,
     syncDebugTelemetry,
+    toggleNearestDoorInDebug,
   ]);
 
   // Keyboard & mouse handlers
@@ -832,6 +1321,15 @@ export default function App() {
         } else if (e.code === 'KeyC' || e.code === 'ControlLeft' || e.code === 'ControlRight') {
           engine.toggleCrouch();
         } else if (e.code === 'KeyE' || e.code === 'Space') {
+          if (rendererRef.current?.isInitialized()) {
+            rendererRef.current.updatePointerHover(
+              engine,
+              engine.mouseScreenX,
+              engine.mouseScreenY,
+              window.innerWidth,
+              window.innerHeight
+            );
+          }
           engine.holdingInteract = true;
           engine.tryInteract();
         } else if (e.code === 'KeyG') {
@@ -912,6 +1410,10 @@ export default function App() {
         customTuningActive={customTuningActive}
         onChangeBruteTuning={handleChangeBruteTuning}
         onResetBruteTuning={handleResetBruteTuning}
+        graphicsSettings={graphicsSettings}
+        onChangeGraphicsSettings={handleChangeGraphicsSettings}
+        onResetGraphicsSettings={handleResetGraphicsSettings}
+        rendererBackend={rendererRef.current?.getBackendLabel()}
         onStartGame={() => startNewRun(false)}
       />
     );
@@ -925,17 +1427,100 @@ export default function App() {
         onMouseMove={(e) => {
           const engine = engineRef.current;
           if (!engine || statusRef.current !== 'PLAYING') return;
+          if (dragOrbitRef.current.active) {
+            const dx = e.clientX - dragOrbitRef.current.lastX;
+            const dy = e.clientY - dragOrbitRef.current.lastY;
+            dragOrbitRef.current.lastX = e.clientX;
+            dragOrbitRef.current.lastY = e.clientY;
+            if (
+              Math.abs(e.clientX - dragOrbitRef.current.startX) > 3 ||
+              Math.abs(e.clientY - dragOrbitRef.current.startY) > 3
+            ) {
+              dragOrbitRef.current.moved = true;
+            }
+            if (dragOrbitRef.current.mode === 'orbit') {
+              let nextYaw = engine.debugConfig.cameraYawDeg + dx * 0.45;
+              if (nextYaw > 180) nextYaw -= 360;
+              if (nextYaw < -180) nextYaw += 360;
+              const nextPitch = Math.max(0, Math.min(80, engine.debugConfig.cameraPitchDeg + dy * 0.4));
+              engine.debugConfig.cameraYawDeg = nextYaw;
+              engine.debugConfig.cameraPitchDeg = nextPitch;
+            } else {
+              const yawRad = (engine.debugConfig.cameraYawDeg * Math.PI) / 180;
+              const cosY = Math.cos(yawRad);
+              const sinY = Math.sin(yawRad);
+              const zScale = 1 / Math.max(0.35, engine.debugConfig.freeCamZoom);
+              engine.debugConfig.freeCamX -= (dx * cosY + dy * sinY) * zScale;
+              engine.debugConfig.freeCamY -= (-dx * sinY + dy * cosY) * zScale;
+            }
+            return;
+          }
           engine.mouseScreenX = e.clientX;
           engine.mouseScreenY = e.clientY;
           engine.mouseMoved = true;
+          const renderer = rendererRef.current;
+          if (
+            renderer?.isInitialized() &&
+            renderer.screenToWorldGround(
+              e.clientX,
+              e.clientY,
+              window.innerWidth,
+              window.innerHeight,
+              groundScratchRef.current,
+              16
+            )
+          ) {
+            engine.setWorldMouse(groundScratchRef.current.x, groundScratchRef.current.y);
+          }
         }}
         onMouseDown={(e) => {
           const engine = engineRef.current;
           if (!engine || statusRef.current !== 'PLAYING') return;
+          const gfx = graphicsSettingsRef.current;
+          const debugViewportActive =
+            debugOpenRef.current &&
+            engine.debugConfig.enabled &&
+            (engine.debugConfig.freeCamEnabled ||
+              e.altKey ||
+              Math.abs(engine.debugConfig.cameraPitchDeg - gfx.cameraPitchDeg) > 0.5 ||
+              Math.abs(engine.debugConfig.cameraYawDeg - gfx.cameraYawDeg) > 0.5);
+          if (debugViewportActive && (e.button === 2 || (e.button === 0 && e.altKey))) {
+            dragOrbitRef.current = {
+              active: true,
+              mode: 'orbit',
+              startX: e.clientX,
+              startY: e.clientY,
+              lastX: e.clientX,
+              lastY: e.clientY,
+              moved: false,
+            };
+            return;
+          }
+          if (debugOpenRef.current && engine.debugConfig.freeCamEnabled && (e.button === 1 || (e.button === 0 && e.shiftKey))) {
+            dragOrbitRef.current = {
+              active: true,
+              mode: 'pan',
+              startX: e.clientX,
+              startY: e.clientY,
+              lastX: e.clientX,
+              lastY: e.clientY,
+              moved: false,
+            };
+            return;
+          }
           if (e.button === 0) {
             engine.useSelectedItem();
           } else if (e.button === 2) {
             engine.toggleFlashlight();
+          }
+        }}
+        onMouseUp={(e) => {
+          if (dragOrbitRef.current.active) {
+            const wasClick = e.button === 2 && !dragOrbitRef.current.moved;
+            dragOrbitRef.current.active = false;
+            if (wasClick && engineRef.current && statusRef.current === 'PLAYING') {
+              engineRef.current.toggleFlashlight();
+            }
           }
         }}
         onContextMenu={(e) => e.preventDefault()}
@@ -987,6 +1572,15 @@ export default function App() {
           onLoadScenario={handleLoadScenario}
           onUpdateConfig={handleUpdateDebugConfig}
           onStepFrame={handleStepDebugFrame}
+          onFocusDoor={() => {
+            focusDoorInDebug();
+          }}
+          onFocusStair={(dir) => {
+            focusStairInDebug(dir);
+          }}
+          onToggleNearestDoor={() => {
+            toggleNearestDoorInDebug();
+          }}
           onCaptureScreenshot={() => {
             void handleCaptureScreenshot();
           }}
@@ -1000,6 +1594,10 @@ export default function App() {
       {status === 'PAUSED' && engineRef.current && (
         <PauseModal
           seed={engineRef.current.map.seed}
+          graphicsSettings={graphicsSettings}
+          onChangeGraphicsSettings={handleChangeGraphicsSettings}
+          onResetGraphicsSettings={handleResetGraphicsSettings}
+          rendererBackend={rendererRef.current?.getBackendLabel()}
           onResume={() => setStatus('PLAYING')}
           onRestart={() => startNewRun(true)}
           onMainMenu={returnToTitle}

@@ -85,6 +85,8 @@ export interface HullWakeEdge {
   y1: number;
   x2: number;
   y2: number;
+  nx: number;
+  ny: number;
   midYOffset: number;
   phase: number;
 }
@@ -217,7 +219,10 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
             ctx.fillRect(x + ts - 1.5, y, 1.5, ts);
           }
 
-          if (t === 'EXTERIOR_DECK' || t === 'ESCAPE_HELI' || t === 'ESCAPE_LIFEBOAT') {
+          if (
+            deck !== 'DECK_3' &&
+            (t === 'EXTERIOR_DECK' || t === 'ESCAPE_HELI' || t === 'ESCAPE_LIFEBOAT')
+          ) {
             const voidN = map.tiles[ty - 1]?.[tx] === 'VOID';
             const voidS = map.tiles[ty + 1]?.[tx] === 'VOID';
             const voidW = map.tiles[ty]?.[tx - 1] === 'VOID';
@@ -378,78 +383,7 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
         ctx.restore();
       }
 
-      // 4. Bulkheads
-      const armorPattern = procTex.wallArmorPattern;
-      for (let ty = yStartTile; ty <= yEndTile; ty++) {
-        for (let tx = xStartTile; tx <= xEndTile; tx++) {
-          if (map.tiles[ty][tx] !== 'WALL') continue;
-          const x = tx * ts;
-          const y = ty * ts;
-          ctx.fillStyle = armorPattern ?? '#1d2635';
-          ctx.fillRect(x, y, ts, ts);
-
-          const nWall = map.tiles[ty - 1]?.[tx] === 'WALL';
-          const sWall = map.tiles[ty + 1]?.[tx] === 'WALL';
-          const wWall = map.tiles[ty]?.[tx - 1] === 'WALL';
-          const eWall = map.tiles[ty]?.[tx + 1] === 'WALL';
-          const isOuterHull =
-            map.tiles[ty - 1]?.[tx] === 'VOID' ||
-            map.tiles[ty + 1]?.[tx] === 'VOID' ||
-            map.tiles[ty]?.[tx - 1] === 'VOID' ||
-            map.tiles[ty]?.[tx + 1] === 'VOID';
-
-          const rimW = 4;
-          if (!nWall) {
-            ctx.fillStyle = isOuterHull ? '#475569' : '#3b4a62';
-            ctx.fillRect(x, y, ts, rimW);
-            ctx.fillStyle = '#090d14';
-            ctx.fillRect(x, y, ts, 1.2);
-          }
-          if (!sWall) {
-            ctx.fillStyle = '#111722';
-            ctx.fillRect(x, y + ts - rimW, ts, rimW);
-            ctx.fillStyle = '#06090e';
-            ctx.fillRect(x, y + ts - 1.2, ts, 1.2);
-          }
-          if (!wWall) {
-            ctx.fillStyle = isOuterHull ? '#3e4c63' : '#313f55';
-            ctx.fillRect(x, y, rimW, ts);
-            ctx.fillStyle = '#090d14';
-            ctx.fillRect(x, y, 1.2, ts);
-          }
-          if (!eWall) {
-            ctx.fillStyle = '#151c29';
-            ctx.fillRect(x + ts - rimW, y, rimW, ts);
-            ctx.fillStyle = '#06090e';
-            ctx.fillRect(x + ts - 1.2, y, 1.2, ts);
-          }
-
-          if (!nWall && !wWall) {
-            ctx.fillStyle = '#64748b';
-            ctx.fillRect(x + 1, y + 1, rimW - 1, rimW - 1);
-          }
-          if (!nWall && !eWall) {
-            ctx.fillStyle = '#475569';
-            ctx.fillRect(x + ts - rimW, y + 1, rimW - 1, rimW - 1);
-          }
-          if (!sWall && !wWall) {
-            ctx.fillStyle = '#293548';
-            ctx.fillRect(x + 1, y + ts - rimW, rimW - 1, rimW - 1);
-          }
-          if (!sWall && !eWall) {
-            ctx.fillStyle = '#0b0f17';
-            ctx.fillRect(x + ts - rimW, y + ts - rimW, rimW - 1, rimW - 1);
-          }
-
-          if (nWall && sWall && !wWall && !eWall) {
-            ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
-            ctx.fillRect(x + ts * 0.5 - 1, y, 2, ts);
-          } else if (wWall && eWall && !nWall && !sWall) {
-            ctx.fillStyle = 'rgba(148, 163, 184, 0.08)';
-            ctx.fillRect(x, y + ts * 0.5 - 1, ts, 2);
-          }
-        }
-      }
+      // 4. Bulkheads are rendered as 3D extruded geometry in ShipStructure3D (WALL tiles stay alpha=0)
 
       // 5. Static Ship Props (walkable clutter first, then blocking furniture/machinery)
       const drawStaticProp = (prop: ShipProp) => {
@@ -923,7 +857,25 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
       };
 
       for (const p of walkableClutter) drawStaticProp(p);
-      for (const p of blockingStaticProps) drawStaticProp(p);
+
+      // 6. Recessed DOWN stairwell shaft cutouts (alpha = 0 so 3D steps descend cleanly below z = 0)
+      for (const st of map.stairwells) {
+        if (st.deck !== deck || st.direction !== 'DOWN') continue;
+        if (st.x + 28 < xPx || st.x - 28 > xPx + wPx) continue;
+        ctx.clearRect(st.x - 19.5, st.y - 19.5, 39, 39);
+      }
+
+      // 7. Recessed Deck 1 Submarine Moonpool cutout so 3D tank walls & water sit below z = 0
+      if (deck === 'DECK_1') {
+        const subPool = map.props.find((p) => p.kind === 'SUBMARINE_HULL');
+        const poolX = (subPool?.tx ?? 102) * ts;
+        const poolY = (subPool?.ty ?? 92) * ts;
+        const poolW = (subPool?.tw ?? 4) * ts;
+        const poolH = (subPool?.th ?? 6) * ts;
+        if (poolX + poolW >= xPx && poolX <= xPx + wPx) {
+          ctx.clearRect(poolX + 2, poolY + 2, poolW - 4, poolH - 4);
+        }
+      }
 
       ctx.restore();
 
@@ -940,7 +892,32 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
 
   // Extract sea-foam wake edges around outer hull plates
   const wakeEdges: HullWakeEdge[] = [];
+  for (const seg of map.deck3Railings) {
+    const segLen = Math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1);
+    const subCount = Math.max(1, Math.round(segLen / ts));
+    const offset = 8.5;
+    for (let i = 0; i < subCount; i++) {
+      const t0 = i / subCount;
+      const t1 = (i + 1) / subCount;
+      const sx1 = seg.x1 + (seg.x2 - seg.x1) * t0 + seg.nx * offset;
+      const sy1 = seg.y1 + (seg.y2 - seg.y1) * t0 + seg.ny * offset;
+      const sx2 = seg.x1 + (seg.x2 - seg.x1) * t1 + seg.nx * offset;
+      const sy2 = seg.y1 + (seg.y2 - seg.y1) * t1 + seg.ny * offset;
+      wakeEdges.push({
+        deck: 'DECK_3',
+        x1: sx1,
+        y1: sy1,
+        x2: sx2,
+        y2: sy2,
+        nx: seg.nx,
+        ny: seg.ny,
+        midYOffset: seg.ny * 3,
+        phase: sx1 * 0.01 + sy1 * 0.008,
+      });
+    }
+  }
   for (const deck of SHIP_DECK_ORDER) {
+    if (deck === 'DECK_3') continue;
     const bounds = map.deckBounds[deck];
     for (let ty = bounds.y1; ty <= bounds.y2; ty++) {
       for (let tx = 0; tx < map.width; tx++) {
@@ -955,6 +932,8 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
             y1: y - 6,
             x2: x + ts - 2,
             y2: y - 6,
+            nx: 0,
+            ny: -1,
             midYOffset: -3,
             phase,
           });
@@ -966,6 +945,8 @@ export function bakeShipDeckChunks(map: ShipMap, anisotropy: number): BakedShipA
             y1: y + ts + 6,
             x2: x + ts - 2,
             y2: y + ts + 6,
+            nx: 0,
+            ny: 1,
             midYOffset: 3,
             phase: -phase,
           });
@@ -1062,7 +1043,7 @@ export function createDynamicSpriteLibrary(
 
   // Containers
   const containers = {} as DynamicSpriteLibrary['containers'];
-  for (const type of ['CABINET', 'TOOLBOX', 'SUPPLY_CRATE', 'DESK'] as ContainerType[]) {
+  for (const type of ['CABINET', 'TOOLBOX', 'DRAWER', 'DESK'] as ContainerType[]) {
     for (const searched of [0, 1] as const) {
       const s = searched === 1;
       containers[`${type}:${searched}`] = reg(34, 34, (ctx) => {
@@ -1086,7 +1067,7 @@ export function createDynamicSpriteLibrary(
           ctx.strokeStyle = s ? '#475569' : '#fca5a5';
           ctx.lineWidth = 1.2;
           ctx.stroke();
-        } else if (type === 'SUPPLY_CRATE') {
+        } else if (type === 'DRAWER') {
           ctx.fillStyle = 'rgba(0, 0, 0, 0.44)';
           traceRoundedRect(ctx, -11, -11, 26, 26, 3);
           ctx.fill();

@@ -1,4 +1,4 @@
-import { AcousticContext, FloorMaterial } from './types';
+import { AcousticContext, ContainerType, FloorMaterial } from './types';
 
 function clamp(val: number, min: number, max: number): number {
   if (!Number.isFinite(val)) return min;
@@ -1189,6 +1189,45 @@ export class HorrorAudioEngine {
     if (foundItem) {
       this.playItemPickup();
     }
+  }
+
+  public playContainerToggle(type: ContainerType, opening: boolean): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    if (this.shortWhiteNoise) {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.shortWhiteNoise;
+      const band = this.ctx.createBiquadFilter();
+      band.type = 'bandpass';
+      band.frequency.setValueAtTime(
+        type === 'TOOLBOX' ? (opening ? 1320 : 940) : opening ? 760 : 540,
+        now
+      );
+      band.Q.value = type === 'TOOLBOX' ? 2.6 : 1.7;
+      const gain = this.ctx.createGain();
+      gain.gain.setValueAtTime(opening ? 0.085 : 0.068, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + (opening ? 0.16 : 0.12));
+      src.connect(band);
+      band.connect(gain);
+      gain.connect(this.masterGain);
+      src.start(now);
+      src.stop(now + 0.17);
+    }
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type === 'TOOLBOX' ? 'triangle' : 'sine';
+    const startHz = type === 'TOOLBOX' ? (opening ? 340 : 480) : opening ? 165 : 220;
+    const endHz = type === 'TOOLBOX' ? (opening ? 520 : 210) : opening ? 245 : 130;
+    osc.frequency.setValueAtTime(startHz, now);
+    osc.frequency.exponentialRampToValueAtTime(endHz, now + 0.07);
+    gain.gain.setValueAtTime(0.065, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.1);
   }
 
   public playBoltCuttersSnap(): void {

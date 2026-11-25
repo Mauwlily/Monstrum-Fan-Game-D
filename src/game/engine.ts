@@ -1,6 +1,11 @@
 import { HorrorAudioEngine } from './audio';
 import { BruteBrain } from './bruteAi';
 import { applyDebugScenarioToEngine, DebugScenarioMetadata } from './debugScenarios';
+import {
+  DEFAULT_CAMERA_FOV_DEG,
+  DEFAULT_CAMERA_PITCH_DEG,
+  DEFAULT_CAMERA_YAW_DEG,
+} from './graphicsSettings';
 import { getRoomLightFlicker } from './lighting';
 import { generateCargoShip, isTileWalkable } from './mapGen';
 import { findPath } from './pathfinding';
@@ -9,6 +14,8 @@ import {
   BruteState,
   BruteTuningNumbers,
   Container,
+  ContainerType,
+  CursorContainerTarget,
   DebugOverlayConfig,
   DebugScenarioId,
   DifficultyConfig,
@@ -107,6 +114,7 @@ export class MonstrumGameEngine {
     DECK_2: false,
     DECK_1: false,
   };
+  private subMoonpoolBounds: { tx1: number; ty1: number; tx2: number; ty2: number } | null = null;
 
   public debugConfig: DebugOverlayConfig = {
     enabled: false,
@@ -118,6 +126,18 @@ export class MonstrumGameEngine {
     forceVentPeek: false,
     forceDoorPeek: false,
     forceStairPeek: false,
+    renderMode: 'NORMAL',
+    cameraPitchDeg: DEFAULT_CAMERA_PITCH_DEG,
+    cameraYawDeg: DEFAULT_CAMERA_YAW_DEG,
+    cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
+    wireframeStructure: false,
+    hideWallCaps: false,
+    showStructureGizmos: false,
+    debugDeckOverride: 'AUTO',
+    freeCamEnabled: false,
+    freeCamX: 0,
+    freeCamY: 0,
+    freeCamZoom: 1.35,
   };
   public debugScenario: DebugScenarioId | null = null;
   public debugProbePoints: Array<{ x: number; y: number; label: string }> = [];
@@ -126,8 +146,26 @@ export class MonstrumGameEngine {
   public keys: Set<string> = new Set();
   public mouseScreenX = 0;
   public mouseScreenY = 0;
+  public worldMouseX: number | null = null;
+  public worldMouseY: number | null = null;
+  public particleDensity = 1.0;
   public mouseMoved = false;
   public holdingInteract = false;
+  public cursorTarget: CursorContainerTarget | null = null;
+
+  public setWorldMouse(wx: number, wy: number): void {
+    this.worldMouseX = wx;
+    this.worldMouseY = wy;
+  }
+
+  public clearWorldMouse(): void {
+    this.worldMouseX = null;
+    this.worldMouseY = null;
+  }
+
+  public setParticleDensity(density: number): void {
+    this.particleDensity = Math.max(0.25, Math.min(1.5, density));
+  }
 
   constructor(
     difficulty: DifficultyConfig,
@@ -144,6 +182,10 @@ export class MonstrumGameEngine {
     this.callbacks = callbacks;
     this.map = generateCargoShip(seed);
     this.rebuildDoorIndex();
+    const subPool = this.map.props.find((p) => p.kind === 'SUBMARINE_HULL');
+    this.subMoonpoolBounds = subPool
+      ? { tx1: subPool.tx, ty1: subPool.ty, tx2: subPool.tx + subPool.tw - 1, ty2: subPool.ty + subPool.th - 1 }
+      : null;
     this.brain = new BruteBrain(this.map);
 
     this.player = {
@@ -269,8 +311,40 @@ export class MonstrumGameEngine {
   }
 
   public adjustZoom(deltaY: number): void {
+    if (this.debugConfig.enabled && this.debugConfig.freeCamEnabled) {
+      const step = deltaY > 0 ? -0.14 : 0.14;
+      this.debugConfig.freeCamZoom = Math.max(
+        0.35,
+        Math.min(4.5, Math.round((this.debugConfig.freeCamZoom + step) * 100) / 100)
+      );
+      return;
+    }
     const step = deltaY > 0 ? -0.1 : 0.1;
     this.targetZoom = Math.max(1.0, Math.min(2.5, Math.round((this.targetZoom + step) * 100) / 100));
+  }
+
+  public setCursorTarget(next: CursorContainerTarget | null): void {
+    const prev = this.cursorTarget;
+    const same =
+      prev === next ||
+      (prev !== null &&
+        next !== null &&
+        prev.kind === next.kind &&
+        prev.containerId === next.containerId &&
+        prev.inReach === next.inReach &&
+        prev.hasLos === next.hasLos &&
+        prev.item === next.item);
+    this.cursorTarget = next;
+    if (!same) {
+      this.emitHud();
+    }
+  }
+
+  private getContainerLabel(type: ContainerType): string {
+    if (type === 'TOOLBOX') return 'Toolbox';
+    if (type === 'CABINET') return 'Cabinet';
+    if (type === 'DESK') return 'Desk Drawer';
+    return 'Drawer';
   }
 
   public applyDebugScenario(scenarioId: DebugScenarioId): DebugScenarioMetadata {
@@ -342,6 +416,7 @@ export class MonstrumGameEngine {
     this.zoom += (this.targetZoom - this.zoom) * Math.min(1, clampedDt * 12);
 
     this.updateDoors(clampedDt);
+    this.updateContainers(clampedDt);
     this.updateSteamPipes(clampedDt);
     this.updateDroppedLights(clampedDt);
     this.updatePlayer(clampedDt, canvasWidth, canvasHeight);
@@ -454,7 +529,7 @@ export class MonstrumGameEngine {
         const clippedTiles = this.getSteamPipeClippedRangeTiles(pipe);
         const jetLenPx = clippedTiles * ts;
 
-        if (clippedTiles > 0 && Math.random() < 0.72) {
+        if (clippedTiles > 0 && Math.random() < 0.72 * this.particleDensity) {
           const along = Math.random() * jetLenPx;
           const nozzleWorldX = pipe.x - pipe.dirX * (ts * 0.42);
           const nozzleWorldY = pipe.y - pipe.dirY * (ts * 0.42);
@@ -500,7 +575,7 @@ export class MonstrumGameEngine {
         }
       } else if (pipe.warningTimer > 0) {
         pipe.warningTimer -= dt;
-        if (Math.random() < 0.38) {
+        if (Math.random() < 0.38 * this.particleDensity) {
           const nozzleX = pipe.x - pipe.dirX * (ts * 0.44);
           const nozzleY = pipe.y - pipe.dirY * (ts * 0.44);
           this.particles.push({
@@ -540,6 +615,18 @@ export class MonstrumGameEngine {
     }
   }
 
+  private updateContainers(dt: number): void {
+    for (const c of this.map.containers) {
+      const target = c.isOpen ? 1 : 0;
+      if (Math.abs(c.openProgress - target) < 0.002) {
+        c.openProgress = target;
+      } else {
+        const rate = Math.min(1, dt * 10.5);
+        c.openProgress += (target - c.openProgress) * rate;
+      }
+    }
+  }
+
   private updateDroppedLights(dt: number): void {
     for (let i = this.droppedLights.length - 1; i >= 0; i--) {
       const l = this.droppedLights[i];
@@ -550,7 +637,7 @@ export class MonstrumGameEngine {
           l.lureTimer = 1.1;
           this.emitNoise(l.x, l.y, 640, 'rgba(251, 113, 133, 0.5)', true, 0.75);
         }
-        if (Math.random() < 0.5) {
+        if (Math.random() < 0.5 * this.particleDensity) {
           this.particles.push({
             x: l.x + (Math.random() - 0.5) * 6,
             y: l.y + (Math.random() - 0.5) * 6,
@@ -607,12 +694,18 @@ export class MonstrumGameEngine {
       }
     }
 
-    // Aim toward mouse cursor (unprojected with resolution-invariant effective zoom)
+    // Aim toward mouse cursor (uses 3D ground-plane raycast world coords when available, else flat unproject)
     const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
     if (this.mouseMoved && effZoom > 0) {
-      const worldMouseX = this.cameraX + (this.mouseScreenX - canvasWidth / 2) / effZoom;
-      const worldMouseY = this.cameraY + (this.mouseScreenY - canvasHeight / 2) / effZoom;
-      p.angle = Math.atan2(worldMouseY - p.y, worldMouseX - p.x);
+      const aimX =
+        this.worldMouseX !== null
+          ? this.worldMouseX
+          : this.cameraX + (this.mouseScreenX - canvasWidth / 2) / effZoom;
+      const aimY =
+        this.worldMouseY !== null
+          ? this.worldMouseY
+          : this.cameraY + (this.mouseScreenY - canvasHeight / 2) / effZoom;
+      p.angle = Math.atan2(aimY - p.y, aimX - p.x);
     }
 
     // If actively climbing a companionway stair (~0.9s), anchor on hatch & stay vulnerable until completion
@@ -779,6 +872,36 @@ export class MonstrumGameEngine {
     }
 
     p.peekingSpotId = null;
+
+    if (this.debugConfig.enabled && this.debugConfig.freeCamEnabled) {
+      let fx = 0;
+      let fy = 0;
+      if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) fy -= 1;
+      if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) fy += 1;
+      if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) fx -= 1;
+      if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) fx += 1;
+      if (fx !== 0 || fy !== 0) {
+        const len = Math.hypot(fx, fy);
+        fx /= len;
+        fy /= len;
+        const yawRad = (this.debugConfig.cameraYawDeg * Math.PI) / 180;
+        const cosY = Math.cos(yawRad);
+        const sinY = Math.sin(yawRad);
+        // Local up/forward (-Y world when yaw=0) rotates by yaw in Three's XY -> (+sinY, -cosY) in Three -> (+sinY, +cosY)? Let's match screen directions:
+        // Screen right in Three is (cosY, sinY, 0), screen up in Three is (-sinY, cosY, 0) => in 2D world (x, -y_three): right=(cosY, -sinY), down=(sinY, cosY)
+        const worldDx = fx * cosY + fy * sinY;
+        const worldDy = -fx * sinY + fy * cosY;
+        const panSpeed =
+          (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? 680 : 360) /
+          Math.max(0.45, Math.sqrt(this.debugConfig.freeCamZoom));
+        this.debugConfig.freeCamX += worldDx * panSpeed * dt;
+        this.debugConfig.freeCamY += worldDy * panSpeed * dt;
+      }
+      p.isMoving = false;
+      p.sprinting = false;
+      p.noiseLevel = 0;
+      return;
+    }
 
     let mx = 0;
     let my = 0;
@@ -2591,6 +2714,56 @@ export class MonstrumGameEngine {
     }
   }
 
+  private isMoonpoolTile(tx: number, ty: number): boolean {
+    const b = this.subMoonpoolBounds;
+    return b !== null && tx >= b.tx1 && tx <= b.tx2 && ty >= b.ty1 && ty <= b.ty2;
+  }
+
+  private hitsDeck3PerimeterBarrier(
+    wx: number,
+    wy: number,
+    radius: number,
+    fromX?: number,
+    fromY?: number
+  ): boolean {
+    const ts = this.map.tileSize;
+    if (wy >= (this.map.deckBounds.DECK_3.y2 + 1) * ts) return false;
+    const voidPad = radius + 3.2;
+    const vMinTx = Math.floor((wx - voidPad) / ts);
+    const vMaxTx = Math.floor((wx + voidPad) / ts);
+    const vMinTy = Math.floor((wy - voidPad) / ts);
+    const vMaxTy = Math.floor((wy + voidPad) / ts);
+    for (let vty = vMinTy; vty <= vMaxTy; vty++) {
+      for (let vtx = vMinTx; vtx <= vMaxTx; vtx++) {
+        if (
+          vtx < 0 ||
+          vtx >= this.map.width ||
+          vty < 0 ||
+          vty >= this.map.height ||
+          this.map.tiles[vty][vtx] === 'VOID'
+        ) {
+          if (fromX !== undefined && fromY !== undefined) {
+            const tileMinX = vtx * ts;
+            const tileMaxX = (vtx + 1) * ts;
+            const tileMinY = vty * ts;
+            const tileMaxY = (vty + 1) * ts;
+            const dNow = Math.hypot(
+              wx - Math.max(tileMinX, Math.min(wx, tileMaxX)),
+              wy - Math.max(tileMinY, Math.min(wy, tileMaxY))
+            );
+            const dPrev = Math.hypot(
+              fromX - Math.max(tileMinX, Math.min(fromX, tileMaxX)),
+              fromY - Math.max(tileMinY, Math.min(fromY, tileMaxY))
+            );
+            if (dPrev < voidPad && dNow > dPrev) continue;
+          }
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   private collidesAtWallsOnly(wx: number, wy: number, radius: number): boolean {
     const ts = this.map.tileSize;
     const minTx = Math.floor((wx - radius) / ts);
@@ -2601,9 +2774,10 @@ export class MonstrumGameEngine {
     for (let ty = minTy; ty <= maxTy; ty++) {
       for (let tx = minTx; tx <= maxTx; tx++) {
         if (tx < 0 || tx >= this.map.width || ty < 0 || ty >= this.map.height) return true;
-        if (!isTileWalkable(this.map.tiles[ty][tx])) return true;
+        if (!isTileWalkable(this.map.tiles[ty][tx]) || this.isMoonpoolTile(tx, ty)) return true;
       }
     }
+    if (this.hitsDeck3PerimeterBarrier(wx, wy, radius)) return true;
     return false;
   }
 
@@ -2660,7 +2834,7 @@ export class MonstrumGameEngine {
     for (let ty = minTy; ty <= maxTy; ty++) {
       for (let tx = minTx; tx <= maxTx; tx++) {
         if (tx < 0 || tx >= this.map.width || ty < 0 || ty >= this.map.height) return true;
-        if (!isTileWalkable(this.map.tiles[ty][tx])) return true;
+        if (!isTileWalkable(this.map.tiles[ty][tx]) || this.isMoonpoolTile(tx, ty)) return true;
 
         const door = this.doorsByTile.get(ty * this.map.width + tx);
         if (door && !door.isOpen && !door.isBroken) {
@@ -2685,6 +2859,7 @@ export class MonstrumGameEngine {
         }
       }
     }
+    if (this.hitsDeck3PerimeterBarrier(wx, wy, radius, fromX, fromY)) return true;
     return false;
   }
 
@@ -3324,6 +3499,64 @@ export class MonstrumGameEngine {
       return;
     }
 
+    // 2. Cursor-targeted Containers (Drawers, Toolboxes, Cabinets, Desks) & Revealed Items inside
+    if (!cuttersOnly && this.cursorTarget && this.cursorTarget.inReach && this.cursorTarget.hasLos) {
+      const c = this.map.containers.find((item) => item.id === this.cursorTarget!.containerId);
+      if (c) {
+        if (!c.isOpen) {
+          c.isOpen = true;
+          if (!c.searched) {
+            c.searched = true;
+            this.containersSearched += 1;
+          }
+          this.audio.playContainerToggle(c.type, true);
+          const label = this.getContainerLabel(c.type);
+          if (c.item) {
+            this.showToast(`Opened ${label} — aim at the item and press E to take it.`, 2.4);
+          } else {
+            this.showToast(`${label} is empty.`, 1.8);
+          }
+          this.emitHud();
+          return;
+        }
+
+        if (this.cursorTarget.kind === 'CONTAINER_ITEM' && c.item) {
+          const pickedItem = c.item;
+          const meta = ITEM_CATALOG[pickedItem];
+          if (pickedItem === 'BACKPACK') {
+            p.hasBackpack = true;
+            p.maxInventorySlots = 6;
+            c.item = null;
+            this.audio.playBackpackEquip();
+            this.showToast('Equipped Crew Backpack (+2 inventory slots — 6 total)!');
+          } else if (p.inventory.length < p.maxInventorySlots) {
+            p.inventory.push(pickedItem);
+            c.item = null;
+            this.audio.playItemPickup();
+            this.showToast(
+              meta.category === 'LIFEBOAT_PART' ||
+                meta.category === 'HELI_PART' ||
+                meta.category === 'SUBMARINE_PART'
+                ? `Took ${meta.name} (check [J] Journal).`
+                : `Took ${meta.name}.`
+            );
+          } else {
+            this.showToast(
+              `Pack full (${p.inventory.length}/${p.maxInventorySlots}) — drop [G] or use an item first.`
+            );
+          }
+          this.emitHud();
+          return;
+        }
+
+        // Aiming at a non-item spot of an open container closes it
+        c.isOpen = false;
+        this.audio.playContainerToggle(c.type, false);
+        this.emitHud();
+        return;
+      }
+    }
+
     const nearest = this.findNearestInteractable();
     if (!nearest) return;
 
@@ -3504,40 +3737,6 @@ export class MonstrumGameEngine {
           this.emitNoise(dx, dy, 340, 'rgba(148, 163, 184, 0.45)', true, 0.6);
         }
       }
-    } else if (nearest.kind === 'CONTAINER' && !cuttersOnly) {
-      const c = nearest.container;
-      if (c.searched) return;
-      c.searched = true;
-      this.containersSearched += 1;
-      if (c.item) {
-        const meta = ITEM_CATALOG[c.item];
-        if (c.item === 'BACKPACK') {
-          p.hasBackpack = true;
-          p.maxInventorySlots = 6;
-          this.audio.playBackpackEquip();
-          this.showToast('Found Crew Backpack (+2 inventory slots — 6 total)!');
-        } else if (p.inventory.length < p.maxInventorySlots) {
-          p.inventory.push(c.item);
-          this.audio.playContainerSearch(true);
-          this.showToast(
-            meta.category === 'LIFEBOAT_PART' ||
-              meta.category === 'HELI_PART' ||
-              meta.category === 'SUBMARINE_PART'
-              ? `Picked up ${meta.name} (check [J] Journal).`
-              : `Picked up ${meta.name}.`
-          );
-        } else {
-          // Undo searched so player can swap/drop later if inventory full
-          c.searched = false;
-          this.containersSearched -= 1;
-          this.showToast(
-            `Pack full (${p.inventory.length}/${p.maxInventorySlots}) — drop [G] or use an item first.`
-          );
-        }
-      } else {
-        this.audio.playContainerSearch(false);
-        this.showToast('Empty.');
-      }
     } else if (nearest.kind === 'HIDING' && !cuttersOnly) {
       const spot = nearest.spot;
       // Check if Brute currently sees player or is actively chasing nearby with clear LoS
@@ -3587,7 +3786,6 @@ export class MonstrumGameEngine {
     | { kind: 'STAIRWELL'; stairwell: Stairwell; dist: number; prompt: string; sub: string }
     | { kind: 'FUSE_SOCKET'; fuseSocket: FuseSocket; dist: number; prompt: string; sub: string }
     | { kind: 'LIGHT_SWITCH'; lightSwitch: RoomLightSwitch; dist: number; prompt: string; sub: string }
-    | { kind: 'CONTAINER'; container: Container; dist: number; prompt: string; sub: string }
     | { kind: 'PICKUP'; pickup: WorldPickup; dist: number; prompt: string; sub: string }
     | { kind: 'HIDING'; spot: HidingSpot; dist: number; prompt: string; sub: string }
     | { kind: 'PAPER_MAP'; stand: PaperMapStand; dist: number; prompt: string; sub: string }
@@ -3762,24 +3960,7 @@ export class MonstrumGameEngine {
       }
     }
 
-    for (const c of this.map.containers) {
-      if (c.searched) continue;
-      const dist = Math.hypot(c.x - p.x, c.y - p.y);
-      if (
-        dist < 48 &&
-        dist < bestDist &&
-        hasLineOfSightToEntity(this.map, this.doorsByTile, p.x, p.y, c.x, c.y)
-      ) {
-        bestDist = dist;
-        best = {
-          kind: 'CONTAINER',
-          container: c,
-          dist,
-          prompt: `Press E to Search ${c.type.replace('_', ' ')}`,
-          sub: c.room,
-        };
-      }
-    }
+    // Containers require cursor-aim + [E] (handled via engine.cursorTarget — no proximity aura)
 
     for (const s of this.map.hidingSpots) {
       const dist = Math.hypot(s.x - p.x, s.y - p.y);
@@ -4036,6 +4217,34 @@ export class MonstrumGameEngine {
       } else {
         promptText = 'Hiding — Press E to Exit · Hold Q to Peek';
         promptSubtext = 'Holding Q turns on your flashlight and drains battery to see out.';
+      }
+    } else if (
+      this.cursorTarget &&
+      this.cursorTarget.hasLos &&
+      (this.cursorTarget.inReach || !nearest)
+    ) {
+      const c = this.map.containers.find((item) => item.id === this.cursorTarget!.containerId);
+      if (c) {
+        const label = this.getContainerLabel(c.type);
+        if (!this.cursorTarget.inReach) {
+          promptText = `Move Closer to ${c.isOpen ? 'Close' : 'Open'} ${label}`;
+          promptSubtext = 'Aim cursor at drawers or toolboxes within reach and press E.';
+        } else if (!c.isOpen) {
+          promptText = `Press E to Open ${label}`;
+          promptSubtext = c.room;
+        } else if (this.cursorTarget.kind === 'CONTAINER_ITEM' && c.item) {
+          const meta = ITEM_CATALOG[c.item];
+          promptText =
+            c.item === 'BACKPACK'
+              ? 'Press E to Equip Crew Backpack'
+              : `Press E to Take ${meta.name}`;
+          promptSubtext = meta.description;
+        } else {
+          promptText = `Press E to Close ${label}`;
+          promptSubtext = c.item
+            ? 'Aim directly at the item inside and press E to take it.'
+            : `${c.room} · Empty compartment`;
+        }
       }
     }
 

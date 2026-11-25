@@ -17,7 +17,21 @@ export function findPath(
   doors: Door[],
   canSmashLocked = false
 ): Array<{ tx: number; ty: number }> {
-  const { width, height, tiles, deckGrid, stairwells } = map;
+  const { width, height, tiles, deckGrid, stairwells, props } = map;
+  const subPool = props.find((p) => p.kind === 'SUBMARINE_HULL');
+  const isPassableTile = (tx: number, ty: number): boolean => {
+    if (!isTileWalkable(tiles[ty][tx])) return false;
+    if (
+      subPool &&
+      tx >= subPool.tx &&
+      tx < subPool.tx + subPool.tw &&
+      ty >= subPool.ty &&
+      ty < subPool.ty + subPool.th
+    ) {
+      return false;
+    }
+    return true;
+  };
 
   if (
     startTx < 0 ||
@@ -28,7 +42,7 @@ export function findPath(
     goalTx >= width ||
     goalTy < 0 ||
     goalTy >= height ||
-    !isTileWalkable(tiles[goalTy][goalTx])
+    !isPassableTile(goalTx, goalTy)
   ) {
     return [];
   }
@@ -180,11 +194,11 @@ export function findPath(
       const nx = current.tx + dx;
       const ny = current.ty + dy;
       if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
-      if (!isTileWalkable(tiles[ny][nx])) continue;
+      if (!isPassableTile(nx, ny)) continue;
 
       // Prevent diagonal corner-cutting through walls OR closed/locked door frames
       if (dx !== 0 && dy !== 0) {
-        if (!isTileWalkable(tiles[current.ty][nx]) || !isTileWalkable(tiles[ny][current.tx])) {
+        if (!isPassableTile(nx, current.ty) || !isPassableTile(current.tx, ny)) {
           continue;
         }
         const adjDoorA = doorMap.get(current.ty * width + nx);

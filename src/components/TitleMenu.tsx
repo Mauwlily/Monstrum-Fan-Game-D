@@ -14,6 +14,7 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
+import { GraphicsSettings } from '../game/graphicsSettings';
 import {
   BruteTuningNumbers,
   detectDifficultyPreset,
@@ -23,6 +24,7 @@ import {
   GAME_VERSION,
 } from '../game/types';
 import { CrtFeedScene, CrtMonitorFeed } from './CrtMonitorFeed';
+import { GraphicsSettingsPanel } from './GraphicsSettingsPanel';
 
 interface TitleMenuProps {
   difficulty: DifficultyConfig;
@@ -37,6 +39,10 @@ interface TitleMenuProps {
   customTuningActive: boolean;
   onChangeBruteTuning: (next: BruteTuningNumbers) => void;
   onResetBruteTuning: () => void;
+  graphicsSettings: GraphicsSettings;
+  onChangeGraphicsSettings: (next: GraphicsSettings) => void;
+  onResetGraphicsSettings: () => void;
+  rendererBackend?: string;
   onStartGame: () => void;
 }
 
@@ -162,6 +168,10 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
   customTuningActive,
   onChangeBruteTuning,
   onResetBruteTuning,
+  graphicsSettings,
+  onChangeGraphicsSettings,
+  onResetGraphicsSettings,
+  rendererBackend,
   onStartGame,
 }) => {
   const [activeDossier, setActiveDossier] = useState<DossierId>(null);
@@ -695,7 +705,9 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
               resetAllStreaks();
             }}
             className={`relative flex max-h-[90vh] w-full flex-col overflow-hidden rounded-lg border border-slate-700/90 bg-[#0b0f15] shadow-2xl ${
-              activeDossier === 'SETUP' && devModeUnlocked ? 'max-w-4xl' : 'max-w-2xl'
+              activeDossier === 'OPTIONS' || (activeDossier === 'SETUP' && devModeUnlocked)
+                ? 'max-w-4xl'
+                : 'max-w-2xl'
             }`}
           >
             {/* Dossier Header (Pinned) */}
@@ -943,6 +955,13 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                   </button>
                 </div>
 
+                <GraphicsSettingsPanel
+                  settings={graphicsSettings}
+                  onChange={onChangeGraphicsSettings}
+                  onReset={onResetGraphicsSettings}
+                  rendererBackend={rendererBackend}
+                />
+
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4">
                   <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-300">
                     Controls Reference
@@ -1125,12 +1144,12 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4 space-y-1.5 text-slate-400">
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
                     <ShieldAlert className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>v{GAME_VERSION} Highlights (Three.js + TSL Foundation)</span>
+                    <span>v{GAME_VERSION} Highlights (3D Brute &amp; Survivor Rigs)</span>
                   </div>
-                  <p>• Migrated gameplay rendering to Three.js (WebGPU default with TSL WebGL2 fallback) on a 2D orthographic plane.</p>
-                  <p>• Viewport-culled, batched light fans eliminating Master Fuse powered-deck framerate lag.</p>
-                  <p>• Preserved strict #000000 raycasted occlusion, Master Fuse AI, Bolt Cutters, and 6-chain Helicopter.</p>
-                  <p>• Title Security Desk CRT feeds preserved with updated expedition dossier &amp; diagnostics.</p>
+                  <p>• Articulated 34px Survivor in foul-weather marine gear with dynamic crouch drop (~23px), flashlight aim rig, and live Satchel-to-Crew-Backpack swap.</p>
+                  <p>• Towering 44px Armored Furnace Brute with riveted steel pauldrons, molten dorsal/flank/sternum vents, triple-claw gauntlets, hunt lunges, and stunned slump.</p>
+                  <p>• LoS-gated 3D visor eyes and sternum furnace gleams shine out of dark corridors and door keyholes while staying #000000 occluded behind bulkheads.</p>
+                  <p>• Straight top-down &amp; oblique 3D walls, framed hinged doors, and recessed stairwell shafts carried forward from Stage 1.</p>
                 </div>
               </div>
             )}

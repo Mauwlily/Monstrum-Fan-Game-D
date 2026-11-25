@@ -15,6 +15,7 @@ export interface OccluderSegment {
   x2: number;
   y2: number;
   kind: 'WALL' | 'DOOR';
+  segId?: number;
 }
 
 const staticWallSegmentsCache = new WeakMap<ShipMap, OccluderSegment[]>();
@@ -121,6 +122,10 @@ export function getStaticWallSegments(map: ShipMap): OccluderSegment[] {
       }
     }
     flushRun(height);
+  }
+
+  for (let i = 0; i < segments.length; i++) {
+    segments[i].segId = i + 1;
   }
 
   staticWallSegmentsCache.set(map, segments);
@@ -233,6 +238,7 @@ export function getLocalOccluders(
           x2: (tx + 1) * ts,
           y2: cy,
           kind: 'DOOR',
+          segId: 100000 + tileKey,
         });
       } else {
         const cx = (tx + 0.5) * ts;
@@ -242,6 +248,7 @@ export function getLocalOccluders(
           x2: cx,
           y2: (ty + 1) * ts,
           kind: 'DOOR',
+          segId: 100000 + tileKey,
         });
       }
     }
@@ -369,6 +376,13 @@ export function hasLineOfSight(
   return true;
 }
 
+export interface VisibilityVertex {
+  x: number;
+  y: number;
+  segId?: number;
+  hitKind?: 'WALL' | 'DOOR';
+}
+
 /**
  * Computes an exact corner-targeted visibility polygon clipped strictly to the
  * inner edges of walls and closed door slabs.
@@ -383,7 +397,7 @@ export function computeVisibilityPolygon(
   maxDist: number,
   rayCount = 72,
   ignoreDoorTileKey?: number
-): Array<{ x: number; y: number }> {
+): VisibilityVertex[] {
   const pad = map.tileSize;
   const segments = getLocalOccluders(
     map,
@@ -426,7 +440,7 @@ export function computeVisibilityPolygon(
 
   deltas.sort((a, b) => a - b);
 
-  const pts: Array<{ x: number; y: number }> = [];
+  const pts: VisibilityVertex[] = [];
   let lastDelta = -1;
 
   for (let i = 0; i < deltas.length; i++) {
@@ -438,17 +452,22 @@ export function computeVisibilityPolygon(
     const dx = Math.cos(a);
     const dy = Math.sin(a);
     let bestT = maxDist;
+    let bestSeg: OccluderSegment | null = null;
 
     for (let j = 0; j < segments.length; j++) {
-      const t = intersectRaySegment(x, y, dx, dy, bestT, segments[j]);
+      const seg = segments[j];
+      const t = intersectRaySegment(x, y, dx, dy, bestT, seg);
       if (t !== null && t < bestT) {
         bestT = t;
+        bestSeg = seg;
       }
     }
 
     pts.push({
       x: x + dx * bestT,
       y: y + dy * bestT,
+      segId: bestSeg ? (bestSeg.segId ?? -1) : -1,
+      hitKind: bestSeg ? bestSeg.kind : undefined,
     });
   }
 
@@ -620,7 +639,7 @@ export function canBruteSeePoint(
 }
 
 export interface FanMeshData {
-  /** Interleaved (wx, -wy, 0) positions for Three.js world plane */
+  /** Interleaved (wx, -wy, z) positions for Three.js world space */
   positions: Float32Array;
   /** Radial offset (dx, -dy) from light origin for TSL radial falloff */
   radialOffsets: Float32Array;
@@ -628,20 +647,43 @@ export interface FanMeshData {
   version: number;
 }
 
+export interface FanCurtainOptions {
+  wallHeight: number;
+  doorHeight: number;
+  floorZ?: number;
+  pushInwardPx?: number;
+  curtainOnly?: boolean;
+}
+
 /**
- * Triangulates a visibility polygon into a non-indexed triangle fan centered at (ox, oy).
- * Outputs world-space Three.js coordinates (x, -y, 0) and local offsets (x - ox, -(y - oy)).
+ * Triangulates a visibility polygon into a non-indexed triangle fan centered at (ox, oy)
+ * plus optional 3D vertical wall/door illumination curtains along hit occluder segments.
  */
 export function buildVisibilityFanBuffers(
   ox: number,
   oy: number,
-  poly: Array<{ x: number; y: number }>,
+  poly: VisibilityVertex[],
   closedLoop: boolean,
-  prev?: FanMeshData
+  prev?: FanMeshData,
+  curtainOpts?: FanCurtainOptions
 ): FanMeshData {
   const n = poly.length;
   const triCount = n < 2 ? 0 : closedLoop ? n : n - 1;
-  const vertexCount = triCount * 3;
+  const includeFloor = !curtainOpts?.curtainOnly;
+
+  let curtainEdges = 0;
+  if (curtainOpts && curtainOpts.wallHeight > 0) {
+    for (let i = 0; i < triCount; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
+      if (a.segId !== undefined && a.segId > 0 && a.segId === b.segId) {
+        curtainEdges++;
+      }
+    }
+  }
+
+  const floorTris = includeFloor ? triCount : 0;
+  const vertexCount = (floorTris + curtainEdges * 2) * 3;
   const neededFloats3 = vertexCount * 3;
   const neededFloats2 = vertexCount * 2;
 
@@ -657,31 +699,94 @@ export function buildVisibilityFanBuffers(
   let pIdx = 0;
   let rIdx = 0;
   const threeOy = -oy;
+  const floorZ = curtainOpts?.floorZ ?? 0;
 
-  for (let i = 0; i < triCount; i++) {
-    const a = poly[i];
-    const b = poly[(i + 1) % n];
+  if (includeFloor) {
+    for (let i = 0; i < triCount; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
 
-    // Vertex 0: center (ox, oy)
-    positions[pIdx++] = ox;
-    positions[pIdx++] = threeOy;
-    positions[pIdx++] = 0;
-    radialOffsets[rIdx++] = 0;
-    radialOffsets[rIdx++] = 0;
+      // Vertex 0: center (ox, oy)
+      positions[pIdx++] = ox;
+      positions[pIdx++] = threeOy;
+      positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = 0;
+      radialOffsets[rIdx++] = 0;
 
-    // Vertex 1: a (Three.js CCW winding: since +Y is flipped from screen +y, (ox,oy) -> a -> b or b -> a; DoubleSide handles both cleanly, keep consistent winding)
-    positions[pIdx++] = a.x;
-    positions[pIdx++] = -a.y;
-    positions[pIdx++] = 0;
-    radialOffsets[rIdx++] = a.x - ox;
-    radialOffsets[rIdx++] = -(a.y - oy);
+      // Vertex 1: a
+      positions[pIdx++] = a.x;
+      positions[pIdx++] = -a.y;
+      positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = a.x - ox;
+      radialOffsets[rIdx++] = -(a.y - oy);
 
-    // Vertex 2: b
-    positions[pIdx++] = b.x;
-    positions[pIdx++] = -b.y;
-    positions[pIdx++] = 0;
-    radialOffsets[rIdx++] = b.x - ox;
-    radialOffsets[rIdx++] = -(b.y - oy);
+      // Vertex 2: b
+      positions[pIdx++] = b.x;
+      positions[pIdx++] = -b.y;
+      positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = b.x - ox;
+      radialOffsets[rIdx++] = -(b.y - oy);
+    }
+  }
+
+  if (curtainOpts && curtainEdges > 0) {
+    const push = curtainOpts.pushInwardPx ?? 0;
+    for (let i = 0; i < triCount; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
+      if (a.segId === undefined || a.segId <= 0 || a.segId !== b.segId) continue;
+
+      const ch = a.hitKind === 'DOOR' ? curtainOpts.doorHeight : curtainOpts.wallHeight;
+      if (ch <= 0) continue;
+
+      let nx = 0;
+      let ny = 0;
+      if (push !== 0) {
+        const sx = b.x - a.x;
+        const sy = b.y - a.y;
+        const len = Math.hypot(sx, sy);
+        if (len > 1e-4) {
+          nx = -sy / len;
+          ny = sx / len;
+          const dot = nx * (ox - a.x) + ny * (oy - a.y);
+          if (dot < 0) {
+            nx = -nx;
+            ny = -ny;
+          }
+          nx *= push;
+          ny *= push;
+        }
+      }
+
+      const ax = a.x + nx;
+      const ay = -(a.y + ny);
+      const bx = b.x + nx;
+      const by = -(b.y + ny);
+      const rAx = a.x - ox;
+      const rAy = -(a.y - oy);
+      const rBx = b.x - ox;
+      const rBy = -(b.y - oy);
+
+      // Tri 1: (a, 0) -> (b, 0) -> (b, ch)
+      positions[pIdx++] = ax; positions[pIdx++] = ay; positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = rAx; radialOffsets[rIdx++] = rAy;
+
+      positions[pIdx++] = bx; positions[pIdx++] = by; positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = rBx; radialOffsets[rIdx++] = rBy;
+
+      positions[pIdx++] = bx; positions[pIdx++] = by; positions[pIdx++] = ch;
+      radialOffsets[rIdx++] = rBx; radialOffsets[rIdx++] = rBy;
+
+      // Tri 2: (a, 0) -> (b, ch) -> (a, ch)
+      positions[pIdx++] = ax; positions[pIdx++] = ay; positions[pIdx++] = floorZ;
+      radialOffsets[rIdx++] = rAx; radialOffsets[rIdx++] = rAy;
+
+      positions[pIdx++] = bx; positions[pIdx++] = by; positions[pIdx++] = ch;
+      radialOffsets[rIdx++] = rBx; radialOffsets[rIdx++] = rBy;
+
+      positions[pIdx++] = ax; positions[pIdx++] = ay; positions[pIdx++] = ch;
+      radialOffsets[rIdx++] = rAx; radialOffsets[rIdx++] = rAy;
+    }
   }
 
   return {
@@ -700,8 +805,11 @@ interface CachedLightEntry {
   nearbyDoors: Door[];
   doorHash1: number;
   doorHash2: number;
-  poly: Array<{ x: number; y: number }>;
+  poly: VisibilityVertex[];
   fan: FanMeshData;
+  curtainFan?: FanMeshData;
+  warmFan?: FanMeshData;
+  warmCurtainFan?: FanMeshData;
 }
 
 /**
@@ -753,7 +861,9 @@ export class LightPolygonCache {
     x: number,
     y: number,
     range: number,
-    rayCount: number
+    rayCount: number,
+    curtainOpts?: FanCurtainOptions,
+    warmCurtainOpts?: FanCurtainOptions
   ): CachedLightEntry {
     if (this.mapRef !== map) {
       this.mapRef = map;
@@ -775,11 +885,64 @@ export class LightPolygonCache {
     const [h1, h2] = this.hashDoors(nearbyDoors);
 
     if (sameParams && existing.doorHash1 === h1 && existing.doorHash2 === h2) {
+      if (curtainOpts && !existing.curtainFan) {
+        existing.curtainFan = buildVisibilityFanBuffers(
+          x,
+          y,
+          existing.poly,
+          true,
+          undefined,
+          { ...curtainOpts, curtainOnly: true }
+        );
+      }
+      if (warmCurtainOpts && !existing.warmFan) {
+        existing.warmFan = buildVisibilityFanBuffers(
+          x,
+          y,
+          existing.poly,
+          true,
+          undefined,
+          warmCurtainOpts
+        );
+      }
+      if (warmCurtainOpts && !existing.warmCurtainFan) {
+        existing.warmCurtainFan = buildVisibilityFanBuffers(
+          x,
+          y,
+          existing.poly,
+          true,
+          undefined,
+          { ...warmCurtainOpts, curtainOnly: true }
+        );
+      }
       return existing;
     }
 
     const poly = computeVisibilityPolygon(map, doorsByTile, x, y, 0, Math.PI * 2, range, rayCount);
-    const fan = buildVisibilityFanBuffers(x, y, poly, true, existing?.fan);
+    const fan = buildVisibilityFanBuffers(x, y, poly, true, existing?.fan, curtainOpts);
+    const curtainFan = curtainOpts
+      ? buildVisibilityFanBuffers(
+          x,
+          y,
+          poly,
+          true,
+          existing?.curtainFan,
+          { ...curtainOpts, curtainOnly: true }
+        )
+      : undefined;
+    const warmFan = warmCurtainOpts
+      ? buildVisibilityFanBuffers(x, y, poly, true, existing?.warmFan, warmCurtainOpts)
+      : undefined;
+    const warmCurtainFan = warmCurtainOpts
+      ? buildVisibilityFanBuffers(
+          x,
+          y,
+          poly,
+          true,
+          existing?.warmCurtainFan,
+          { ...warmCurtainOpts, curtainOnly: true }
+        )
+      : undefined;
     const next: CachedLightEntry = {
       x,
       y,
@@ -790,6 +953,9 @@ export class LightPolygonCache {
       doorHash2: h2,
       poly,
       fan,
+      curtainFan,
+      warmFan,
+      warmCurtainFan,
     };
     this.entries.set(key, next);
     return next;

@@ -1,6 +1,11 @@
 import React from 'react';
 import { Camera, Eye, Pause, Play, SkipForward, X } from 'lucide-react';
 import { DEBUG_SCENARIOS } from '../game/debugScenarios';
+import {
+  DEFAULT_CAMERA_FOV_DEG,
+  DEFAULT_CAMERA_PITCH_DEG,
+  DEFAULT_CAMERA_YAW_DEG,
+} from '../game/graphicsSettings';
 import { DebugOverlayConfig, DebugScenarioId } from '../game/types';
 
 export interface ProbeReading {
@@ -38,9 +43,20 @@ interface DebugPanelProps {
   onLoadScenario: (id: DebugScenarioId) => void;
   onUpdateConfig: (patch: Partial<DebugOverlayConfig>) => void;
   onStepFrame: () => void;
+  onFocusDoor: () => void;
+  onFocusStair: (dir: 'UP' | 'DOWN') => void;
+  onToggleNearestDoor: () => void;
   onCaptureScreenshot: () => void;
   onRefreshProbes: () => void;
 }
+
+const RENDER_MODES: Array<{ id: DebugOverlayConfig['renderMode']; label: string }> = [
+  { id: 'NORMAL', label: 'Normal' },
+  { id: 'FULLBRIGHT', label: 'Fullbright' },
+  { id: 'LOS_ONLY', label: 'LoS Only' },
+  { id: 'LOS_MASK', label: 'LoS Mask' },
+  { id: 'LIGHT_MASK', label: 'Light Mask' },
+];
 
 export const DebugPanel: React.FC<DebugPanelProps> = ({
   config,
@@ -50,15 +66,18 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
   onLoadScenario,
   onUpdateConfig,
   onStepFrame,
+  onFocusDoor,
+  onFocusStair,
+  onToggleNearestDoor,
   onCaptureScreenshot,
   onRefreshProbes,
 }) => {
   return (
-    <aside className="pointer-events-auto fixed top-0 right-0 bottom-0 z-30 flex w-80 flex-col border-l border-slate-800 bg-[#090d14]/95 text-slate-200 backdrop-blur-sm">
+    <aside className="pointer-events-auto fixed top-0 right-0 bottom-0 z-30 flex w-80 flex-col border-l border-slate-800 bg-[#090d14]/96 text-slate-200">
       <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
         <div>
-          <h2 className="text-sm font-semibold text-slate-100">Live Vision & AI Debug</h2>
-          <p className="text-[11px] text-slate-400">Dummy scenarios · Pixel probe · F9</p>
+          <h2 className="text-sm font-semibold text-slate-100">Live Vision &amp; 3D Debug</h2>
+          <p className="text-[11px] text-slate-400">Free-cam · Shaders · Wireframe · F9</p>
         </div>
         <button
           type="button"
@@ -71,6 +90,276 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
       </div>
 
       <div className="flex-1 space-y-4 overflow-y-auto p-4 text-xs">
+        {/* 3D Camera & Render Mode Inspector */}
+        <section className="space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-slate-400">3D Visual Inspector</span>
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateConfig({
+                  renderMode: 'NORMAL',
+                  cameraPitchDeg: DEFAULT_CAMERA_PITCH_DEG,
+                  cameraYawDeg: DEFAULT_CAMERA_YAW_DEG,
+                  cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
+                  wireframeStructure: false,
+                  hideWallCaps: false,
+                  showStructureGizmos: false,
+                  debugDeckOverride: 'AUTO',
+                  freeCamEnabled: false,
+                })
+              }
+              className="text-[10px] font-medium text-slate-400 hover:text-white cursor-pointer"
+            >
+              Reset View
+            </button>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1">
+            {RENDER_MODES.map((m) => {
+              const active = config.renderMode === m.id;
+              return (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => onUpdateConfig({ renderMode: m.id })}
+                  className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                    active
+                      ? 'border-sky-500/80 bg-sky-500/15 text-sky-200'
+                      : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-5 gap-1">
+            <button
+              type="button"
+              onClick={() =>
+                onUpdateConfig({
+                  cameraPitchDeg: DEFAULT_CAMERA_PITCH_DEG,
+                  cameraYawDeg: DEFAULT_CAMERA_YAW_DEG,
+                  cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
+                })
+              }
+              className={`rounded border px-1 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.cameraPitchDeg === DEFAULT_CAMERA_PITCH_DEG &&
+                config.cameraYawDeg === DEFAULT_CAMERA_YAW_DEG
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              15°
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ cameraPitchDeg: 0, cameraYawDeg: 0 })}
+              className={`rounded border px-1 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.cameraPitchDeg === 0 && config.cameraYawDeg === 0
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Top 0°
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ cameraPitchDeg: 38, cameraYawDeg: 25 })}
+              className={`rounded border px-1 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.cameraPitchDeg === 38
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Iso 38°
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ cameraPitchDeg: 58, cameraYawDeg: -35 })}
+              className={`rounded border px-1 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.cameraPitchDeg === 58
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Low 58°
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ freeCamEnabled: !config.freeCamEnabled })}
+              title="Toggle WASD free-cam pan & right-drag 3D orbit"
+              className={`rounded border px-1 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.freeCamEnabled
+                  ? 'border-emerald-500/70 bg-emerald-500/15 text-emerald-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              FreeCam
+            </button>
+          </div>
+
+          <div className="space-y-1.5 rounded border border-slate-800/90 bg-[#05070b] p-2 text-[10px]">
+            <label className="flex items-center justify-between gap-2">
+              <span className="w-12 text-slate-400">Pitch</span>
+              <input
+                type="range"
+                min={0}
+                max={80}
+                step={1}
+                value={config.cameraPitchDeg}
+                onChange={(e) => onUpdateConfig({ cameraPitchDeg: Number(e.target.value) })}
+                className="h-1 flex-1 accent-amber-400 cursor-pointer"
+              />
+              <span className="w-8 text-right font-mono-num text-slate-200">
+                {Math.round(config.cameraPitchDeg)}°
+              </span>
+            </label>
+            <label className="flex items-center justify-between gap-2">
+              <span className="w-12 text-slate-400">Yaw</span>
+              <input
+                type="range"
+                min={-180}
+                max={180}
+                step={1}
+                value={config.cameraYawDeg}
+                onChange={(e) => onUpdateConfig({ cameraYawDeg: Number(e.target.value) })}
+                className="h-1 flex-1 accent-amber-400 cursor-pointer"
+              />
+              <span className="w-8 text-right font-mono-num text-slate-200">
+                {Math.round(config.cameraYawDeg)}°
+              </span>
+            </label>
+            <label className="flex items-center justify-between gap-2">
+              <span className="w-12 text-slate-400">FOV</span>
+              <input
+                type="range"
+                min={25}
+                max={90}
+                step={1}
+                value={config.cameraFovDeg}
+                onChange={(e) => onUpdateConfig({ cameraFovDeg: Number(e.target.value) })}
+                className="h-1 flex-1 accent-sky-400 cursor-pointer"
+              />
+              <span className="w-8 text-right font-mono-num text-slate-200">
+                {Math.round(config.cameraFovDeg)}°
+              </span>
+            </label>
+            {config.freeCamEnabled && (
+              <label className="flex items-center justify-between gap-2">
+                <span className="w-12 text-slate-400">Zoom</span>
+                <input
+                  type="range"
+                  min={0.35}
+                  max={4.0}
+                  step={0.05}
+                  value={config.freeCamZoom}
+                  onChange={(e) => onUpdateConfig({ freeCamZoom: Number(e.target.value) })}
+                  className="h-1 flex-1 accent-emerald-400 cursor-pointer"
+                />
+                <span className="w-8 text-right font-mono-num text-slate-200">
+                  {config.freeCamZoom.toFixed(1)}x
+                </span>
+              </label>
+            )}
+          </div>
+
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ wireframeStructure: !config.wireframeStructure })}
+              className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.wireframeStructure
+                  ? 'border-fuchsia-500/70 bg-fuchsia-500/15 text-fuchsia-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Wireframe
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ hideWallCaps: !config.hideWallCaps })}
+              className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.hideWallCaps
+                  ? 'border-fuchsia-500/70 bg-fuchsia-500/15 text-fuchsia-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Hide Caps
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ showStructureGizmos: !config.showStructureGizmos })}
+              className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.showStructureGizmos
+                  ? 'border-cyan-500/70 bg-cyan-500/15 text-cyan-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Gizmos
+            </button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1">
+            {(
+              [
+                ['AUTO', 'Auto'],
+                ['DECK_3', 'D3'],
+                ['DECK_2', 'D2'],
+                ['DECK_1', 'D1'],
+              ] as const
+            ).map(([deckId, label]) => (
+              <button
+                key={deckId}
+                type="button"
+                onClick={() => onUpdateConfig({ debugDeckOverride: deckId })}
+                className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                  config.debugDeckOverride === deckId
+                    ? 'border-orange-500/70 bg-orange-500/15 text-orange-200'
+                    : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              onClick={onFocusDoor}
+              className="rounded border border-slate-800 bg-slate-900/70 px-2 py-1 text-[10px] font-medium text-slate-200 hover:border-slate-700 hover:text-white cursor-pointer"
+            >
+              Next Door
+            </button>
+            <button
+              type="button"
+              onClick={onToggleNearestDoor}
+              className="rounded border border-slate-800 bg-slate-900/70 px-2 py-1 text-[10px] font-medium text-slate-200 hover:border-slate-700 hover:text-white cursor-pointer"
+            >
+              Toggle Door
+            </button>
+            <button
+              type="button"
+              onClick={() => onFocusStair('DOWN')}
+              className="rounded border border-slate-800 bg-slate-900/70 px-2 py-1 text-[10px] font-medium text-sky-300 hover:border-sky-500/60 cursor-pointer"
+            >
+              Next Stair ↓
+            </button>
+            <button
+              type="button"
+              onClick={() => onFocusStair('UP')}
+              className="rounded border border-slate-800 bg-slate-900/70 px-2 py-1 text-[10px] font-medium text-amber-300 hover:border-amber-500/60 cursor-pointer"
+            >
+              Next Stair ↑
+            </button>
+          </div>
+        </section>
+
+        <div className="border-t border-slate-800/80" />
+
         {/* Dummy Player Scenarios */}
         <section className="space-y-2">
           <div className="text-[11px] font-semibold text-slate-400">Dummy Player Scenarios</div>

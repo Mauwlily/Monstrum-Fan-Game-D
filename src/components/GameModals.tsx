@@ -1,8 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { ArrowLeft, Sliders } from 'lucide-react';
+import { GraphicsSettings } from '../game/graphicsSettings';
 import { detectDifficultyPreset, DifficultyLevel, GAME_VERSION, RunStats } from '../game/types';
+import { GraphicsSettingsPanel } from './GraphicsSettingsPanel';
 
 interface PauseModalProps {
   seed: number;
+  graphicsSettings: GraphicsSettings;
+  onChangeGraphicsSettings: (next: GraphicsSettings) => void;
+  onResetGraphicsSettings: () => void;
+  rendererBackend?: string;
   onResume: () => void;
   onRestart: () => void;
   onMainMenu: () => void;
@@ -10,39 +17,89 @@ interface PauseModalProps {
 
 export const PauseModal: React.FC<PauseModalProps> = ({
   seed,
+  graphicsSettings,
+  onChangeGraphicsSettings,
+  onResetGraphicsSettings,
+  rendererBackend,
   onResume,
   onRestart,
   onMainMenu,
 }) => {
-  return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/75 px-4 backdrop-blur-sm">
-      <div className="w-full max-w-sm rounded-lg border border-slate-800 bg-[#0d1118] p-6 shadow-2xl">
-        <h2 className="font-display text-2xl font-bold text-slate-100">Game Paused</h2>
-        <p className="mt-1 text-xs text-slate-400 font-mono-num">Vessel Seed: {seed}</p>
+  const [showGraphics, setShowGraphics] = useState(false);
 
-        <div className="mt-6 flex flex-col gap-2.5">
-          <button
-            type="button"
-            onClick={onResume}
-            className="w-full rounded-md bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-orange-500 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Resume
-          </button>
-          <button
-            type="button"
-            onClick={onRestart}
-            className="w-full rounded-md border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Restart Ship
-          </button>
-          <button
-            type="button"
-            onClick={onMainMenu}
-            className="w-full rounded-md border border-slate-800 bg-transparent px-4 py-2.5 text-sm font-medium text-slate-400 transition-colors hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Main Menu
-          </button>
-        </div>
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/82 px-4">
+      <div
+        className={`flex max-h-[90vh] w-full flex-col rounded-lg border border-slate-800 bg-[#0d1118] shadow-2xl ${
+          showGraphics ? 'max-w-3xl' : 'max-w-sm p-6'
+        }`}
+      >
+        {showGraphics ? (
+          <>
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-800 px-6 py-4">
+              <div>
+                <h2 className="font-display text-xl font-bold text-slate-100">Graphics Settings</h2>
+                <p className="mt-0.5 text-xs text-slate-400 font-mono-num">
+                  Live Shader, Camera &amp; HDR1000 Tuning · Vessel Seed {seed}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowGraphics(false)}
+                className="flex items-center gap-1.5 rounded border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 transition-colors hover:border-slate-500 hover:text-white whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                <span>Back</span>
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-6">
+              <GraphicsSettingsPanel
+                settings={graphicsSettings}
+                onChange={onChangeGraphicsSettings}
+                onReset={onResetGraphicsSettings}
+                rendererBackend={rendererBackend}
+              />
+            </div>
+          </>
+        ) : (
+          <>
+            <h2 className="font-display text-2xl font-bold text-slate-100">Game Paused</h2>
+            <p className="mt-1 text-xs text-slate-400 font-mono-num">Vessel Seed: {seed}</p>
+
+            <div className="mt-6 flex flex-col gap-2.5">
+              <button
+                type="button"
+                onClick={onResume}
+                className="w-full rounded-md bg-orange-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-orange-500 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Resume
+              </button>
+              <button
+                type="button"
+                data-testid="pause-graphics-btn"
+                onClick={() => setShowGraphics(true)}
+                className="flex w-full items-center justify-center gap-2 rounded-md border border-amber-500/50 bg-[#121722] px-4 py-2.5 text-sm font-medium text-amber-200 transition-colors hover:border-amber-400 hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Sliders className="h-4 w-4" />
+                <span>Graphics Settings</span>
+              </button>
+              <button
+                type="button"
+                onClick={onRestart}
+                className="w-full rounded-md border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-200 transition-colors hover:bg-slate-800 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Restart Ship
+              </button>
+              <button
+                type="button"
+                onClick={onMainMenu}
+                className="w-full rounded-md border border-slate-800 bg-transparent px-4 py-2.5 text-sm font-medium text-slate-400 transition-colors hover:text-slate-200 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Main Menu
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -82,7 +139,7 @@ export const EndModal: React.FC<EndModalProps> = ({
   const isVictory = outcome === 'VICTORY';
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/82 px-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/84 px-4">
       <div className="w-full max-w-md rounded-lg border border-slate-800 bg-[#0d1118] p-7 shadow-2xl">
         <div className="text-xs font-medium text-slate-400">
           <span className="font-mono-num text-slate-300">v{GAME_VERSION}</span>

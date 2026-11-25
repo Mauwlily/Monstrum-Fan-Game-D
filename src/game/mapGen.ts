@@ -3,6 +3,8 @@ import {
   Container,
   ContainerType,
   CorridorLightFixture,
+  Deck3HullWedge,
+  Deck3RailingSegment,
   Door,
   FloorMaterial,
   FuseSocket,
@@ -233,6 +235,13 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     }
     return true;
   };
+
+  const SUB_POOL_TX = 102;
+  const SUB_POOL_TY = 92;
+  const SUB_POOL_TW = 4;
+  const SUB_POOL_TH = 6;
+  const isMoonpoolTile = (tx: number, ty: number): boolean =>
+    tx >= SUB_POOL_TX && tx < SUB_POOL_TX + SUB_POOL_TW && ty >= SUB_POOL_TY && ty < SUB_POOL_TY + SUB_POOL_TH;
 
   const addDoorway = (
     tx: number,
@@ -1786,7 +1795,11 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   reserveAround(subTx, subTy, 2);
   const subLeverTx = 96;
   const subLeverTy = 92;
-  addProp('SUBMARINE_HULL', 'DECK_1', 101, 92, 4, 6, { blocking: true, room: 'Submarine Bay', roomId: subId });
+  addProp('SUBMARINE_HULL', 'DECK_1', SUB_POOL_TX, SUB_POOL_TY, SUB_POOL_TW, SUB_POOL_TH, {
+    blocking: false,
+    room: 'Submarine Bay',
+    roomId: subId,
+  });
   addProp('FLOODGATE_LEVER', 'DECK_1', subLeverTx, subLeverTy, 1, 1, { blocking: true, room: 'Submarine Bay', roomId: subId });
   reserveAround(subLeverTx, subLeverTy, 1);
 
@@ -3685,6 +3698,32 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     return scored[0]?.c ?? null;
   };
 
+  const resolveOutwardAngle = (tx: number, ty: number, roomId?: number): number => {
+    const dirs: Array<{ dx: number; dy: number; ang: number }> = [
+      { dx: 0, dy: 1, ang: Math.PI * 0.5 },
+      { dx: 0, dy: -1, ang: -Math.PI * 0.5 },
+      { dx: 1, dy: 0, ang: 0 },
+      { dx: -1, dy: 0, ang: Math.PI },
+    ];
+    let bestAng = Math.PI * 0.5;
+    let bestScore = -999;
+    for (const d of dirs) {
+      const oppWalkable = isTileWalkable(tiles[ty - d.dy]?.[tx - d.dx] ?? 'VOID');
+      const fwdTile = tiles[ty + d.dy]?.[tx + d.dx] ?? 'VOID';
+      const fwdWalkable = isTileWalkable(fwdTile);
+      if (!fwdWalkable) continue;
+      let score = !oppWalkable ? 10 : 1;
+      if (tiles[ty - d.dy]?.[tx - d.dx] === 'WALL') score += 4;
+      if (roomId !== undefined && roomIdGrid[ty + d.dy]?.[tx + d.dx] === roomId) score += 2;
+      if (doorKeys.has(key(tx + d.dx, ty + d.dy))) score -= 3;
+      if (score > bestScore) {
+        bestScore = score;
+        bestAng = d.ang;
+      }
+    }
+    return bestAng;
+  };
+
   const fuseSockets: FuseSocket[] = [];
   let fuseSeq = 0;
   for (const rb of rooms) {
@@ -3787,7 +3826,10 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
         room: rb.name,
         roomId: rb.id,
         deck: rb.deck,
-        angle: rng() * Math.PI * 2,
+        angle:
+          sType === 'CARGO_CRATE'
+            ? resolveOutwardAngle(chosen.tx, chosen.ty, rb.id) + (rng() - 0.5) * 0.14
+            : resolveOutwardAngle(chosen.tx, chosen.ty, rb.id),
         checkedFlash: 0,
       });
     }
@@ -3811,7 +3853,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
         room: 'Corridor',
         roomId: CORRIDOR_ID[d],
         deck: d,
-        angle: rng() * Math.PI * 2,
+        angle: resolveOutwardAngle(chosen.tx, chosen.ty, CORRIDOR_ID[d]),
         checkedFlash: 0,
       });
     }
@@ -3826,7 +3868,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
       return 'TOOLBOX';
     }
     if (r === 'Container Bay' || r === 'Cargo Hold' || r === 'Storage Room' || r === 'Forecastle' || r === 'Weather Deck' || r === 'Submarine Bay') {
-      return 'SUPPLY_CRATE';
+      return 'DRAWER';
     }
     return 'CABINET';
   };
@@ -3894,7 +3936,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     for (let y = rb.y1; y <= rb.y2; y++) {
       for (let x = rb.x1; x <= rb.x2; x++) {
         if (x >= bx && x < bx + bw && y >= by && y < by + bh) continue;
-        if (roomIdGrid[y][x] !== rb.id || !isTileWalkable(tiles[y][x])) continue;
+        if (roomIdGrid[y][x] !== rb.id || !isTileWalkable(tiles[y][x]) || isMoonpoolTile(x, y)) continue;
         importantPts.push({ tx: x, ty: y });
         if (reserved.has(key(x, y))) {
           let adjFree = false;
@@ -3907,7 +3949,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
             const nx = x + ox;
             const ny = y + oy;
             if (nx >= bx && nx < bx + bw && ny >= by && ny < by + bh) continue;
-            if (isTileWalkable(tiles[ny]?.[nx] ?? 'VOID')) {
+            if (isTileWalkable(tiles[ny]?.[nx] ?? 'VOID') && !isMoonpoolTile(nx, ny)) {
               adjFree = true;
               break;
             }
@@ -3934,7 +3976,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
         const ny = cur.ty + dy;
         if (nx < rb.x1 - 1 || nx > rb.x2 + 1 || ny < rb.y1 - 1 || ny > rb.y2 + 1) continue;
         if (nx >= bx && nx < bx + bw && ny >= by && ny < by + bh) continue;
-        if (!isTileWalkable(tiles[ny]?.[nx] ?? 'VOID')) continue;
+        if (!isTileWalkable(tiles[ny]?.[nx] ?? 'VOID') || isMoonpoolTile(nx, ny)) continue;
         const inScope =
           roomIdGrid[ny][nx] === rb.id || doors.some((d) => d.tx === nx && d.ty === ny);
         if (!inScope) continue;
@@ -4052,7 +4094,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
   ) => {
     for (let y = ty; y < ty + th; y++) {
       for (let x = tx; x < tx + tw; x++) {
-        if (!isTileWalkable(tiles[y]?.[x] ?? 'VOID')) return false;
+        if (!isTileWalkable(tiles[y]?.[x] ?? 'VOID') || isMoonpoolTile(x, y)) return false;
         if (entityClearanceKeys.has(key(x, y)) || doorKeys.has(key(x, y)) || stairKeys.has(key(x, y))) {
           return false;
         }
@@ -4269,6 +4311,9 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     type: bp.type,
     room: bp.room,
     roomId: bp.roomId,
+    angle: resolveOutwardAngle(bp.tx, bp.ty, bp.roomId),
+    isOpen: false,
+    openProgress: 0,
     searched: false,
     item: assignedItems[idx],
   }));
@@ -4282,7 +4327,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     const tx = Math.floor(wx / tileSize);
     const ty = Math.floor(wy / tileSize);
     if (tx < 0 || tx >= width || ty < 0 || ty >= height) return false;
-    return isTileWalkable(tiles[ty][tx]);
+    return isTileWalkable(tiles[ty][tx]) && !isMoonpoolTile(tx, ty);
   };
   const tryPushBlood = (
     kind: BloodStreak['kind'],
@@ -4384,6 +4429,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
       for (let x = rb.x1; x <= rb.x2; x++) {
         if (
           isTileWalkable(tiles[y]?.[x] ?? 'VOID') &&
+          !isMoonpoolTile(x, y) &&
           roomIdGrid[y]?.[x] === rb.id &&
           !finalDoorByTile.has(key(x, y)) &&
           !stairByTile.has(key(x, y))
@@ -4429,6 +4475,252 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     );
   }
 
+  // =========================================================================
+  // --- 12. Deck 3 Outer Hull Wedges (45° chamfers, bow prow, stern apron) & Pipe Railings ---
+  // =========================================================================
+  const deck3HullWedges: Deck3HullWedge[] = [];
+  const deck3Railings: Deck3RailingSegment[] = [];
+  const coveredEdges = new Set<string>();
+  const edgeKey = (ax: number, ay: number, bx: number, by: number): string => {
+    const rAx = Math.round(ax);
+    const rAy = Math.round(ay);
+    const rBx = Math.round(bx);
+    const rBy = Math.round(by);
+    return rAx < rBx || (rAx === rBx && rAy <= rBy)
+      ? `${rAx},${rAy}-${rBx},${rBy}`
+      : `${rBx},${rBy}-${rAx},${rAy}`;
+  };
+  const markEdge = (ax: number, ay: number, bx: number, by: number) => {
+    coveredEdges.add(edgeKey(ax, ay, bx, by));
+  };
+  const pushOuterRail = (ax: number, ay: number, bx: number, by: number, hintNx: number, hintNy: number) => {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return;
+    let nx = -dy / len;
+    let ny = dx / len;
+    if (nx * hintNx + ny * hintNy < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    deck3Railings.push({
+      x1: ax,
+      y1: ay,
+      x2: bx,
+      y2: by,
+      nx,
+      ny,
+      hasStartPost: true,
+      hasEndPost: true,
+    });
+  };
+
+  const d3Y1 = deckBounds.DECK_3.y1;
+  const d3Y2 = deckBounds.DECK_3.y2;
+  const isD3Hull = (tx: number, ty: number) =>
+    tx >= 0 && tx < width && ty >= d3Y1 && ty <= d3Y2 && tiles[ty][tx] !== 'VOID';
+
+  // A. Concave 45° perimeter hull chamfer wedges (strictly inside adjacent VOID tiles)
+  for (let ty = d3Y1; ty <= d3Y2; ty++) {
+    for (let tx = 0; tx < width; tx++) {
+      if (tiles[ty][tx] !== 'VOID') continue;
+      const up = isD3Hull(tx, ty - 1);
+      const down = isD3Hull(tx, ty + 1);
+      const left = isD3Hull(tx - 1, ty);
+      const right = isD3Hull(tx + 1, ty);
+      const x0 = tx * tileSize;
+      const x1 = (tx + 1) * tileSize;
+      const y0 = ty * tileSize;
+      const y1 = (ty + 1) * tileSize;
+
+      if (right && down && !up && !left) {
+        deck3HullWedges.push({ x0: x1, y0: y1, x1: x1, y1: y0, x2: x0, y2: y1, kind: 'CHAMFER' });
+        markEdge(x1, y0, x1, y1);
+        markEdge(x0, y1, x1, y1);
+        pushOuterRail(x0, y1, x1, y0, -1, -1);
+      } else if (left && down && !up && !right) {
+        deck3HullWedges.push({ x0: x0, y0: y1, x1: x1, y1: y1, x2: x0, y2: y0, kind: 'CHAMFER' });
+        markEdge(x0, y0, x0, y1);
+        markEdge(x0, y1, x1, y1);
+        pushOuterRail(x0, y0, x1, y1, 1, -1);
+      } else if (right && up && !down && !left) {
+        deck3HullWedges.push({ x0: x1, y0: y0, x1: x0, y1: y0, x2: x1, y2: y1, kind: 'CHAMFER' });
+        markEdge(x0, y0, x1, y0);
+        markEdge(x1, y0, x1, y1);
+        pushOuterRail(x0, y0, x1, y1, -1, 1);
+      } else if (left && up && !down && !right) {
+        deck3HullWedges.push({ x0: x0, y0: y0, x1: x0, y1: y1, x2: x1, y2: y0, kind: 'CHAMFER' });
+        markEdge(x0, y0, x1, y0);
+        markEdge(x0, y0, x0, y1);
+        pushOuterRail(x1, y0, x0, y1, 1, 1);
+      }
+    }
+  }
+
+  // B. Tapered Bow Prow ahead of tx = 121 (strictly in x = 122*ts .. 125.35*ts VOID margin)
+  let bowTopTy = d3Y2;
+  let bowBotTy = d3Y1;
+  for (let ty = d3Y1; ty <= d3Y2; ty++) {
+    if (tiles[ty][121] !== 'VOID') {
+      if (ty < bowTopTy) bowTopTy = ty;
+      if (ty > bowBotTy) bowBotTy = ty;
+    }
+  }
+  if (bowTopTy <= bowBotTy) {
+    const xBase = 122 * tileSize;
+    const xShoulder = 123.6 * tileSize;
+    const xTip = Math.min((width - 0.3) * tileSize, 125.35 * tileSize);
+    const yBaseTop = bowTopTy * tileSize;
+    const yBaseBot = (bowBotTy + 1) * tileSize;
+    const yMid = (yBaseTop + yBaseBot) * 0.5;
+    const yShTop = Math.min(yMid - tileSize * 0.85, yBaseTop + tileSize * 1.45);
+    const yShBot = Math.max(yMid + tileSize * 0.85, yBaseBot - tileSize * 1.45);
+
+    deck3HullWedges.push(
+      { x0: xBase, y0: yBaseTop, x1: xBase, y1: yBaseBot, x2: xShoulder, y2: yShBot, kind: 'BOW' },
+      { x0: xBase, y0: yBaseTop, x1: xShoulder, y1: yShBot, x2: xShoulder, y2: yShTop, kind: 'BOW' },
+      { x0: xShoulder, y0: yShTop, x1: xShoulder, y1: yShBot, x2: xTip, y2: yMid, kind: 'BOW' }
+    );
+    for (let ty = bowTopTy; ty <= bowBotTy; ty++) {
+      markEdge(xBase, ty * tileSize, xBase, (ty + 1) * tileSize);
+    }
+    pushOuterRail(xBase, yBaseTop, xShoulder, yShTop, 0.5, -1);
+    pushOuterRail(xShoulder, yShTop, xTip, yMid, 1, -0.5);
+    pushOuterRail(xTip, yMid, xShoulder, yShBot, 1, 0.5);
+    pushOuterRail(xShoulder, yShBot, xBase, yBaseBot, 0.5, 1);
+  }
+
+  // C. Tapered Cruiser Stern Apron behind tx = 4 (strictly in x = 2.85*ts .. 4*ts VOID margin)
+  let sternTopTy = d3Y2;
+  let sternBotTy = d3Y1;
+  for (let ty = d3Y1; ty <= d3Y2; ty++) {
+    if (tiles[ty][4] !== 'VOID') {
+      if (ty < sternTopTy) sternTopTy = ty;
+      if (ty > sternBotTy) sternBotTy = ty;
+    }
+  }
+  if (sternTopTy <= sternBotTy) {
+    const xStern = 4 * tileSize;
+    const xTransom = 2.85 * tileSize;
+    const ySTop = sternTopTy * tileSize;
+    const ySBot = (sternBotTy + 1) * tileSize;
+    const yTrTop = ySTop + tileSize * 2.1;
+    const yTrBot = ySBot - tileSize * 2.1;
+
+    deck3HullWedges.push(
+      { x0: xStern, y0: ySTop, x1: xTransom, y1: yTrTop, x2: xTransom, y2: yTrBot, kind: 'STERN' },
+      { x0: xStern, y0: ySTop, x1: xTransom, y1: yTrBot, x2: xStern, y2: ySBot, kind: 'STERN' }
+    );
+    for (let ty = sternTopTy; ty <= sternBotTy; ty++) {
+      markEdge(xStern, ty * tileSize, xStern, (ty + 1) * tileSize);
+    }
+    pushOuterRail(xStern, ySTop, xTransom, yTrTop, -0.5, -1);
+    pushOuterRail(xTransom, yTrTop, xTransom, yTrBot, -1, 0);
+    pushOuterRail(xTransom, yTrBot, xStern, ySBot, -0.5, 1);
+  }
+
+  // D. Uncovered cardinal outer edges of Deck 3 open decks (merged into straight runs)
+  for (let ty = d3Y1; ty <= d3Y2; ty++) {
+    let nStart = -1;
+    let sStart = -1;
+    const flushH = (endTx: number, isNorth: boolean, startTx: number) => {
+      if (startTx < 0 || endTx <= startTx) return;
+      const wy = (isNorth ? ty : ty + 1) * tileSize;
+      const ny = isNorth ? -1 : 1;
+      deck3Railings.push({
+        x1: startTx * tileSize,
+        y1: wy,
+        x2: endTx * tileSize,
+        y2: wy,
+        nx: 0,
+        ny,
+        hasStartPost: true,
+        hasEndPost: true,
+      });
+    };
+    for (let tx = 0; tx < width; tx++) {
+      const t = tiles[ty][tx];
+      const x0 = tx * tileSize;
+      const x1 = (tx + 1) * tileSize;
+      const wantN =
+        t !== 'VOID' &&
+        t !== 'WALL' &&
+        !isD3Hull(tx, ty - 1) &&
+        !coveredEdges.has(edgeKey(x0, ty * tileSize, x1, ty * tileSize));
+      if (wantN) {
+        if (nStart < 0) nStart = tx;
+      } else {
+        flushH(tx, true, nStart);
+        nStart = -1;
+      }
+
+      const wantS =
+        t !== 'VOID' &&
+        t !== 'WALL' &&
+        !isD3Hull(tx, ty + 1) &&
+        !coveredEdges.has(edgeKey(x0, (ty + 1) * tileSize, x1, (ty + 1) * tileSize));
+      if (wantS) {
+        if (sStart < 0) sStart = tx;
+      } else {
+        flushH(tx, false, sStart);
+        sStart = -1;
+      }
+    }
+    flushH(width, true, nStart);
+    flushH(width, false, sStart);
+  }
+
+  for (let tx = 0; tx < width; tx++) {
+    let wStart = -1;
+    let eStart = -1;
+    const flushV = (endTy: number, isWest: boolean, startTy: number) => {
+      if (startTy < 0 || endTy <= startTy) return;
+      const wx = (isWest ? tx : tx + 1) * tileSize;
+      const nx = isWest ? -1 : 1;
+      deck3Railings.push({
+        x1: wx,
+        y1: startTy * tileSize,
+        x2: wx,
+        y2: endTy * tileSize,
+        nx,
+        ny: 0,
+        hasStartPost: true,
+        hasEndPost: true,
+      });
+    };
+    for (let ty = d3Y1; ty <= d3Y2; ty++) {
+      const t = tiles[ty][tx];
+      const y0 = ty * tileSize;
+      const y1 = (ty + 1) * tileSize;
+      const wantW =
+        t !== 'VOID' &&
+        t !== 'WALL' &&
+        !isD3Hull(tx - 1, ty) &&
+        !coveredEdges.has(edgeKey(tx * tileSize, y0, tx * tileSize, y1));
+      if (wantW) {
+        if (wStart < 0) wStart = ty;
+      } else {
+        flushV(ty, true, wStart);
+        wStart = -1;
+      }
+
+      const wantE =
+        t !== 'VOID' &&
+        t !== 'WALL' &&
+        !isD3Hull(tx + 1, ty) &&
+        !coveredEdges.has(edgeKey((tx + 1) * tileSize, y0, (tx + 1) * tileSize, y1));
+      if (wantE) {
+        if (eStart < 0) eStart = ty;
+      } else {
+        flushV(ty, false, eStart);
+        eStart = -1;
+      }
+    }
+    flushV(d3Y2 + 1, true, wStart);
+    flushV(d3Y2 + 1, false, eStart);
+  }
+
   return {
     width,
     height,
@@ -4453,6 +4745,8 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     corridorLights,
     lockedOnlyRoomIds,
     bloodStreaks,
+    deck3HullWedges,
+    deck3Railings,
     playerSpawn: { x: (pStart.tx + 0.5) * tileSize, y: (pStart.ty + 0.5) * tileSize },
     bruteSpawn: { x: (bStart.tx + 0.5) * tileSize, y: (bStart.ty + 0.5) * tileSize },
     lifeboatPos: {

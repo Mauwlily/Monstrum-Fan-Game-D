@@ -1,6 +1,18 @@
 import * as THREE from 'three/webgpu';
 import type { ProbeReading } from '../components/DebugPanel';
 import { MonstrumGameEngine } from './engine';
+import {
+  ColorGradePreset,
+  DEFAULT_CAMERA_FOV_DEG,
+  DEFAULT_CAMERA_PITCH_DEG,
+  DEFAULT_CAMERA_YAW_DEG,
+  detectHdrCapabilities,
+  getDefaultGraphicsSettings,
+  GraphicsSettings,
+  HdrCapabilities,
+  isHdrOutputActive,
+  ToneMappingMode,
+} from './graphicsSettings';
 import { getRoomLightFlicker } from './lighting';
 import { isTileWalkable } from './mapGen';
 import {
@@ -11,9 +23,13 @@ import {
   SpriteEntry,
 } from './threeAssets';
 import {
+  BloomBlurMaterialBundle,
+  BloomExtractMaterialBundle,
   CompositeMaterialBundle,
   createBakedLightmapQuadMaterial,
   createBatchedRadialFanMaterial,
+  createBloomBlurMaterial,
+  createBloomExtractMaterial,
   createDarknessCompositeMaterial,
   createOceanMaterial,
   createScreenBlitMaterial,
@@ -22,26 +38,39 @@ import {
   createThinRingBatchMaterial,
   createVignetteAndDangerMaterial,
   OceanMaterialBundle,
+  ScreenBlitMaterialBundle,
   StairPortalMaterialBundle,
   VignetteDangerMaterialBundle,
 } from './threeTsl';
+import { ShipStructure3D } from './threeStructure';
+import { ShipCharacters3D } from './threeCharacters';
+import { ShipObjects3D } from './threeObjects';
+import { ShipEscapes3D } from './threeEscapes';
 import {
+  DebugRenderMode,
+  DOOR_HEIGHT_PX,
   getDeckLabel,
+  getViewportResolutionScale,
   RoomLightSwitch,
   RoomName,
   ShipDeck,
   ShipMap,
+  WALL_HEIGHT_RATIO,
 } from './types';
 import {
   buildVisibilityFanBuffers,
   computeVisibilityPolygon,
+  FanCurtainOptions,
   FanMeshData,
   getLocalOccluders,
   getSensesProfile,
   hasLineOfSight,
   hasLineOfSightToEntity,
   LightPolygonCache,
+  VisibilityVertex,
 } from './visibility';
+
+const CAMERA_FOV_DEG = DEFAULT_CAMERA_FOV_DEG;
 
 interface RayLightPoly {
   cacheKey?: string;
@@ -52,7 +81,8 @@ interface RayLightPoly {
   intensity: number;
   sputterAmount: number;
   fan: FanMeshData;
-  poly: Array<{ x: number; y: number }>;
+  warmFan: FanMeshData;
+  poly: VisibilityVertex[];
 }
 
 interface BruteBeamData {
@@ -63,7 +93,8 @@ interface BruteBeamData {
   intensity: number;
   isChasing: boolean;
   fan: FanMeshData;
-  poly: Array<{ x: number; y: number }>;
+  warmFan: FanMeshData;
+  poly: VisibilityVertex[];
 }
 
 interface StairGlowData {
@@ -72,7 +103,8 @@ interface StairGlowData {
   range: number;
   intensity: number;
   fan: FanMeshData;
-  poly: Array<{ x: number; y: number }>;
+  warmFan: FanMeshData;
+  poly: VisibilityVertex[];
 }
 
 interface DoorPeekBeamData {
@@ -81,7 +113,8 @@ interface DoorPeekBeamData {
   range: number;
   isLitSide: boolean;
   fan: FanMeshData;
-  poly: Array<{ x: number; y: number }>;
+  warmFan: FanMeshData;
+  poly: VisibilityVertex[];
 }
 
 interface SpriteSlot {
@@ -97,7 +130,9 @@ class SpritePool {
     private scene: THREE.Object3D,
     private unitQuad: THREE.PlaneGeometry,
     private defaultRenderOrder: number,
-    initialCapacity = 16
+    initialCapacity = 16,
+    private depthTest = false,
+    private zLayering = false
   ) {
     for (let i = 0; i < initialCapacity; i++) {
       this.allocateSlot();
@@ -110,7 +145,7 @@ class SpritePool {
       transparent: true,
       opacity: 1,
       depthWrite: false,
-      depthTest: false,
+      depthTest: this.depthTest,
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(this.unitQuad, mat);
@@ -138,6 +173,8 @@ class SpritePool {
       tint?: number;
       opacity?: number;
       renderOrder?: number;
+      z?: number;
+      billboardQuaternion?: THREE.Quaternion;
     }
   ): void {
     if (this.cursor >= this.slots.length) {
@@ -146,16 +183,23 @@ class SpritePool {
     const slot = this.slots[this.cursor++];
     const sx = (options?.scaleX ?? 1) * entry.w;
     const sy = (options?.scaleY ?? 1) * entry.h;
+    const ro = options?.renderOrder ?? this.defaultRenderOrder;
     if (slot.mat.map !== entry.texture) {
       slot.mat.map = entry.texture;
       slot.mat.needsUpdate = true;
     }
     slot.mat.color.setHex(options?.tint ?? 0xffffff);
     slot.mat.opacity = options?.opacity ?? 1;
-    slot.mesh.position.set(wx, -wy, 0);
-    slot.mesh.rotation.set(0, 0, -(options?.rot2d ?? 0));
+    const zPos =
+      options?.z !== undefined ? options.z : this.zLayering ? 0.14 + ro * 0.08 : 0;
+    slot.mesh.position.set(wx, -wy, zPos);
+    if (options?.billboardQuaternion) {
+      slot.mesh.quaternion.copy(options.billboardQuaternion);
+    } else {
+      slot.mesh.rotation.set(0, 0, -(options?.rot2d ?? 0));
+    }
     slot.mesh.scale.set(sx, sy, 1);
-    slot.mesh.renderOrder = options?.renderOrder ?? this.defaultRenderOrder;
+    slot.mesh.renderOrder = ro;
     slot.mesh.visible = true;
   }
 
@@ -204,7 +248,8 @@ class FanBatch {
   constructor(
     private parent: THREE.Object3D,
     renderOrder: number,
-    initialVerts = 2048
+    initialVerts = 2048,
+    depthTest = false
   ) {
     this.maxVerts = initialVerts;
     this.posArr = new Float32Array(initialVerts * 3);
@@ -230,7 +275,7 @@ class FanBatch {
     this.geom.setAttribute('aColor2', this.col2Attr);
     this.geom.setDrawRange(0, 0);
 
-    this.mat = createBatchedRadialFanMaterial();
+    this.mat = createBatchedRadialFanMaterial(depthTest);
     this.mesh = new THREE.Mesh(this.geom, this.mat);
     this.mesh.visible = false;
     this.mesh.frustumCulled = false;
@@ -242,6 +287,10 @@ class FanBatch {
     this.vertexCursor = 0;
     this.frameHash1 = 2166136261;
     this.frameHash2 = 0x9e3779b9;
+  }
+
+  public setVisible(vis: boolean): void {
+    this.mesh.visible = vis && this.lastUploadedCount > 0;
   }
 
   public clear(): void {
@@ -446,14 +495,18 @@ class DynamicLineBatch {
   private lines: THREE.LineSegments;
   private vertexCursor = 0;
   private maxVerts: number;
+  private zPlane: number;
 
   constructor(
     private parent: THREE.Object3D,
     color: number,
     opacity: number,
     renderOrder: number,
-    initialVerts = 512
+    initialVerts = 512,
+    depthTest = false,
+    zPlane = 0
   ) {
+    this.zPlane = zPlane;
     this.maxVerts = initialVerts;
     this.posArr = new Float32Array(initialVerts * 3);
     this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
@@ -466,7 +519,7 @@ class DynamicLineBatch {
       transparent: opacity < 1,
       opacity,
       depthWrite: false,
-      depthTest: false,
+      depthTest,
     });
     this.lines = new THREE.LineSegments(this.geom, this.mat);
     this.lines.frustumCulled = false;
@@ -501,10 +554,10 @@ class DynamicLineBatch {
     let idx = this.vertexCursor * 3;
     this.posArr[idx++] = x1;
     this.posArr[idx++] = -y1;
-    this.posArr[idx++] = 0;
+    this.posArr[idx++] = this.zPlane;
     this.posArr[idx++] = x2;
     this.posArr[idx++] = -y2;
-    this.posArr[idx++] = 0;
+    this.posArr[idx++] = this.zPlane;
     this.vertexCursor += 2;
   }
 
@@ -748,6 +801,10 @@ export class GameRenderer {
   private sprites: DynamicSpriteLibrary | null = null;
   private bakedShip: BakedShipAssets | null = null;
   private bakedMapRef: ShipMap | null = null;
+  private structure3d: ShipStructure3D | null = null;
+  private characters3d: ShipCharacters3D | null = null;
+  private objects3d: ShipObjects3D | null = null;
+  private escapes3d: ShipEscapes3D | null = null;
   private deckChunkMeshes: Array<{
     deck: ShipDeck;
     mesh: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>;
@@ -758,7 +815,7 @@ export class GameRenderer {
   // Precomputed per-map caches
   private roomFixturesCache = new Map<string, Array<{ x: number; y: number; range: number }>>();
   private lightPolyCache = new LightPolygonCache();
-  private lastPlayerSightPolys: Array<Array<{ x: number; y: number }>> = [];
+  private lastPlayerSightPolys: VisibilityVertex[][] = [];
   private dynamicFansCache = new Map<string, FanMeshData>();
   private lastScreenWidth = 1280;
   private lastScreenHeight = 720;
@@ -776,21 +833,36 @@ export class GameRenderer {
   private vignetteScene = new THREE.Scene();
   private blitScene = new THREE.Scene();
   private readbackScene = new THREE.Scene();
+  private bloomExtractScene = new THREE.Scene();
+  private bloomBlurHScene = new THREE.Scene();
+  private bloomBlurVScene = new THREE.Scene();
   private deckBakeWarmScene = new THREE.Scene();
   private deckBakeMaskScene = new THREE.Scene();
 
   // Cameras
-  private worldCamera = new THREE.OrthographicCamera(-640, 640, 360, -360, 0.1, 500);
-  private portalCamera = new THREE.OrthographicCamera(-200, 200, 200, -200, 0.1, 500);
+  private worldCamera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, 16 / 9, 10, 4000);
+  private portalCamera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, 1, 10, 4000);
   private screenCamera = new THREE.OrthographicCamera(0, 1280, 0, -720, 0.1, 500);
   private ndcCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
   private deckBakeCamera = new THREE.OrthographicCamera(0, 1000, 0, -1000, 0.1, 500);
+
+  // Graphics Settings & HDR Capability State
+  private graphicsSettings: GraphicsSettings = getDefaultGraphicsSettings();
+  private hdrCapabilities: HdrCapabilities = detectHdrCapabilities();
+  private emptyBlackTex = (() => {
+    const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  })();
 
   // Render Targets
   private sceneTarget: THREE.RenderTarget | null = null;
   private losTarget: THREE.RenderTarget | null = null;
   private lightMaskTarget: THREE.RenderTarget | null = null;
   private finalTarget: THREE.RenderTarget | null = null;
+  private bloomATarget: THREE.RenderTarget | null = null;
+  private bloomBTarget: THREE.RenderTarget | null = null;
   private probeTarget: THREE.RenderTarget | null = null;
   private portalTarget: THREE.RenderTarget | null = null;
   private portalLosTarget: THREE.RenderTarget | null = null;
@@ -819,8 +891,14 @@ export class GameRenderer {
   private deckMaskQuad: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicNodeMaterial> | null = null;
   private deckMaskTexNode: ReturnType<typeof createBakedLightmapQuadMaterial>['texNode'] | null = null;
   private deckMaskMat: THREE.MeshBasicNodeMaterial | null = null;
-  private screenBlitMat: THREE.MeshBasicNodeMaterial | null = null;
-  private readbackBlitMat: THREE.MeshBasicNodeMaterial | null = null;
+  private bloomExtractBundle: BloomExtractMaterialBundle | null = null;
+  private bloomBlurHBundle: BloomBlurMaterialBundle | null = null;
+  private bloomBlurVBundle: BloomBlurMaterialBundle | null = null;
+  private bloomExtractMesh: THREE.Mesh | null = null;
+  private bloomBlurHMesh: THREE.Mesh | null = null;
+  private bloomBlurVMesh: THREE.Mesh | null = null;
+  private screenBlitBundle: ScreenBlitMaterialBundle | null = null;
+  private readbackBlitBundle: ScreenBlitMaterialBundle | null = null;
   private screenBlitMesh: THREE.Mesh | null = null;
   private readbackBlitMesh: THREE.Mesh | null = null;
   private compositeQuad: THREE.Mesh | null = null;
@@ -832,8 +910,10 @@ export class GameRenderer {
   private worldSprites: SpritePool | null = null;
   private postSprites: SpritePool | null = null;
   private screenSprites: SpritePool | null = null;
+  private poweredWarmWallFans: FanBatch | null = null;
   private staticWarmFans: FanBatch | null = null;
   private worldWarmFans: FanBatch | null = null;
+  private poweredMaskWallFans: FanBatch | null = null;
   private staticMaskFans: FanBatch | null = null;
   private lightMaskFans: FanBatch | null = null;
   private losFans: FanBatch | null = null;
@@ -859,7 +939,13 @@ export class GameRenderer {
   // Cached small procedural label textures (black probe labels + stair portal badge)
   private textBadgeCache = new Map<string, SpriteEntry>();
   private readbackQueue: Promise<void> = Promise.resolve();
+  private raycaster = new THREE.Raycaster();
+  private pointerNdc = new THREE.Vector2();
+  private raycastScratch: THREE.Intersection[] = [];
   private tmpVec2 = new THREE.Vector2();
+  private tmpVec3 = new THREE.Vector3();
+  private _groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  private _hitVec3 = new THREE.Vector3();
   private tmpColor = new THREE.Color();
 
   private setColorFromCss(target: THREE.Color, css: string): THREE.Color {
@@ -887,6 +973,32 @@ export class GameRenderer {
     return this.isWebGPU ? 'WebGPU' : 'WebGL2';
   }
 
+  public applyGraphicsSettings(settings: GraphicsSettings): void {
+    this.graphicsSettings = { ...settings };
+    this.hdrCapabilities = detectHdrCapabilities();
+  }
+
+  public getDisplayTelemetry(): {
+    backend: string;
+    hdrSupported: boolean;
+    hdrActive: boolean;
+    wideGamutP3: boolean;
+    colorGamut: string;
+  } {
+    const hdrActive = isHdrOutputActive(
+      this.graphicsSettings,
+      this.hdrCapabilities,
+      this.isWebGPU
+    );
+    return {
+      backend: this.getBackendLabel(),
+      hdrSupported: this.hdrCapabilities.displayHdr,
+      hdrActive,
+      wideGamutP3: this.hdrCapabilities.wideGamutP3,
+      colorGamut: this.hdrCapabilities.wideGamutP3 ? 'Display P3 / scRGB' : 'sRGB / Rec.709',
+    };
+  }
+
   public async init(canvas: HTMLCanvasElement): Promise<void> {
     if (this.initialized) return;
     if (this.initPromise) return this.initPromise;
@@ -897,6 +1009,7 @@ export class GameRenderer {
         antialias: false,
         alpha: false,
         powerPreference: 'high-performance',
+        outputType: THREE.HalfFloatType,
       });
       await renderer.init();
 
@@ -914,6 +1027,7 @@ export class GameRenderer {
         device?: GPUDevice;
       };
       this.isWebGPU = Boolean(backend?.isWebGPUBackend);
+      this.hdrCapabilities = detectHdrCapabilities();
       this.anisotropy = Math.min(4, renderer.getMaxAnisotropy?.() ?? 1);
 
       if (this.isWebGPU && backend?.device?.lost) {
@@ -925,13 +1039,14 @@ export class GameRenderer {
       }
 
       this.renderer = renderer;
-      this.worldCamera.position.set(0, 0, 100);
-      this.portalCamera.position.set(0, 0, 100);
+      this.worldCamera.position.set(0, 0, 900);
+      this.portalCamera.position.set(0, 0, 500);
       this.screenCamera.position.set(0, 0, 100);
       this.ndcCamera.position.set(0, 0, 5);
       this.deckBakeCamera.position.set(0, 0, 100);
 
       this.sprites = createDynamicSpriteLibrary(44, this.anisotropy);
+      this.characters3d = new ShipCharacters3D(this.worldScene, this.anisotropy);
 
       // Ocean background quad
       this.oceanBundle = createOceanMaterial();
@@ -941,25 +1056,27 @@ export class GameRenderer {
       this.worldScene.add(this.oceanMesh);
 
       // Pools
-      this.worldSprites = new SpritePool(this.worldScene, this.unitQuadGeom, 8, 96);
-      this.postSprites = new SpritePool(this.postScene, this.unitQuadGeom, 1, 24);
-      this.screenSprites = new SpritePool(this.screenOverlayScene, this.unitQuadGeom, 2, 16);
+      this.worldSprites = new SpritePool(this.worldScene, this.unitQuadGeom, 8, 96, true, true);
+      this.postSprites = new SpritePool(this.postScene, this.unitQuadGeom, 1, 24, false, false);
+      this.screenSprites = new SpritePool(this.screenOverlayScene, this.unitQuadGeom, 2, 16, false, false);
 
-      this.staticWarmFans = new FanBatch(this.worldScene, 19, 16384);
-      this.worldWarmFans = new FanBatch(this.worldScene, 20, 2048);
-      this.staticMaskFans = new FanBatch(this.lightMaskScene, 0, 16384);
-      this.lightMaskFans = new FanBatch(this.lightMaskScene, 1, 2048);
-      this.deckBakeWarmFans = new FanBatch(this.deckBakeWarmScene, 0, 20480);
-      this.deckBakeMaskFans = new FanBatch(this.deckBakeMaskScene, 0, 20480);
-      this.losFans = new FanBatch(this.losScene, 0, 1024);
-      this.portalLosFans = new FanBatch(this.losScene, 0, 1024);
+      this.poweredWarmWallFans = new FanBatch(this.worldScene, 19, 8192, true);
+      this.staticWarmFans = new FanBatch(this.worldScene, 19, 16384, true);
+      this.worldWarmFans = new FanBatch(this.worldScene, 20, 4096, true);
+      this.poweredMaskWallFans = new FanBatch(this.lightMaskScene, 2, 8192, true);
+      this.staticMaskFans = new FanBatch(this.lightMaskScene, 3, 16384, true);
+      this.lightMaskFans = new FanBatch(this.lightMaskScene, 4, 4096, true);
+      this.deckBakeWarmFans = new FanBatch(this.deckBakeWarmScene, 0, 20480, false);
+      this.deckBakeMaskFans = new FanBatch(this.deckBakeMaskScene, 0, 20480, false);
+      this.losFans = new FanBatch(this.losScene, 2, 2048, true);
+      this.portalLosFans = new FanBatch(this.losScene, 2, 2048, true);
 
       // Line batches
-      this.wakeLines = new DynamicLineBatch(this.worldScene, 0x7dd3fc, 0.14, 1, 1024);
-      this.worldLinesDark = new DynamicLineBatch(this.worldScene, 0x090d14, 0.9, 5, 128);
-      this.worldLinesSteel = new DynamicLineBatch(this.worldScene, 0x64748b, 0.95, 5, 128);
-      this.worldLinesLight = new DynamicLineBatch(this.worldScene, 0xe2e8f0, 0.95, 5, 128);
-      this.worldLinesTeal = new DynamicLineBatch(this.worldScene, 0x2dd4bf, 0.45, 4, 256);
+      this.wakeLines = new DynamicLineBatch(this.worldScene, 0x7dd3fc, 0.14, 1, 1024, true, -0.35);
+      this.worldLinesDark = new DynamicLineBatch(this.worldScene, 0x090d14, 0.9, 5, 128, true, 0.48);
+      this.worldLinesSteel = new DynamicLineBatch(this.worldScene, 0x64748b, 0.95, 5, 128, true, 0.48);
+      this.worldLinesLight = new DynamicLineBatch(this.worldScene, 0xe2e8f0, 0.95, 5, 128, true, 0.48);
+      this.worldLinesTeal = new DynamicLineBatch(this.worldScene, 0x2dd4bf, 0.45, 4, 256, true, 0.45);
 
       this.postLinesSlate = new DynamicLineBatch(this.postScene, 0x0f172a, 0.85, 0, 128);
       this.postLinesCyan = new DynamicLineBatch(this.postScene, 0x38bdf8, 0.85, 5, 512);
@@ -971,9 +1088,9 @@ export class GameRenderer {
       this.postLinesWhite = new DynamicLineBatch(this.postScene, 0xf8fafc, 0.72, 2, 128);
       this.ringBatch = new ThinRingBatch(this.postScene, 2, 64);
 
-      this.bruteFovFanBatch = new FanBatch(this.postScene, 4, 512);
+      this.bruteFovFanBatch = new FanBatch(this.postScene, 4, 512, false);
 
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 2) * this.graphicsSettings.resolutionScale;
       this.ensureRenderTargets(window.innerWidth, window.innerHeight, dpr);
       this.ensurePortalTargets(400);
 
@@ -986,13 +1103,14 @@ export class GameRenderer {
   private createRt(
     w: number,
     h: number,
-    type: THREE.TextureDataType
+    type: THREE.TextureDataType,
+    depthBuffer = false
   ): THREE.RenderTarget {
     const rt = new THREE.RenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       type,
-      depthBuffer: false,
+      depthBuffer,
       stencilBuffer: false,
     });
     rt.texture.generateMipmaps = false;
@@ -1016,18 +1134,24 @@ export class GameRenderer {
 
     this.targetPixelW = pw;
     this.targetPixelH = ph;
+    const bw = Math.max(64, Math.floor(pw / 4));
+    const bh = Math.max(64, Math.floor(ph / 4));
 
     this.sceneTarget?.dispose();
     this.losTarget?.dispose();
     this.lightMaskTarget?.dispose();
     this.finalTarget?.dispose();
+    this.bloomATarget?.dispose();
+    this.bloomBTarget?.dispose();
     this.probeTarget?.dispose();
 
-    this.sceneTarget = this.createRt(pw, ph, THREE.HalfFloatType);
-    this.losTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
-    this.lightMaskTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
-    this.finalTarget = this.createRt(pw, ph, THREE.HalfFloatType);
-    this.probeTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
+    this.sceneTarget = this.createRt(pw, ph, THREE.HalfFloatType, true);
+    this.losTarget = this.createRt(pw, ph, THREE.UnsignedByteType, true);
+    this.lightMaskTarget = this.createRt(pw, ph, THREE.HalfFloatType, true);
+    this.finalTarget = this.createRt(pw, ph, THREE.HalfFloatType, false);
+    this.bloomATarget = this.createRt(bw, bh, THREE.HalfFloatType, false);
+    this.bloomBTarget = this.createRt(bw, bh, THREE.HalfFloatType, false);
+    this.probeTarget = this.createRt(pw, ph, THREE.UnsignedByteType, false);
 
     if (!this.compositeBundle) {
       this.compositeBundle = createDarknessCompositeMaterial(
@@ -1053,28 +1177,65 @@ export class GameRenderer {
       this.vignetteBundle.losTexNode.value = this.losTarget.texture;
     }
 
-    if (!this.screenBlitMat) {
-      const blit = createScreenBlitMaterial(this.finalTarget.texture);
-      this.screenBlitMat = blit.material;
-      this.screenBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.screenBlitMat);
-      this.screenBlitMesh.frustumCulled = false;
-      this.blitScene.add(this.screenBlitMesh);
-      (this.screenBlitMesh as unknown as { _texNode: ReturnType<typeof createScreenBlitMaterial>['texNode'] })._texNode = blit.texNode;
+    if (!this.bloomExtractBundle) {
+      this.bloomExtractBundle = createBloomExtractMaterial(this.finalTarget.texture);
+      this.bloomExtractBundle.uThreshold.value = 0.78;
+      this.bloomExtractBundle.uKnee.value = 0.30;
+      this.bloomExtractMesh = new THREE.Mesh(this.ndcQuadGeom, this.bloomExtractBundle.material);
+      this.bloomExtractMesh.frustumCulled = false;
+      this.bloomExtractScene.add(this.bloomExtractMesh);
     } else {
-      const texNode = (this.screenBlitMesh as unknown as { _texNode: ReturnType<typeof createScreenBlitMaterial>['texNode'] })._texNode;
-      texNode.value = this.finalTarget.texture;
+      this.bloomExtractBundle.texNode.value = this.finalTarget.texture;
     }
 
-    if (!this.readbackBlitMat) {
-      const rb = createSrgbReadbackBlitMaterial(this.finalTarget.texture);
-      this.readbackBlitMat = rb.material;
-      this.readbackBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.readbackBlitMat);
+    if (!this.bloomBlurHBundle) {
+      this.bloomBlurHBundle = createBloomBlurMaterial(this.bloomATarget.texture);
+      this.bloomBlurHMesh = new THREE.Mesh(this.ndcQuadGeom, this.bloomBlurHBundle.material);
+      this.bloomBlurHMesh.frustumCulled = false;
+      this.bloomBlurHScene.add(this.bloomBlurHMesh);
+    } else {
+      this.bloomBlurHBundle.texNode.value = this.bloomATarget.texture;
+    }
+    this.bloomBlurHBundle.uTexelStep.value.set(1 / bw, 0);
+
+    if (!this.bloomBlurVBundle) {
+      this.bloomBlurVBundle = createBloomBlurMaterial(this.bloomBTarget.texture);
+      this.bloomBlurVMesh = new THREE.Mesh(this.ndcQuadGeom, this.bloomBlurVBundle.material);
+      this.bloomBlurVMesh.frustumCulled = false;
+      this.bloomBlurVScene.add(this.bloomBlurVMesh);
+    } else {
+      this.bloomBlurVBundle.texNode.value = this.bloomBTarget.texture;
+    }
+    this.bloomBlurVBundle.uTexelStep.value.set(0, 1 / bh);
+
+    if (!this.screenBlitBundle) {
+      this.screenBlitBundle = createScreenBlitMaterial(
+        this.finalTarget.texture,
+        this.bloomATarget.texture,
+        this.losTarget.texture
+      );
+      this.screenBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.screenBlitBundle.material);
+      this.screenBlitMesh.frustumCulled = false;
+      this.blitScene.add(this.screenBlitMesh);
+    } else {
+      this.screenBlitBundle.texNode.value = this.finalTarget.texture;
+      this.screenBlitBundle.bloomTexNode.value = this.bloomATarget.texture;
+      this.screenBlitBundle.losTexNode.value = this.losTarget.texture;
+    }
+
+    if (!this.readbackBlitBundle) {
+      this.readbackBlitBundle = createSrgbReadbackBlitMaterial(
+        this.finalTarget.texture,
+        this.bloomATarget.texture,
+        this.losTarget.texture
+      );
+      this.readbackBlitMesh = new THREE.Mesh(this.ndcQuadGeom, this.readbackBlitBundle.material);
       this.readbackBlitMesh.frustumCulled = false;
       this.readbackScene.add(this.readbackBlitMesh);
-      (this.readbackBlitMesh as unknown as { _texNode: ReturnType<typeof createSrgbReadbackBlitMaterial>['texNode'] })._texNode = rb.texNode;
     } else {
-      const texNode = (this.readbackBlitMesh as unknown as { _texNode: ReturnType<typeof createSrgbReadbackBlitMaterial>['texNode'] })._texNode;
-      texNode.value = this.finalTarget.texture;
+      this.readbackBlitBundle.texNode.value = this.finalTarget.texture;
+      this.readbackBlitBundle.bloomTexNode.value = this.bloomATarget.texture;
+      this.readbackBlitBundle.losTexNode.value = this.losTarget.texture;
     }
   }
 
@@ -1086,8 +1247,8 @@ export class GameRenderer {
     this.portalTarget?.dispose();
     this.portalLosTarget?.dispose();
 
-    this.portalTarget = this.createRt(span, span, THREE.HalfFloatType);
-    this.portalLosTarget = this.createRt(span, span, THREE.UnsignedByteType);
+    this.portalTarget = this.createRt(span, span, THREE.HalfFloatType, true);
+    this.portalLosTarget = this.createRt(span, span, THREE.UnsignedByteType, true);
 
     if (!this.portalBundle) {
       this.portalBundle = createStairPortalMaterial(
@@ -1115,11 +1276,19 @@ export class GameRenderer {
     this.deckChunkMeshes = [];
     this.bakedShip?.dispose();
     this.bakedShip = null;
+    this.structure3d?.dispose();
+    this.structure3d = null;
+    this.objects3d?.dispose();
+    this.objects3d = null;
+    this.escapes3d?.dispose();
+    this.escapes3d = null;
 
     this.roomFixturesCache.clear();
     this.lightPolyCache.clear();
+    this.poweredWarmWallFans?.clear();
     this.staticWarmFans?.clear();
     this.worldWarmFans?.clear();
+    this.poweredMaskWallFans?.clear();
     this.staticMaskFans?.clear();
     this.lightMaskFans?.clear();
     this.dynamicFansCache.clear();
@@ -1133,9 +1302,10 @@ export class GameRenderer {
       const geom = new THREE.PlaneGeometry(ch.wPx, ch.hPx);
       const mat = new THREE.MeshBasicMaterial({
         map: ch.texture,
-        transparent: true,
-        depthWrite: false,
-        depthTest: false,
+        alphaTest: 0.5,
+        transparent: false,
+        depthWrite: true,
+        depthTest: true,
       });
       const mesh = new THREE.Mesh(geom, mat);
       mesh.position.set(ch.xPx + ch.wPx * 0.5, -(ch.yPx + ch.hPx * 0.5), 0);
@@ -1144,6 +1314,16 @@ export class GameRenderer {
       this.worldScene.add(mesh);
       this.deckChunkMeshes.push({ deck: ch.deck, mesh, geom, mat });
     }
+
+    this.structure3d = new ShipStructure3D(
+      map,
+      this.anisotropy,
+      this.worldScene,
+      this.losScene,
+      this.lightMaskScene
+    );
+    this.objects3d = new ShipObjects3D(map, this.worldScene);
+    this.escapes3d = new ShipEscapes3D(map, this.worldScene);
 
     // Precompute all room light fixture coordinates once per map
     for (const sw of map.lightSwitches) {
@@ -1276,17 +1456,225 @@ export class GameRenderer {
     return entry;
   }
 
+  private getMaskCurtainOpts(tileSize: number): FanCurtainOptions {
+    return {
+      wallHeight: tileSize * WALL_HEIGHT_RATIO - 0.15,
+      doorHeight: DOOR_HEIGHT_PX + 0.4,
+      floorZ: 0.04,
+      pushInwardPx: 0,
+    };
+  }
+
+  private getWarmCurtainOpts(tileSize: number): FanCurtainOptions {
+    return {
+      wallHeight: tileSize * WALL_HEIGHT_RATIO - 0.15,
+      doorHeight: DOOR_HEIGHT_PX + 0.4,
+      floorZ: 0.04,
+      pushInwardPx: 0.08,
+    };
+  }
+
   private buildDynamicFan(
     slotKey: string,
     ox: number,
     oy: number,
-    poly: Array<{ x: number; y: number }>,
-    closedLoop: boolean
+    poly: VisibilityVertex[],
+    closedLoop: boolean,
+    curtainOpts?: FanCurtainOptions
   ): FanMeshData {
     const prev = this.dynamicFansCache.get(slotKey);
-    const next = buildVisibilityFanBuffers(ox, oy, poly, closedLoop, prev);
+    const next = buildVisibilityFanBuffers(ox, oy, poly, closedLoop, prev, curtainOpts);
     this.dynamicFansCache.set(slotKey, next);
     return next;
+  }
+
+  public screenToWorldGround(
+    screenX: number,
+    screenY: number,
+    width: number,
+    height: number,
+    out: { x: number; y: number },
+    planeZ = 16
+  ): boolean {
+    if (!this.initialized || width <= 0 || height <= 0) return false;
+    this.pointerNdc.set((screenX / width) * 2 - 1, -(screenY / height) * 2 + 1);
+    this.worldCamera.updateMatrixWorld();
+    this.raycaster.setFromCamera(this.pointerNdc, this.worldCamera);
+    this._groundPlane.setComponents(0, 0, 1, -planeZ);
+    const hit = this.raycaster.ray.intersectPlane(this._groundPlane, this._hitVec3);
+    if (!hit) return false;
+    out.x = hit.x;
+    out.y = -hit.y;
+    return true;
+  }
+
+  public updatePointerHover(
+    engine: MonstrumGameEngine,
+    screenX: number,
+    screenY: number,
+    width: number,
+    height: number
+  ): void {
+    if (!this.initialized || !this.objects3d || width <= 0 || height <= 0) {
+      engine.setCursorTarget(null);
+      return;
+    }
+    const p = engine.player;
+    if (
+      p.hidingSpotId !== null ||
+      p.climbingStairId !== null ||
+      engine.isEnded() ||
+      engine.journalOpen ||
+      p.openPaperMapDeck !== null
+    ) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    const activeDeck = engine.getCurrentDeck();
+    const targets = this.objects3d.getRaycastTargets(activeDeck);
+    if (targets.length === 0) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    this.pointerNdc.set((screenX / width) * 2 - 1, -(screenY / height) * 2 + 1);
+    this.worldCamera.updateMatrixWorld();
+    this.raycaster.setFromCamera(this.pointerNdc, this.worldCamera);
+    this.raycastScratch.length = 0;
+    this.raycaster.intersectObjects(targets, false, this.raycastScratch);
+    if (this.raycastScratch.length === 0) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    // Prioritize revealed 3D item hitboxes inside open containers over the surrounding container box
+    let chosen = this.raycastScratch[0];
+    for (let i = 0; i < this.raycastScratch.length; i++) {
+      if (this.raycastScratch[i].object.userData?.pickKind === 'CONTAINER_ITEM') {
+        chosen = this.raycastScratch[i];
+        break;
+      }
+    }
+
+    const ud = chosen.object.userData as {
+      pickKind?: 'CONTAINER' | 'CONTAINER_ITEM';
+      containerId?: string;
+    };
+    if (!ud.containerId || !ud.pickKind) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    const cont = engine.map.containers.find((c) => c.id === ud.containerId);
+    if (!cont) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    const dist = Math.hypot(cont.x - p.x, cont.y - p.y);
+    const hasLos = hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, cont.x, cont.y);
+    if (!hasLos || dist > 260) {
+      engine.setCursorTarget(null);
+      return;
+    }
+
+    const inReach = dist <= 86;
+    if (ud.pickKind === 'CONTAINER_ITEM' && cont.item !== null && cont.isOpen) {
+      engine.setCursorTarget({
+        kind: 'CONTAINER_ITEM',
+        containerId: cont.id,
+        dist,
+        inReach,
+        hasLos,
+        item: cont.item,
+      });
+    } else {
+      engine.setCursorTarget({
+        kind: 'CONTAINER',
+        containerId: cont.id,
+        dist,
+        inReach,
+        hasLos,
+        item: cont.item ?? undefined,
+      });
+    }
+  }
+
+  public getContainerScreenPoint(
+    containerId: string,
+    targetPart: 'CONTAINER' | 'CONTAINER_ITEM',
+    width: number,
+    height: number
+  ): { x: number; y: number } | null {
+    if (!this.objects3d || width <= 0 || height <= 0) return null;
+    if (!this.objects3d.getContainerWorldHitCenter(containerId, targetPart, this.tmpVec3)) {
+      return null;
+    }
+    this.worldCamera.updateMatrixWorld();
+    this.tmpVec3.project(this.worldCamera);
+    return {
+      x: (this.tmpVec3.x * 0.5 + 0.5) * width,
+      y: (-this.tmpVec3.y * 0.5 + 0.5) * height,
+    };
+  }
+
+  private colorGradeToIndex(grade: ColorGradePreset): number {
+    switch (grade) {
+      case 'AMBER_RUST':
+        return 1;
+      case 'NOIR_CONTRAST':
+        return 2;
+      case 'NEUTRAL':
+        return 3;
+      default:
+        return 0; // COLD_HORROR
+    }
+  }
+
+  private toneMapToIndex(tm: ToneMappingMode): number {
+    switch (tm) {
+      case 'NEUTRAL':
+        return 1;
+      case 'REINHARD_EXTENDED':
+        return 2;
+      default:
+        return 0; // ACES_FILMIC
+    }
+  }
+
+  private syncPostUniforms(
+    bundle: ScreenBlitMaterialBundle,
+    timeSec: number,
+    renderMode: DebugRenderMode,
+    bloomActive: boolean,
+    allowHdrOutput: boolean
+  ): void {
+    const gfx = this.graphicsSettings;
+    const inspectionBypass = renderMode !== 'NORMAL';
+    bundle.bloomTexNode.value =
+      bloomActive && this.bloomATarget ? this.bloomATarget.texture : this.emptyBlackTex;
+    bundle.uBloomIntensity.value =
+      inspectionBypass || !bloomActive ? 0 : gfx.bloomIntensity;
+    bundle.uExposure.value = inspectionBypass ? 1.0 : 1.06;
+    bundle.uToneMappingMode.value = inspectionBypass
+      ? 1
+      : this.toneMapToIndex(gfx.toneMapping);
+    bundle.uColorGradeMode.value = inspectionBypass
+      ? 3
+      : this.colorGradeToIndex(gfx.colorGrade);
+    bundle.uFilmGrain.value = inspectionBypass ? 0 : gfx.filmGrain;
+    bundle.uTime.value = timeSec;
+
+    const hdrOn = !inspectionBypass && allowHdrOutput;
+    bundle.uHdrActive.value = hdrOn ? 1 : 0;
+    bundle.uPaperWhiteScale.value = hdrOn
+      ? Math.max(0.35, gfx.hdrPaperWhiteNits / 203)
+      : 1.0;
+    bundle.uHdrPeakRatio.value = hdrOn
+      ? Math.max(1.0, gfx.hdrPeakNits / Math.max(80, gfx.hdrPaperWhiteNits))
+      : 1.0;
+    bundle.uBypassLosBloomGate.value = inspectionBypass ? 1 : 0;
   }
 
   public render(
@@ -1301,35 +1689,67 @@ export class GameRenderer {
     this.lastScreenWidth = width;
     this.lastScreenHeight = height;
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const gfx = this.graphicsSettings;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * gfx.resolutionScale;
     this.ensureRenderTargets(width, height, dpr);
     this.ensureMapBaked(engine.map);
 
     const renderer = this.renderer;
-    const shakeX = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
-    const shakeY = engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake : 0;
-    const zoom = engine.getEffectiveZoom(width, height);
-    const camWorldX = engine.cameraX - shakeX / zoom;
-    const camWorldY = engine.cameraY - shakeY / zoom;
+    const dbg = engine.debugConfig;
+    const debugActive = dbg.enabled;
+    const freeCam = debugActive && dbg.freeCamEnabled;
+    const shakeX = engine.screenShake > 0 && !freeCam ? (Math.random() - 0.5) * engine.screenShake : 0;
+    const shakeY = engine.screenShake > 0 && !freeCam ? (Math.random() - 0.5) * engine.screenShake : 0;
+    const zoom = freeCam
+      ? Math.max(0.25, dbg.freeCamZoom * getViewportResolutionScale(width, height))
+      : engine.getEffectiveZoom(width, height);
+    const camWorldX = freeCam ? dbg.freeCamX : engine.cameraX - shakeX / zoom;
+    const camWorldY = freeCam ? dbg.freeCamY : engine.cameraY - shakeY / zoom;
     const viewCenterX = width / 2 + shakeX;
     const viewCenterY = height / 2 + shakeY;
 
+    const baseFov = gfx.cameraFovDeg ?? DEFAULT_CAMERA_FOV_DEG;
+    const basePitch = gfx.cameraPitchDeg ?? DEFAULT_CAMERA_PITCH_DEG;
+    const baseYaw = gfx.cameraYawDeg ?? DEFAULT_CAMERA_YAW_DEG;
+    const fovDeg = THREE.MathUtils.clamp(debugActive ? dbg.cameraFovDeg : baseFov, 25, 92);
+    const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(fovDeg * 0.5));
+    const pitchRad = THREE.MathUtils.degToRad(
+      THREE.MathUtils.clamp(debugActive ? dbg.cameraPitchDeg : basePitch, 0, 82)
+    );
+    const yawRad = THREE.MathUtils.degToRad(debugActive ? dbg.cameraYawDeg : baseYaw);
+
     const halfW = width / (2 * zoom);
     const halfH = height / (2 * zoom);
-    this.worldCamera.left = -halfW;
-    this.worldCamera.right = halfW;
-    this.worldCamera.top = halfH;
-    this.worldCamera.bottom = -halfH;
-    this.worldCamera.position.set(camWorldX, -camWorldY, 100);
+    const camZ = halfH / Math.max(0.08, tanHalfFov);
+    if (this.worldCamera.fov !== fovDeg) {
+      this.worldCamera.fov = fovDeg;
+    }
+    this.worldCamera.aspect = width / Math.max(1, height);
+    this.worldCamera.far = Math.max(4000, camZ * 4.5);
+    const orbitR = camZ * Math.sin(pitchRad);
+    const orbitZ = camZ * Math.cos(pitchRad);
+    this.worldCamera.position.set(
+      camWorldX + Math.sin(yawRad) * orbitR,
+      -camWorldY - Math.cos(yawRad) * orbitR,
+      orbitZ
+    );
+    this.worldCamera.up.set(-Math.sin(yawRad), Math.cos(yawRad), 0);
+    this.worldCamera.lookAt(camWorldX, -camWorldY, 0);
     this.worldCamera.updateProjectionMatrix();
+
+    const tiltExpand = pitchRad > 0.01 ? 1 + Math.tan(pitchRad) * 1.45 : 1;
+    const cullHalfW = halfW * tiltExpand;
+    const cullHalfH = halfH * tiltExpand;
 
     if (this.oceanBundle && this.oceanMesh) {
       this.oceanBundle.uTime.value = timeSec;
-      this.oceanMesh.position.set(camWorldX, -camWorldY, 0);
-      this.oceanMesh.scale.set(halfW * 2.4, halfH * 2.4, 1);
+      const oceanScale = ((camZ + 45) / Math.max(1, camZ)) * Math.max(1, tiltExpand * 1.15);
+      this.oceanMesh.position.set(camWorldX, -camWorldY, -45);
+      this.oceanMesh.scale.set(halfW * 2.5 * oceanScale, halfH * 2.5 * oceanScale, 1);
     }
 
     const activeDeck = engine.getCurrentDeck();
+    const renderDeck = debugActive && dbg.debugDeckOverride !== 'AUTO' ? dbg.debugDeckOverride : activeDeck;
     const incomingStairId = engine.getBruteIncomingStairDestId();
 
     const peekStair =
@@ -1342,31 +1762,49 @@ export class GameRenderer {
       ? engine.map.stairwells.find((s) => s.id === peekStair.targetStairId)
       : undefined;
 
-    const activeDeckPowered = engine.poweredDecks[activeDeck];
-    if (activeDeckPowered) {
-      this.ensureDeckPoweredLightmap(engine, activeDeck);
+    const renderDeckPowered = engine.poweredDecks[renderDeck];
+    if (renderDeckPowered) {
+      this.ensureDeckPoweredLightmap(engine, renderDeck);
     }
 
-    // Precompute raycasted lighting polygons (skipped on activeDeck when pre-baked by Master Fuse!)
+    // Precompute raycasted lighting polygons (skipped on renderDeck when pre-baked by Master Fuse!)
     const litRoomPolys = this.computeLitRoomPolygons(
       engine,
       timeSec,
-      activeDeck,
+      renderDeck,
       camWorldX,
       camWorldY,
-      halfW,
-      halfH,
+      cullHalfW,
+      cullHalfH,
       peekDest,
-      activeDeckPowered
+      renderDeckPowered
     );
     const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec);
     const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec);
     const doorPeekData = this.computeDoorPeekBeam(engine);
+    const activePeekDoorId = doorPeekData ? engine.player.peekingDoorId : null;
+
+    this.structure3d?.setDebugVisualOptions(
+      debugActive && dbg.wireframeStructure,
+      debugActive && dbg.hideWallCaps
+    );
+    this.characters3d?.setDebugWireframe(debugActive && dbg.wireframeStructure);
+    this.structure3d?.updateForFrame(
+      engine,
+      renderDeck,
+      camWorldX,
+      camWorldY,
+      cullHalfW + 140,
+      cullHalfH + 140,
+      incomingStairId,
+      timeSec,
+      activePeekDoorId
+    );
 
     // 1. Populate & render WORLD SCENE -> sceneTarget
     this.populateWorldScene(
       engine,
-      activeDeck,
+      renderDeck,
       camWorldX,
       camWorldY,
       width,
@@ -1378,7 +1816,9 @@ export class GameRenderer {
       bruteBeam,
       stairGlow,
       doorPeekData,
-      true
+      true,
+      cullHalfW,
+      cullHalfH
     );
 
     renderer.autoClear = true;
@@ -1395,7 +1835,7 @@ export class GameRenderer {
       doorPeekData
     );
     this.lastPlayerSightPolys = sightPolys;
-    this.populateLosScene(sightPolys, engine.player.x, engine.player.y);
+    this.populateLosScene(sightPolys, engine.player.x, engine.player.y, engine.map.tileSize);
     renderer.setClearColor(0x000000, 1);
     renderer.setRenderTarget(this.losTarget);
     renderer.render(this.losScene, this.worldCamera);
@@ -1403,6 +1843,7 @@ export class GameRenderer {
     // 3. Populate & render LIGHT MASK -> lightMaskTarget
     this.populateLightMaskScene(
       engine,
+      renderDeck,
       timeSec,
       litRoomPolys,
       bruteBeam,
@@ -1413,20 +1854,43 @@ export class GameRenderer {
     renderer.setRenderTarget(this.lightMaskTarget);
     renderer.render(this.lightMaskScene, this.worldCamera);
 
-    // 4. Composite scene * (los * light) -> finalTarget
+    // 4. Composite scene * (los * light) + Wall Contact AO -> finalTarget
+    const renderMode: DebugRenderMode = debugActive ? dbg.renderMode : 'NORMAL';
+    if (this.compositeBundle) {
+      const modeVal =
+        renderMode === 'FULLBRIGHT'
+          ? 1
+          : renderMode === 'LOS_ONLY'
+            ? 2
+            : renderMode === 'LOS_MASK'
+              ? 3
+              : renderMode === 'LIGHT_MASK'
+                ? 4
+                : 0;
+      this.compositeBundle.uMode.value = modeVal;
+      this.compositeBundle.uAoStrength.value =
+        gfx.aoQuality === 'OFF' ? 0 : gfx.aoQuality === 'LOW' ? 0.5 : 1.0;
+      this.compositeBundle.uTexelStep.value.set(
+        1 / Math.max(1, this.targetPixelW),
+        1 / Math.max(1, this.targetPixelH)
+      );
+    }
     renderer.setRenderTarget(this.finalTarget);
     renderer.render(this.compositeScene, this.ndcCamera);
 
     // 5. Post-darkness perceptual overlays (switch LEDs, stair beacons, Brute eyes, ripples, halo, debug)
     this.populatePostScene(
       engine,
+      renderDeck,
       width,
       height,
       zoom,
       camWorldX,
       camWorldY,
       timeSec,
-      incomingStairId
+      incomingStairId,
+      cullHalfW,
+      cullHalfH
     );
     renderer.autoClear = false;
     renderer.render(this.postScene, this.worldCamera);
@@ -1464,13 +1928,46 @@ export class GameRenderer {
       renderer.render(this.screenOverlayScene, this.screenCamera);
     }
 
-    // 7. Screen vignette & LoS-clipped danger / steam condensation fog
-    this.updateVignetteUniforms(engine, width, height, timeSec);
-    renderer.setRenderTarget(this.finalTarget);
-    renderer.autoClear = false;
-    renderer.render(this.vignetteScene, this.ndcCamera);
+    // 7. Screen vignette & LoS-clipped danger / steam condensation fog (skipped in non-normal debug view modes)
+    if (renderMode === 'NORMAL') {
+      this.updateVignetteUniforms(engine, width, height, timeSec);
+      renderer.setRenderTarget(this.finalTarget);
+      renderer.autoClear = false;
+      renderer.render(this.vignetteScene, this.ndcCamera);
+    }
 
-    // 8. Final screen blit -> canvas (null)
+    // 8. Half-Float Bloom Extraction & Separable Gaussian Blur (quarter resolution)
+    const bloomActive =
+      renderMode === 'NORMAL' && gfx.bloomEnabled && gfx.bloomIntensity > 0.005;
+    if (
+      bloomActive &&
+      this.bloomATarget &&
+      this.bloomBTarget &&
+      this.bloomExtractBundle &&
+      this.bloomBlurHBundle &&
+      this.bloomBlurVBundle
+    ) {
+      renderer.autoClear = true;
+      renderer.setClearColor(0x000000, 1);
+      renderer.setRenderTarget(this.bloomATarget);
+      renderer.render(this.bloomExtractScene, this.ndcCamera);
+
+      renderer.setRenderTarget(this.bloomBTarget);
+      renderer.render(this.bloomBlurHScene, this.ndcCamera);
+
+      renderer.setRenderTarget(this.bloomATarget);
+      renderer.render(this.bloomBlurVScene, this.ndcCamera);
+    }
+
+    // 9. Color Grade + ACES/Neutral/Reinhard Tone Mapping + HDR1000 Peak/PaperWhite + Film Grain -> canvas (null)
+    const hdrActive = isHdrOutputActive(gfx, this.hdrCapabilities, this.isWebGPU);
+    if (this.screenBlitBundle) {
+      this.syncPostUniforms(this.screenBlitBundle, timeSec, renderMode, bloomActive, hdrActive);
+    }
+    if (this.readbackBlitBundle) {
+      this.syncPostUniforms(this.readbackBlitBundle, timeSec, renderMode, bloomActive, false);
+    }
+
     renderer.autoClear = true;
     renderer.setRenderTarget(null);
     renderer.render(this.blitScene, this.ndcCamera);
@@ -1496,7 +1993,9 @@ export class GameRenderer {
     bruteBeam: BruteBeamData | null,
     stairGlow: StairGlowData | null,
     doorPeekData: DoorPeekBeamData | null,
-    includePlayer: boolean
+    includePlayer: boolean,
+    cullHalfW?: number,
+    cullHalfH?: number
   ): void {
     const sp = this.sprites!;
     const ws = this.worldSprites!;
@@ -1513,16 +2012,18 @@ export class GameRenderer {
     this.worldLinesTeal!.beginFrame();
 
     this.setDeckChunksVisible(renderDeck);
+    const poweredDeckVisible =
+      renderDeck === this.bakedLightDeck && engine.poweredDecks[renderDeck];
     if (this.deckWarmQuad) {
-      this.deckWarmQuad.visible =
-        renderDeck === this.bakedLightDeck && engine.poweredDecks[renderDeck];
+      this.deckWarmQuad.visible = poweredDeckVisible;
     }
+    this.poweredWarmWallFans?.setVisible(poweredDeckVisible);
 
     const ts = engine.map.tileSize;
-    const halfW = width / (2 * zoom) + 140;
-    const halfH = height / (2 * zoom) + 140;
+    const halfW = (cullHalfW ?? width / (2 * zoom)) + 140;
+    const halfH = (cullHalfH ?? height / (2 * zoom)) + 140;
 
-    // Hull-hugging sea-foam wake on active deck
+    // Hull-hugging sea-foam wake on active deck (follows curved Deck 3 bow/stern/chamfer normals)
     if (this.bakedShip) {
       const bounds = engine.map.deckBounds[renderDeck];
       if (
@@ -1531,67 +2032,73 @@ export class GameRenderer {
       ) {
         for (const we of this.bakedShip.wakeEdges) {
           if (we.deck !== renderDeck) continue;
+          const minEx = Math.min(we.x1, we.x2);
+          const maxEx = Math.max(we.x1, we.x2);
+          const minEy = Math.min(we.y1, we.y2);
+          const maxEy = Math.max(we.y1, we.y2);
           if (
-            we.x2 < camX - halfW ||
-            we.x1 > camX + halfW ||
-            we.y1 < camY - halfH - 20 ||
-            we.y1 > camY + halfH + 20
+            maxEx < camX - halfW ||
+            minEx > camX + halfW ||
+            maxEy < camY - halfH - 25 ||
+            minEy > camY + halfH + 25
           ) {
             continue;
           }
           const wave = Math.sin(timeSec * 1.8 + we.phase) * 2.5;
-          const midX = (we.x1 + we.x2) * 0.5;
-          const midY = we.y1 + we.midYOffset - (we.midYOffset < 0 ? wave : -wave);
-          const endY = we.midYOffset < 0 ? we.y1 + wave : we.y1 - wave;
-          this.wakeLines!.addSegment(we.x1, endY, midX, midY);
-          this.wakeLines!.addSegment(midX, midY, we.x2, endY);
+          const midX = (we.x1 + we.x2) * 0.5 + we.nx * (we.midYOffset - wave);
+          const midY = (we.y1 + we.y2) * 0.5 + we.ny * (we.midYOffset - wave);
+          const sx1 = we.x1 + we.nx * wave;
+          const sy1 = we.y1 + we.ny * wave;
+          const sx2 = we.x2 + we.nx * wave;
+          const sy2 = we.y2 + we.ny * wave;
+          this.wakeLines!.addSegment(sx1, sy1, midX, midY);
+          this.wakeLines!.addSegment(midX, midY, sx2, sy2);
         }
       }
     }
 
-    // Floodgate lever dynamic sprite (Deck 1)
-    for (const prop of engine.map.props) {
-      if (prop.deck !== renderDeck || prop.kind !== 'FLOODGATE_LEVER') continue;
-      const lx = (prop.tx + 0.5) * ts;
-      const ly = (prop.ty + 0.5) * ts;
-      if (Math.abs(lx - camX) > halfW || Math.abs(ly - camY) > halfH) continue;
-      const subPartsDone = engine.escape.submarineParts.length === 3;
-      const subActiveOrReady = engine.escape.submarineState !== 'IDLE';
-      const mode = subActiveOrReady ? 'active' : subPartsDone ? 'ready' : 'idle';
-      ws.place(sp.floodgateLeverBase[mode], lx, ly, { renderOrder: 8 });
-    }
+    // 3D Articulated Escape Routes (Helideck Chopper, Lifeboat Davit, Submarine Moonpool & Floodgate Lever)
+    this.escapes3d?.updateForFrame(
+      engine,
+      renderDeck,
+      camX,
+      camY,
+      halfW,
+      halfH,
+      timeSec
+    );
 
-    // Escape Zones (only on their respective decks)
-    if (renderDeck === 'DECK_3') {
-      this.drawHelideckSprites(engine, timeSec);
-    } else if (renderDeck === 'DECK_2') {
-      this.drawLifeboatSprites(engine, timeSec);
-    } else if (renderDeck === 'DECK_1') {
-      this.drawSubmarineSprites(engine, timeSec);
-    }
+    // 3D Objects (Containers + revealed items, Hiding Spots, Paper Maps, Fuse Controls, Switches, Steam Pipes, Pickups, Props)
+    this.objects3d?.updateForFrame(
+      engine,
+      renderDeck,
+      camX,
+      camY,
+      halfW,
+      halfH,
+      timeSec,
+      includePlayer ? engine.cursorTarget : null
+    );
 
-    // Stairwells
-    for (const st of engine.map.stairwells) {
-      if (st.deck !== renderDeck) continue;
-      if (Math.abs(st.x - camX) > halfW || Math.abs(st.y - camY) > halfH) continue;
-      const isBruteComing = st.id === incomingStairId;
-      const mode = isBruteComing ? 'COMING' : st.direction;
-      if (isBruteComing) {
+    // Stairwells are 3D recessed/ascending assemblies in ShipStructure3D; preserve incoming floor warning aura
+    if (incomingStairId) {
+      for (const st of engine.map.stairwells) {
+        if (st.deck !== renderDeck || st.id !== incomingStairId) continue;
+        if (Math.abs(st.x - camX) > halfW || Math.abs(st.y - camY) > halfH) continue;
         const pulse = 0.65 + 0.35 * Math.sin(timeSec * 10);
         ws.place(sp.softDisc, st.x, st.y, {
-          scaleX: 68 / sp.softDisc.w,
-          scaleY: 68 / sp.softDisc.h,
+          scaleX: 72 / sp.softDisc.w,
+          scaleY: 72 / sp.softDisc.h,
           tint: 0xff7300,
-          opacity: 0.78 * pulse,
+          opacity: 0.65 * pulse,
           renderOrder: 6,
         });
       }
-      ws.place(sp.stairwell[mode], st.x, st.y, { renderOrder: 6 });
     }
 
-    // Steam Pipes
+    // Steam Pipe warning telegraph glow (3D nozzles & volumetric plumes are in ShipObjects3D)
     for (const pipe of engine.map.steamPipes) {
-      if (pipe.deck !== renderDeck) continue;
+      if (pipe.deck !== renderDeck || pipe.warningTimer <= 0) continue;
       if (Math.abs(pipe.x - camX) > halfW + 100 || Math.abs(pipe.y - camY) > halfH + 100) {
         continue;
       }
@@ -1599,199 +2106,14 @@ export class GameRenderer {
       const wallCy = (pipe.wallTy + 0.5) * ts;
       const edgeX = wallCx + pipe.dirX * (ts * 0.48);
       const edgeY = wallCy + pipe.dirY * (ts * 0.48);
-      const angle = Math.atan2(pipe.dirY, pipe.dirX);
-      const isWarn = pipe.warningTimer > 0;
-      const isActive = pipe.activeTimer > 0;
-      const mode = isActive ? 'active' : isWarn ? 'warn' : 'idle';
-      ws.place(sp.steamNozzle[mode], edgeX, edgeY, { rot2d: angle, renderOrder: 7 });
-
-      if (isWarn) {
-        const wPulse = 0.35 + 0.25 * Math.sin(timeSec * 24);
-        ws.place(sp.softDisc, edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10, {
-          scaleX: 52 / sp.softDisc.w,
-          scaleY: 52 / sp.softDisc.h,
-          tint: 0xfde047,
-          opacity: wPulse,
-          renderOrder: 7,
-        });
-      }
-
-      if (isActive) {
-        const clippedTiles = engine.getSteamPipeClippedRangeTiles(pipe);
-        if (clippedTiles > 0) {
-          const jetLen = clippedTiles * ts - 4;
-          const wobble = Math.sin(timeSec * 36 + pipe.wallTx) * 0.08;
-          ws.place(
-            sp.steamJet,
-            edgeX + pipe.dirX * (jetLen * 0.5),
-            edgeY + pipe.dirY * (jetLen * 0.5),
-            {
-              rot2d: angle,
-              scaleX: jetLen / sp.steamJet.w,
-              scaleY: 1 + wobble,
-              renderOrder: 7,
-            }
-          );
-        }
-      }
-    }
-
-    // Paper Map Stands
-    for (const stand of engine.map.paperMaps) {
-      if (stand.deck !== renderDeck) continue;
-      if (Math.abs(stand.x - camX) > halfW || Math.abs(stand.y - camY) > halfH) continue;
-      ws.place(sp.paperMapBase, stand.x, stand.y, { renderOrder: 8 });
-      const pulse = 0.65 + 0.35 * Math.sin(timeSec * 4.5);
-      ws.place(sp.softDisc, stand.x + 2, stand.y - 1, {
-        scaleX: 4.8 / sp.softDisc.w,
-        scaleY: 4.8 / sp.softDisc.h,
-        tint: 0xdc2626,
-        opacity: pulse,
-        renderOrder: 8,
+      const wPulse = 0.35 + 0.25 * Math.sin(timeSec * 24);
+      ws.place(sp.softDisc, edgeX + pipe.dirX * 10, edgeY + pipe.dirY * 10, {
+        scaleX: 52 / sp.softDisc.w,
+        scaleY: 52 / sp.softDisc.h,
+        tint: 0xfde047,
+        opacity: wPulse,
+        renderOrder: 7,
       });
-    }
-
-    // Fuse Sockets
-    for (const fs of engine.map.fuseSockets) {
-      if (fs.deck !== renderDeck) continue;
-      if (Math.abs(fs.x - camX) > halfW || Math.abs(fs.y - camY) > halfH) continue;
-      ws.place(fs.hasFuse ? sp.fuseSocketLoaded : sp.fuseSocketEmpty, fs.x, fs.y, {
-        renderOrder: 8,
-      });
-      if (fs.hasFuse) {
-        const arc = 0.72 + 0.28 * Math.sin(timeSec * 8);
-        ws.place(sp.softDisc, fs.x, fs.y, {
-          scaleX: 5.5 / sp.softDisc.w,
-          scaleY: 5.5 / sp.softDisc.h,
-          tint: 0x34d399,
-          opacity: arc,
-          renderOrder: 8,
-        });
-      } else {
-        const blink = Math.sin(timeSec * 4.5) > 0;
-        ws.place(sp.softDisc, fs.x, fs.y - 10, {
-          scaleX: 4.5 / sp.softDisc.w,
-          scaleY: 4.5 / sp.softDisc.h,
-          tint: blink ? 0xef4444 : 0x7f1d1d,
-          opacity: 1,
-          renderOrder: 8,
-        });
-      }
-    }
-
-    // Containers
-    for (const c of engine.map.containers) {
-      if ((engine.map.deckGrid[c.ty]?.[c.tx] ?? 'DECK_2') !== renderDeck) continue;
-      if (Math.abs(c.x - camX) > halfW || Math.abs(c.y - camY) > halfH) continue;
-      const key = `${c.type}:${c.searched ? 1 : 0}` as const;
-      ws.place(sp.containers[key], c.x, c.y, { renderOrder: 8 });
-    }
-
-    // Hiding Spots
-    for (const s of engine.map.hidingSpots) {
-      if ((engine.map.deckGrid[s.ty]?.[s.tx] ?? 'DECK_2') !== renderDeck) continue;
-      if (Math.abs(s.x - camX) > halfW || Math.abs(s.y - camY) > halfH) continue;
-      const mode =
-        s.checkedFlash > 0 ? 'flash' : engine.player.hidingSpotId === s.id ? 'occupied' : 'normal';
-      const key = `${s.type}:${mode}` as const;
-      ws.place(sp.hidingSpots[key], s.x, s.y, { renderOrder: 8 });
-    }
-
-    // Light Switches
-    for (const sw of engine.map.lightSwitches) {
-      const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
-      if (swDeck !== renderDeck) continue;
-      if (Math.abs(sw.x - camX) > halfW || Math.abs(sw.y - camY) > halfH) continue;
-      const deckPowered = engine.poweredDecks[swDeck];
-      const mode = deckPowered ? 'powered' : sw.isOn ? 'on' : 'off';
-      ws.place(sp.lightSwitchBase[mode], sw.x, sw.y, { renderOrder: 8 });
-    }
-
-    // Doors
-    for (const d of engine.map.doors) {
-      if ((engine.map.deckGrid[d.ty]?.[d.tx] ?? 'DECK_2') !== renderDeck) continue;
-      const cx = (d.tx + 0.5) * ts;
-      const cy = (d.ty + 0.5) * ts;
-      if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
-
-      if (d.isBroken) {
-        ws.place(d.orientation === 'H' ? sp.doorBrokenH : sp.doorBrokenV, cx, cy, {
-          renderOrder: 9,
-        });
-        continue;
-      }
-
-      const baseRot = d.orientation === 'V' ? Math.PI / 2 : 0;
-      ws.place(sp.doorThreshold, cx, cy, { rot2d: baseRot, renderOrder: 9 });
-
-      const kind = d.isLocked ? 'locked' : d.isWatertight ? 'watertight' : 'normal';
-      if (d.openProgress > 0.02) {
-        const hingeOffset = -ts / 2 + 4;
-        const hx = d.orientation === 'H' ? cx + hingeOffset : cx;
-        const hy = d.orientation === 'H' ? cy : cy + hingeOffset;
-        ws.place(sp.doorLeaf[kind], hx, hy, {
-          rot2d: baseRot - d.openProgress * 1.38,
-          renderOrder: 9,
-        });
-      } else {
-        ws.place(sp.doorClosed[kind], cx, cy, { rot2d: baseRot, renderOrder: 9 });
-      }
-
-      if (d.lockCut) {
-        ws.place(sp.doorPadlockDebris, cx, cy, { rot2d: baseRot, renderOrder: 9 });
-      }
-    }
-
-    // Dropped Lights
-    for (const l of engine.droppedLights) {
-      const lTx = Math.floor(l.x / ts);
-      const lTy = Math.floor(l.y / ts);
-      if ((engine.map.deckGrid[lTy]?.[lTx] ?? 'DECK_2') !== renderDeck) continue;
-      if (Math.abs(l.x - camX) > halfW || Math.abs(l.y - camY) > halfH) continue;
-      if (l.type === 'GLOWSTICK') {
-        ws.place(sp.glowstick, l.x, l.y, { renderOrder: 10 });
-      } else {
-        const flicker = (4 + Math.sin(timeSec * 28) * 1.5) * 2;
-        ws.place(sp.softDisc, l.x, l.y, {
-          scaleX: flicker / sp.softDisc.w,
-          scaleY: flicker / sp.softDisc.h,
-          tint: 0xfb7185,
-          opacity: 1,
-          renderOrder: 10,
-        });
-      }
-    }
-
-    // World Pickups
-    for (const wp of engine.worldPickups) {
-      if (wp.deck !== renderDeck) continue;
-      if (Math.abs(wp.x - camX) > halfW || Math.abs(wp.y - camY) > halfH) continue;
-      const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
-      const haloColor =
-        wp.item === 'BACKPACK'
-          ? 0xf97316
-          : wp.item === 'MASTER_FUSE' ||
-              wp.item === 'AVIATION_FUEL' ||
-              wp.item === 'IGNITION_KEY' ||
-              wp.item === 'ROTOR_FUSE'
-            ? 0xfbbf24
-            : wp.item === 'WINCH_CRANK' ||
-                wp.item === 'MARINE_BATTERY' ||
-                wp.item === 'HULL_PATCH'
-              ? 0x38bdf8
-              : wp.item === 'SUB_BATTERY' ||
-                  wp.item === 'BALLAST_PUMP' ||
-                  wp.item === 'DIVE_KEY'
-                ? 0x2dd4bf
-                : 0xa3e635;
-      ws.place(sp.softRing, wp.x, wp.y, {
-        scaleX: (24 * pulse) / sp.softRing.w,
-        scaleY: (24 * pulse) / sp.softRing.h,
-        tint: haloColor,
-        opacity: wp.item === 'MASTER_FUSE' ? 0.85 : 0.65,
-        renderOrder: 10,
-      });
-      ws.place(sp.pickups[wp.item], wp.x, wp.y, { renderOrder: 10 });
     }
 
     // Particles (filtered to renderDeck bounds)
@@ -1812,17 +2134,21 @@ export class GameRenderer {
       });
     }
 
-    // Player
-    if (includePlayer && engine.player.hidingSpotId === null) {
-      this.drawPlayerSprites(engine, timeSec);
+    // Subtle glowing overhead fixture discs inside illuminated rooms/corridors (clipped strictly by LoS composite)
+    for (const lp of litRoomPolys) {
+      if (lp.poly.length < 3 || lp.deck !== renderDeck || lp.intensity < 0.08) continue;
+      ws.place(sp.softDisc, lp.x, lp.y, {
+        z: 38,
+        scaleX: 20 / sp.softDisc.w,
+        scaleY: 20 / sp.softDisc.h,
+        tint: lp.sputterAmount > 0.35 ? 0xe2e8f0 : 0xfff3d1,
+        opacity: 0.42 * Math.min(1, lp.intensity),
+        renderOrder: 18,
+      });
     }
 
-    // Brute (only if on renderDeck & not climbing)
-    const b = engine.brute;
-    const bTy = Math.floor(b.y / ts);
-    if (b.stairClimbTimer <= 0 && bTy >= bounds.y1 && bTy <= bounds.y2) {
-      this.drawBruteSprites(engine, timeSec);
-    }
+    // 3D Articulated Player & Brute Characters
+    this.characters3d?.updateForFrame(engine, renderDeck, timeSec, includePlayer);
 
     // Warm Lighting Tints (wall-blocked visibility fans)
     this.populateWarmLightingTints(
@@ -1843,437 +2169,6 @@ export class GameRenderer {
     this.worldLinesSteel!.endFrame();
     this.worldLinesLight!.endFrame();
     this.worldLinesTeal!.endFrame();
-  }
-
-  private drawHelideckSprites(engine: MonstrumGameEngine, timeSec: number): void {
-    const sp = this.sprites!;
-    const ws = this.worldSprites!;
-    const esc = engine.escape;
-
-    const hx = engine.map.heliPos.x + 14;
-    const hy = engine.map.heliPos.y;
-    const hasFuel = esc.heliParts.includes('AVIATION_FUEL');
-    const hasFuse = esc.heliParts.includes('ROTOR_FUSE');
-    const hasKey = esc.heliParts.includes('IGNITION_KEY');
-    const heliReady = esc.heliState === 'READY';
-    const heliActivating = esc.heliState === 'ACTIVATING';
-    const heliSpool = heliReady ? 1 : heliActivating ? esc.heliActivationProgress : 0;
-
-    const padMode = heliReady ? 'ready' : esc.heliParts.length === 3 ? 'parts3' : 'idle';
-    ws.place(sp.heliPad[padMode], hx, hy, { renderOrder: 3 });
-
-    // Corner strobes
-    const strobeOn = Math.sin(timeSec * (heliReady ? 6 : 12)) > 0;
-    for (const [sx, sy] of [
-      [-52, -48],
-      [52, -48],
-      [-52, 48],
-      [52, 48],
-    ]) {
-      if (heliReady || (heliActivating && strobeOn)) {
-        ws.place(sp.softDisc, hx + sx, hy + sy, {
-          scaleX: 6 / sp.softDisc.w,
-          scaleY: 6 / sp.softDisc.h,
-          tint: heliReady ? 0x34d399 : 0xf59e0b,
-          opacity: 1,
-          renderOrder: 3,
-        });
-      } else {
-        ws.place(sp.softDisc, hx + sx, hy + sy, {
-          scaleX: 4.5 / sp.softDisc.w,
-          scaleY: 4.5 / sp.softDisc.h,
-          tint: hasFuse ? 0xfbbf24 : 0x334155,
-          opacity: hasFuse ? 0.45 : 1,
-          renderOrder: 3,
-        });
-      }
-    }
-
-    const lx = engine.map.heliPos.x;
-    const ly = engine.map.heliPos.y;
-    const heliVibX = heliSpool > 0.15 ? Math.sin(timeSec * 52) * heliSpool * 0.9 : 0;
-    const heliVibY = heliSpool > 0.15 ? Math.cos(timeSec * 46) * heliSpool * 0.9 : 0;
-    const cx = lx + heliVibX;
-    const cy = ly + heliVibY;
-
-    ws.place(sp.heliFuselage, cx, cy, { renderOrder: 4 });
-    ws.place(sp.heliFuelPort[hasFuel ? 'filled' : 'empty'], cx - 6, cy - 15, {
-      renderOrder: 4,
-    });
-    ws.place(sp.heliFuseBay[hasFuse ? 'filled' : 'empty'], cx - 1.5, cy + 14.75, {
-      renderOrder: 4,
-    });
-    if (!hasFuse && Math.sin(timeSec * 19) > 0.78) {
-      ws.place(sp.softDisc, cx - 2, cy + 14.5, {
-        scaleX: 5 / sp.softDisc.w,
-        scaleY: 5 / sp.softDisc.h,
-        tint: 0xfde047,
-        opacity: 1,
-        renderOrder: 5,
-      });
-    }
-    ws.place(sp.heliCockpit[hasKey ? 'filled' : 'empty'], cx + 22, cy, { renderOrder: 4 });
-
-    if (hasKey && Math.sin(timeSec * 5) > -0.3) {
-      ws.place(sp.softDisc, cx + 8, cy - 14.5, {
-        scaleX: 5 / sp.softDisc.w,
-        scaleY: 5 / sp.softDisc.h,
-        tint: 0xef4444,
-        opacity: 1,
-        renderOrder: 5,
-      });
-      ws.place(sp.softDisc, cx + 8, cy + 14.5, {
-        scaleX: 5 / sp.softDisc.w,
-        scaleY: 5 / sp.softDisc.h,
-        tint: 0x22c55e,
-        opacity: 1,
-        renderOrder: 5,
-      });
-    }
-
-    // 6 Tie-Down Chains
-    const chainSpecs: Array<{ fx: number; fy: number; bx: number; by: number }> = [
-      { fx: 20, fy: -12, bx: 44, by: -36 },
-      { fx: 20, fy: 12, bx: 44, by: 36 },
-      { fx: 2, fy: -15, bx: 4, by: -44 },
-      { fx: 2, fy: 15, bx: 4, by: 44 },
-      { fx: -18, fy: -11, bx: -42, by: -36 },
-      { fx: -18, fy: 11, bx: -42, by: 36 },
-    ];
-    for (let i = 0; i < chainSpecs.length; i++) {
-      const cs = chainSpecs[i];
-      const intact = i < esc.heliChainsRemaining;
-      ws.place(sp.heliBollard[intact ? 'intact' : 'cut'], cx + cs.bx, cy + cs.by, {
-        renderOrder: 3,
-      });
-      if (intact) {
-        this.worldLinesDark!.addSegment(cx + cs.fx, cy + cs.fy, cx + cs.bx, cy + cs.by);
-        this.worldLinesLight!.addDashedSegment(
-          cx + cs.fx,
-          cy + cs.fy,
-          cx + cs.bx,
-          cy + cs.by,
-          4,
-          3
-        );
-        ws.place(
-          sp.softDisc,
-          cx + (cs.fx + cs.bx) * 0.5,
-          cy + (cs.fy + cs.by) * 0.5,
-          {
-            scaleX: 6 / sp.softDisc.w,
-            scaleY: 6 / sp.softDisc.h,
-            tint: 0xf59e0b,
-            opacity: 1,
-            renderOrder: 5,
-          }
-        );
-      } else {
-        const dx = cs.fx - cs.bx;
-        const dy = cs.fy - cs.by;
-        const d = Math.hypot(dx, dy) || 1;
-        this.worldLinesSteel!.addSegment(
-          cx + cs.bx,
-          cy + cs.by,
-          cx + cs.bx + (dx / d) * 7,
-          cy + cs.by + (dy / d) * 7
-        );
-      }
-    }
-
-    // Rotor assembly
-    const rotorAngle = heliSpool > 0 ? timeSec * (2 + heliSpool * 24) : 0.42;
-    if (heliSpool > 0.22) {
-      const discAlpha = Math.min(0.32, (heliSpool - 0.22) * 0.42) / 0.35;
-      ws.place(sp.heliRotorDisc, cx, cy, {
-        opacity: Math.min(1, discAlpha),
-        renderOrder: 5,
-      });
-    }
-    const bladeAlpha = heliSpool > 0.5 ? 0.45 : 0.85;
-    ws.place(sp.heliRotorBlades, cx, cy, {
-      rot2d: rotorAngle,
-      opacity: bladeAlpha,
-      renderOrder: 5,
-    });
-  }
-
-  private drawLifeboatSprites(engine: MonstrumGameEngine, timeSec: number): void {
-    const sp = this.sprites!;
-    const ws = this.worldSprites!;
-    const ts = engine.map.tileSize;
-    const esc = engine.escape;
-
-    const bx = engine.map.lifeboatPos.x;
-    const by = engine.map.lifeboatPos.y;
-    const bTx = engine.map.lifeboatPos.tx;
-    const bTy = engine.map.lifeboatPos.ty;
-    const voidNorth = engine.map.tiles[bTy - 1]?.[bTx] === 'VOID';
-    const outSign = voidNorth ? -1 : 1;
-
-    const hasPatch = esc.lifeboatParts.includes('HULL_PATCH');
-    const hasCrank = esc.lifeboatParts.includes('WINCH_CRANK');
-    const hasBattery = esc.lifeboatParts.includes('MARINE_BATTERY');
-    const boatReady = esc.lifeboatState === 'READY';
-    const boatActivating = esc.lifeboatState === 'ACTIVATING';
-    const craneSwing = boatReady ? 1 : boatActivating ? esc.lifeboatActivationProgress : 0;
-
-    const inboardY = by - outSign * 14;
-    const swingOutDist = craneSwing * 36;
-    const boatY = by - outSign * 2 + outSign * swingOutDist;
-    const boatX = bx + 16;
-    const boatBob = boatReady ? Math.sin(timeSec * 2.8) * 1.4 : 0;
-
-    const plateMode = boatReady ? 'ready' : esc.lifeboatParts.length === 3 ? 'parts3' : 'idle';
-    ws.place(sp.lifeboatDeckPlate[plateMode], bx + ts * 0.5 - 2, by + ts * 0.5 - 16, {
-      renderOrder: 3,
-    });
-
-    const leftPedX = bx - 8;
-    const rightPedX = bx + 40;
-    const armReach = 12 + swingOutDist * 1.05;
-    const tipY = inboardY + outSign * armReach;
-    for (const px of [leftPedX, rightPedX]) {
-      ws.place(sp.lifeboatPedestal, px, inboardY, { renderOrder: 4 });
-      this.worldLinesDark!.addSegment(px + 2, inboardY + 2, px + 2, tipY + 2);
-      this.worldLinesSteel!.addSegment(px, inboardY, px, tipY);
-      ws.place(sp.softDisc, px, tipY, {
-        scaleX: 7 / sp.softDisc.w,
-        scaleY: 7 / sp.softDisc.h,
-        tint: 0xf59e0b,
-        opacity: 1,
-        renderOrder: 5,
-      });
-    }
-
-    const winchX = (leftPedX + rightPedX) / 2;
-    ws.place(sp.lifeboatWinch, winchX, inboardY, { renderOrder: 4 });
-    if (hasCrank) {
-      const crankAng = boatActivating ? timeSec * 9 : 0.6;
-      ws.place(sp.softRing, winchX + 12, inboardY, {
-        scaleX: 11 / sp.softRing.w,
-        scaleY: 11 / sp.softRing.h,
-        tint: 0xcbd5e1,
-        opacity: 1,
-        renderOrder: 5,
-      });
-      this.worldLinesLight!.addSegment(
-        winchX + 12,
-        inboardY,
-        winchX + 12 + Math.cos(crankAng) * 7,
-        inboardY + Math.sin(crankAng) * 7
-      );
-    }
-
-    const batX = bx - 14;
-    const batY = inboardY - outSign * 4;
-    ws.place(sp.lifeboatBattery[hasBattery ? 'filled' : 'empty'], batX, batY, {
-      renderOrder: 4,
-    });
-    if (hasBattery && (boatActivating || boatReady)) {
-      ws.place(sp.softDisc, boatX, boatY, {
-        scaleX: 84 / sp.softDisc.w,
-        scaleY: 84 / sp.softDisc.h,
-        tint: boatReady ? 0x34d399 : 0x38bdf8,
-        opacity: boatReady ? 0.25 : 0.22,
-        renderOrder: 4,
-      });
-    }
-
-    const hullMode = boatReady ? 'ready' : hasPatch ? 'patched' : 'cracked';
-    ws.place(sp.lifeboatHull[hullMode], boatX, boatY + boatBob, { renderOrder: 5 });
-
-    // Hoist cables
-    const cableLines = hasCrank ? this.worldLinesLight! : this.worldLinesSteel!;
-    cableLines.addSegment(boatX - 22, boatY + boatBob, leftPedX, tipY);
-    cableLines.addSegment(boatX + 22, boatY + boatBob, rightPedX, tipY);
-  }
-
-  private drawSubmarineSprites(engine: MonstrumGameEngine, timeSec: number): void {
-    const sp = this.sprites!;
-    const ws = this.worldSprites!;
-    const ts = engine.map.tileSize;
-    const esc = engine.escape;
-
-    const subPos = engine.map.submarinePos;
-    const poolX = 102 * ts;
-    const poolY = 92 * ts;
-    const poolW = 4 * ts;
-    const poolH = 6 * ts;
-
-    const hasSubBat = esc.submarineParts.includes('SUB_BATTERY');
-    const hasBallast = esc.submarineParts.includes('BALLAST_PUMP');
-    const hasDiveKey = esc.submarineParts.includes('DIVE_KEY');
-    const subReady = esc.submarineState === 'READY';
-    const subActivating = esc.submarineState === 'ACTIVATING';
-
-    const poolMode = subReady ? 'ready' : esc.submarineParts.length === 3 ? 'parts3' : 'idle';
-    ws.place(sp.subMoonpool[poolMode], poolX + poolW * 0.5, poolY + poolH * 0.5, {
-      renderOrder: 3,
-    });
-
-    // Moonpool animated wave ripples
-    for (let wy = poolY + 24; wy < poolY + poolH - 18; wy += 36) {
-      const drift = Math.sin(timeSec * (subActivating ? 8 : 2.1) + wy * 0.05) * 6;
-      const midX = poolX + poolW * 0.5;
-      this.worldLinesTeal!.addSegment(poolX + 16 + drift, wy, midX, wy - 4);
-      this.worldLinesTeal!.addSegment(midX, wy - 4, poolX + poolW - 16 + drift, wy);
-    }
-
-    ws.place(sp.subApron[subReady ? 'ready' : 'idle'], subPos.x, subPos.y, {
-      renderOrder: 3,
-    });
-
-    const subCx = poolX + poolW * 0.5;
-    const subCy = poolY + poolH * 0.5 + (subReady ? Math.sin(timeSec * 3) * 2.5 : 0);
-    ws.place(sp.subHull[subReady ? 'ready' : 'idle'], subCx, subCy, { renderOrder: 4 });
-    ws.place(sp.subBattery[hasSubBat ? 'filled' : 'empty'], subCx - 23, subCy, {
-      renderOrder: 5,
-    });
-    ws.place(sp.subBallast[hasBallast ? 'filled' : 'empty'], subCx + 23.5, subCy + 31, {
-      renderOrder: 5,
-    });
-    ws.place(sp.subDiveKey[hasDiveKey ? 'filled' : 'empty'], subCx, subCy - 4, {
-      renderOrder: 5,
-    });
-
-    const leverRingColor =
-      esc.submarineState === 'READY'
-        ? 0x34d399
-        : esc.submarineParts.length === 3
-          ? 0x2dd4bf
-          : 0x94a3b8;
-    const leverRingAlpha =
-      esc.submarineState === 'READY'
-        ? 0.75
-        : esc.submarineParts.length === 3
-          ? 0.45 + 0.35 * Math.sin(timeSec * 6)
-          : 0.32;
-    ws.place(sp.softRing, subPos.leverX, subPos.leverY, {
-      scaleX: 52 / sp.softRing.w,
-      scaleY: 52 / sp.softRing.h,
-      tint: leverRingColor,
-      opacity: leverRingAlpha,
-      renderOrder: 3,
-    });
-  }
-
-  private drawPlayerSprites(engine: MonstrumGameEngine, timeSec: number): void {
-    const sp = this.sprites!;
-    const ws = this.worldSprites!;
-    const p = engine.player;
-    const stride = p.isMoving ? Math.sin(p.walkPhase) : 0;
-    const crouchScale = p.crouching ? 0.87 : 1.0;
-    const torsoTwist = p.isMoving ? stride * (p.sprinting ? 0.1 : 0.055) : 0;
-    const idleBreath = p.isMoving
-      ? 0
-      : Math.sin(timeSec * (p.exhausted ? 7.2 : 2.5)) * (p.exhausted ? 0.45 : 0.18);
-    const hasLight = p.flashlightOn && p.battery > 0;
-    const rot = p.angle + torsoTwist;
-    const cos = Math.cos(rot);
-    const sin = Math.sin(rot);
-
-    const placeLocal = (
-      entry: SpriteEntry,
-      lx: number,
-      ly: number,
-      localRot = 0,
-      scaleX = 1,
-      scaleY = 1
-    ) => {
-      const wx = p.x + lx * cos - ly * sin;
-      const wy = p.y + lx * sin + ly * cos;
-      ws.place(entry, wx, wy, {
-        rot2d: rot + localRot,
-        scaleX,
-        scaleY,
-        renderOrder: 12,
-      });
-    };
-
-    placeLocal(sp.playerShadow, 0, 0, 0, crouchScale, p.crouching ? 11 / 13.5 : 1);
-
-    const leftStride = stride * (p.crouching ? 3.2 : p.sprinting ? 6.2 : 4.8);
-    placeLocal(sp.playerBoot, leftStride, -4.4 * crouchScale);
-    placeLocal(sp.playerBoot, -leftStride, 4.4 * crouchScale);
-
-    if (p.hasBackpack) {
-      placeLocal(sp.playerBackpack, -5.8 * crouchScale, 0, 0, 1, crouchScale);
-    } else {
-      placeLocal(
-        sp.playerSatchel[p.inventory.length > 1 ? 'loaded' : 'empty'],
-        -5.8 * crouchScale,
-        0,
-        0,
-        1,
-        crouchScale
-      );
-    }
-
-    const leftArmForward = -stride * (p.crouching ? 2.4 : p.sprinting ? 5.2 : 3.8);
-    placeLocal(sp.playerLeftArm, leftArmForward * 0.45, -10.5 * crouchScale, -stride * 0.16);
-
-    const rightArmBob = stride * (p.crouching ? 1.2 : 2.1);
-    placeLocal(
-      sp.playerRightArm[hasLight ? 'on' : 'off'],
-      rightArmBob * 0.35,
-      9.6 * crouchScale,
-      -0.12 + stride * 0.06
-    );
-
-    const shoulderScaleY = ((p.crouching ? 9.8 : 11.8) + idleBreath) / 11.8;
-    const torsoScaleX = ((p.crouching ? 7.2 : 7.6) + idleBreath * 0.6) / 7.6;
-    placeLocal(sp.playerTorso, 0, 0, 0, torsoScaleX, shoulderScaleY);
-
-    const headX = p.crouching ? 2.4 : p.sprinting ? 2.0 : 1.0;
-    const headScale = p.crouching ? 6.1 / 6.6 : 1;
-    placeLocal(sp.playerHead, headX, 0, 0, headScale, headScale);
-  }
-
-  private drawBruteSprites(engine: MonstrumGameEngine, timeSec: number): void {
-    const sp = this.sprites!;
-    const ws = this.worldSprites!;
-    const b = engine.brute;
-    const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
-    const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
-    const isStunned = b.state === 'STUNNED';
-    const isLunging =
-      b.state === 'SMASH_DOOR' ||
-      (b.state === 'CHECK_HIDING' && b.inspectTimer > 0 && b.inspectTimer < 0.72);
-
-    const stride = isStunned ? 0 : Math.sin(b.walkPhase);
-    const torsoTwist = isStunned
-      ? Math.sin(timeSec * 16) * 0.05
-      : stride * (isChasing ? 0.11 : 0.06);
-    const rot = b.angle + torsoTwist;
-    const cos = Math.cos(rot);
-    const sin = Math.sin(rot);
-
-    const placeLocal = (entry: SpriteEntry, lx: number, ly: number, scaleX = 1) => {
-      const wx = b.x + lx * cos - ly * sin;
-      const wy = b.y + lx * sin + ly * cos;
-      ws.place(entry, wx, wy, { rot2d: rot, scaleX, renderOrder: 13 });
-    };
-
-    placeLocal(sp.bruteShadow, 0, 0);
-
-    const leftReach = isLunging ? 11 : stride * (isChasing ? 8 : 5);
-    const rightReach = isLunging ? 11 : -stride * (isChasing ? 8 : 5);
-    const armMode = isChasing ? 'chase' : 'normal';
-    placeLocal(sp.bruteClawArm[armMode], leftReach * 0.5, -18);
-    placeLocal(sp.bruteClawArm[armMode], rightReach * 0.5, 18);
-
-    const torsoMode = isStunned
-      ? 'stunned'
-      : isChasing
-        ? 'chase'
-        : isStalking
-          ? 'stalk'
-          : 'roam';
-    placeLocal(sp.bruteTorso[torsoMode], 0, 0);
-
-    const headMode = isStunned ? 'stunned' : isChasing ? 'chase' : 'roam';
-    placeLocal(sp.bruteHead[headMode], 0, 0);
   }
 
   private ensureDeckPoweredLightmap(engine: MonstrumGameEngine, deck: ShipDeck): void {
@@ -2321,10 +2216,10 @@ export class GameRenderer {
       this.deckWarmTarget?.dispose();
       this.deckMaskTarget?.dispose();
       this.deckWarmTarget = this.createRt(pw, ph, THREE.HalfFloatType);
-      this.deckMaskTarget = this.createRt(pw, ph, THREE.UnsignedByteType);
+      this.deckMaskTarget = this.createRt(pw, ph, THREE.HalfFloatType);
 
       if (!this.deckWarmQuad) {
-        const wb = createBakedLightmapQuadMaterial(this.deckWarmTarget.texture, true);
+        const wb = createBakedLightmapQuadMaterial(this.deckWarmTarget.texture, true, true);
         this.deckWarmMat = wb.material;
         this.deckWarmTexNode = wb.texNode;
         this.deckWarmQuad = new THREE.Mesh(this.unitQuadGeom, wb.material);
@@ -2337,12 +2232,12 @@ export class GameRenderer {
       }
 
       if (!this.deckMaskQuad) {
-        const mb = createBakedLightmapQuadMaterial(this.deckMaskTarget.texture, false);
+        const mb = createBakedLightmapQuadMaterial(this.deckMaskTarget.texture, false, true);
         this.deckMaskMat = mb.material;
         this.deckMaskTexNode = mb.texNode;
         this.deckMaskQuad = new THREE.Mesh(this.unitQuadGeom, mb.material);
         this.deckMaskQuad.frustumCulled = false;
-        this.deckMaskQuad.renderOrder = 0;
+        this.deckMaskQuad.renderOrder = 1;
         this.deckMaskQuad.visible = false;
         this.lightMaskScene.add(this.deckMaskQuad);
       } else if (this.deckMaskTexNode) {
@@ -2357,8 +2252,13 @@ export class GameRenderer {
     this.deckBakeCamera.position.set(0, 0, 100);
     this.deckBakeCamera.updateProjectionMatrix();
 
+    const maskOpts = this.getMaskCurtainOpts(ts);
+    const warmOpts = this.getWarmCurtainOpts(ts);
+
     warmFans.beginFrame();
     maskFans.beginFrame();
+    this.poweredWarmWallFans?.beginFrame();
+    this.poweredMaskWallFans?.beginFrame();
 
     for (const sw of map.lightSwitches) {
       const swDeck = map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
@@ -2373,11 +2273,41 @@ export class GameRenderer {
           fx.x,
           fx.y,
           fx.range,
-          56
+          56,
+          maskOpts,
+          warmOpts
         );
         if (cached.poly.length < 3) continue;
-        warmFans.addFan(cached.fan, 14, fx.range, 0.55, 0xfef0c7, 0.145, 0xfde09b, 0.085, 0xfde09b, 0);
+        warmFans.addFan(
+          cached.warmFan ?? cached.fan,
+          14,
+          fx.range,
+          0.55,
+          0xfef0c7,
+          0.145,
+          0xfde09b,
+          0.085,
+          0xfde09b,
+          0
+        );
         this.addMaskFan(maskFans, cached.fan, 20, fx.range, 0.65, 0.96, 0.78);
+        if (cached.warmCurtainFan && this.poweredWarmWallFans) {
+          this.poweredWarmWallFans.addFan(
+            cached.warmCurtainFan,
+            14,
+            fx.range,
+            0.55,
+            0xfef0c7,
+            0.145,
+            0xfde09b,
+            0.085,
+            0xfde09b,
+            0
+          );
+        }
+        if (cached.curtainFan && this.poweredMaskWallFans) {
+          this.addMaskFan(this.poweredMaskWallFans, cached.curtainFan, 20, fx.range, 0.65, 0.96, 0.78);
+        }
       }
     }
 
@@ -2391,11 +2321,13 @@ export class GameRenderer {
         cl.x,
         cl.y,
         cl.range,
-        36
+        36,
+        maskOpts,
+        warmOpts
       );
       if (cached.poly.length < 3) continue;
       warmFans.addFan(
-        cached.fan,
+        cached.warmFan ?? cached.fan,
         14,
         cl.range,
         0.55,
@@ -2407,10 +2339,37 @@ export class GameRenderer {
         0
       );
       this.addMaskFan(maskFans, cached.fan, 20, cl.range, 0.65, 0.96 * 0.94, 0.78 * 0.94);
+      if (cached.warmCurtainFan && this.poweredWarmWallFans) {
+        this.poweredWarmWallFans.addFan(
+          cached.warmCurtainFan,
+          14,
+          cl.range,
+          0.55,
+          0xfef0c7,
+          0.145 * 0.94,
+          0xfde09b,
+          0.085 * 0.94,
+          0xfde09b,
+          0
+        );
+      }
+      if (cached.curtainFan && this.poweredMaskWallFans) {
+        this.addMaskFan(
+          this.poweredMaskWallFans,
+          cached.curtainFan,
+          20,
+          cl.range,
+          0.65,
+          0.96 * 0.94,
+          0.78 * 0.94
+        );
+      }
     }
 
     warmFans.endFrame();
     maskFans.endFrame();
+    this.poweredWarmWallFans?.endFrame();
+    this.poweredMaskWallFans?.endFrame();
 
     renderer.autoClear = true;
     renderer.setClearColor(0x000000, 0);
@@ -2424,11 +2383,11 @@ export class GameRenderer {
     renderer.setRenderTarget(null);
 
     if (this.deckWarmQuad) {
-      this.deckWarmQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0);
+      this.deckWarmQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0.03);
       this.deckWarmQuad.scale.set(worldW, worldH, 1);
     }
     if (this.deckMaskQuad) {
-      this.deckMaskQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0);
+      this.deckMaskQuad.position.set(worldW * 0.5, -(yMin + yMax) * 0.5, 0.03);
       this.deckMaskQuad.scale.set(worldW, worldH, 1);
     }
 
@@ -2451,6 +2410,9 @@ export class GameRenderer {
   ): RayLightPoly[] {
     const polys: RayLightPoly[] = [];
     const b = engine.brute;
+    const ts = engine.map.tileSize;
+    const maskOpts = this.getMaskCurtainOpts(ts);
+    const warmOpts = this.getWarmCurtainOpts(ts);
 
     for (const sw of engine.map.lightSwitches) {
       if (!sw.isOn) continue;
@@ -2494,7 +2456,9 @@ export class GameRenderer {
           fx.x,
           fx.y,
           fx.range,
-          56
+          56,
+          maskOpts,
+          warmOpts
         );
         polys.push({
           cacheKey: key,
@@ -2505,6 +2469,7 @@ export class GameRenderer {
           intensity: cachedIntensity,
           sputterAmount: cachedSputter,
           fan: cached.fan,
+          warmFan: cached.warmFan ?? cached.fan,
           poly: cached.poly,
         });
       }
@@ -2535,7 +2500,9 @@ export class GameRenderer {
         cl.x,
         cl.y,
         cl.range,
-        36
+        36,
+        maskOpts,
+        warmOpts
       );
       polys.push({
         cacheKey: key,
@@ -2546,6 +2513,7 @@ export class GameRenderer {
         intensity: 0.94,
         sputterAmount: 0,
         fan: cached.fan,
+        warmFan: cached.warmFan ?? cached.fan,
         poly: cached.poly,
       });
     }
@@ -2582,9 +2550,24 @@ export class GameRenderer {
       range,
       72
     );
-    const poly = [{ x: ox, y: oy }, ...rayPts];
-    const fan = this.buildDynamicFan('bruteBeam', ox, oy, rayPts, false);
-    return { ox, oy, angle: b.angle, range, intensity, isChasing, fan, poly };
+    const poly: VisibilityVertex[] = [{ x: ox, y: oy }, ...rayPts];
+    const fan = this.buildDynamicFan(
+      'bruteBeam',
+      ox,
+      oy,
+      rayPts,
+      false,
+      this.getMaskCurtainOpts(engine.map.tileSize)
+    );
+    const warmFan = this.buildDynamicFan(
+      'bruteBeam:warm',
+      ox,
+      oy,
+      rayPts,
+      false,
+      this.getWarmCurtainOpts(engine.map.tileSize)
+    );
+    return { ox, oy, angle: b.angle, range, intensity, isChasing, fan, warmFan, poly };
   }
 
   private computeIncomingStairGlow(
@@ -2607,8 +2590,23 @@ export class GameRenderer {
       range,
       64
     );
-    const fan = this.buildDynamicFan('stairGlow', st.x, st.y, poly, true);
-    return { x: st.x, y: st.y, range, intensity, fan, poly };
+    const fan = this.buildDynamicFan(
+      'stairGlow',
+      st.x,
+      st.y,
+      poly,
+      true,
+      this.getMaskCurtainOpts(engine.map.tileSize)
+    );
+    const warmFan = this.buildDynamicFan(
+      'stairGlow:warm',
+      st.x,
+      st.y,
+      poly,
+      true,
+      this.getWarmCurtainOpts(engine.map.tileSize)
+    );
+    return { x: st.x, y: st.y, range, intensity, fan, warmFan, poly };
   }
 
   private computeDoorPeekBeam(engine: MonstrumGameEngine): DoorPeekBeamData | null {
@@ -2643,9 +2641,24 @@ export class GameRenderer {
       44,
       door.ty * engine.map.width + door.tx
     );
-    const poly = [{ x: ox, y: oy }, ...rayPts];
-    const fan = this.buildDynamicFan('doorPeek', ox, oy, rayPts, false);
-    return { ox, oy, range, isLitSide, fan, poly };
+    const poly: VisibilityVertex[] = [{ x: ox, y: oy }, ...rayPts];
+    const fan = this.buildDynamicFan(
+      'doorPeek',
+      ox,
+      oy,
+      rayPts,
+      false,
+      this.getMaskCurtainOpts(ts)
+    );
+    const warmFan = this.buildDynamicFan(
+      'doorPeek:warm',
+      ox,
+      oy,
+      rayPts,
+      false,
+      this.getWarmCurtainOpts(ts)
+    );
+    return { ox, oy, range, isLitSide, fan, warmFan, poly };
   }
 
   private populateWarmLightingTints(
@@ -2665,7 +2678,7 @@ export class GameRenderer {
 
       if (lp.sputterAmount > 0.35) {
         swf.addFan(
-          lp.fan,
+          lp.warmFan,
           14,
           lp.range,
           0.55,
@@ -2678,7 +2691,7 @@ export class GameRenderer {
         );
       } else {
         swf.addFan(
-          lp.fan,
+          lp.warmFan,
           14,
           lp.range,
           0.55,
@@ -2696,7 +2709,7 @@ export class GameRenderer {
       const ty = Math.floor(bruteBeam.oy / engine.map.tileSize);
       if ((engine.map.deckGrid[ty]?.[0] ?? renderDeck) === renderDeck) {
         wf.addFan(
-          bruteBeam.fan,
+          bruteBeam.warmFan,
           6,
           bruteBeam.range,
           0.5,
@@ -2712,7 +2725,7 @@ export class GameRenderer {
 
     if (stairGlow && stairGlow.poly.length >= 3) {
       wf.addFan(
-        stairGlow.fan,
+        stairGlow.warmFan,
         10,
         stairGlow.range,
         0.55,
@@ -2727,7 +2740,7 @@ export class GameRenderer {
 
     if (doorPeekData && !doorPeekData.isLitSide && doorPeekData.poly.length >= 3) {
       wf.addFan(
-        doorPeekData.fan,
+        doorPeekData.warmFan,
         6,
         doorPeekData.range,
         0.55,
@@ -2741,6 +2754,7 @@ export class GameRenderer {
     }
 
     const ts = engine.map.tileSize;
+    const warmOpts = this.getWarmCurtainOpts(ts);
     for (let i = 0; i < engine.droppedLights.length; i++) {
       const l = engine.droppedLights[i];
       const lTx = Math.floor(l.x / ts);
@@ -2758,7 +2772,7 @@ export class GameRenderer {
         56
       );
       if (poly.length < 3) continue;
-      const fan = this.buildDynamicFan(`dropped:${l.id}`, l.x, l.y, poly, true);
+      const fan = this.buildDynamicFan(`dropped:${l.id}`, l.x, l.y, poly, true, warmOpts);
       if (l.type === 'FLARE') {
         wf.addFan(fan, 4, r, 0.6, 0xfb7185, 0.24, 0xf43f5e, 0.09, 0xf43f5e, 0);
       } else {
@@ -2773,11 +2787,11 @@ export class GameRenderer {
     height: number,
     zoom: number,
     doorPeekData: DoorPeekBeamData | null
-  ): Array<Array<{ x: number; y: number }>> {
+  ): VisibilityVertex[][] {
     const p = engine.player;
     const isHiding = p.hidingSpotId !== null;
     const isPeekingSpot = p.peekingSpotId !== null;
-    const sightPolys: Array<Array<{ x: number; y: number }>> = [];
+    const sightPolys: VisibilityVertex[][] = [];
 
     if (isHiding && !isPeekingSpot) {
       sightPolys.push(
@@ -2843,13 +2857,15 @@ export class GameRenderer {
   }
 
   private populateLosScene(
-    sightPolys: Array<Array<{ x: number; y: number }>>,
+    sightPolys: VisibilityVertex[][],
     playerX: number,
-    playerY: number
+    playerY: number,
+    tileSize: number
   ): void {
     const lf = this.losFans!;
     lf.beginFrame();
     this.portalLosFans?.clear();
+    const maskOpts = this.getMaskCurtainOpts(tileSize);
 
     for (let i = 0; i < sightPolys.length; i++) {
       const poly = sightPolys[i];
@@ -2862,7 +2878,7 @@ export class GameRenderer {
       const fanPts = isClosedLoop ? poly : poly.slice(1);
       const centerX = isClosedLoop ? playerX : ox;
       const centerY = isClosedLoop ? playerY : oy;
-      const fan = this.buildDynamicFan(`los:${i}`, centerX, centerY, fanPts, isClosedLoop);
+      const fan = this.buildDynamicFan(`los:${i}`, centerX, centerY, fanPts, isClosedLoop, maskOpts);
       lf.addFan(fan, 1, 4000, 0.5, 0xffffff, 1, 0xffffff, 1, 0xffffff, 1);
     }
 
@@ -2883,6 +2899,7 @@ export class GameRenderer {
 
   private populateLightMaskScene(
     engine: MonstrumGameEngine,
+    activeDeck: ShipDeck,
     timeSec: number,
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null,
@@ -2895,13 +2912,16 @@ export class GameRenderer {
     mf.beginFrame();
 
     const p = engine.player;
+    const ts = engine.map.tileSize;
+    const maskOpts = this.getMaskCurtainOpts(ts);
     const isHiding = p.hidingSpotId !== null;
     const isPeekingSpot = p.peekingSpotId !== null;
-    const activeDeck = engine.getCurrentDeck();
+    const poweredMaskVisible =
+      activeDeck === this.bakedLightDeck && engine.poweredDecks[activeDeck];
     if (this.deckMaskQuad) {
-      this.deckMaskQuad.visible =
-        activeDeck === this.bakedLightDeck && engine.poweredDecks[activeDeck];
+      this.deckMaskQuad.visible = poweredMaskVisible;
     }
+    this.poweredMaskWallFans?.setVisible(poweredMaskVisible);
 
     // 1. Close tactile ambient awareness around player
     const ambientRadius = isHiding ? 34 : 92;
@@ -2916,7 +2936,7 @@ export class GameRenderer {
       36
     );
     if (ambPoly.length >= 3) {
-      const fan = this.buildDynamicFan('mask:ambient', p.x, p.y, ambPoly, true);
+      const fan = this.buildDynamicFan('mask:ambient', p.x, p.y, ambPoly, true, maskOpts);
       this.addMaskFan(
         mf,
         fan,
@@ -2928,7 +2948,7 @@ export class GameRenderer {
       );
     }
 
-    // 2. Flashlight Cone or silent lit-room vent peek
+    // 2. Flashlight double-cone (broad spill + focused HDR hotspot core) or silent lit-room vent peek
     if (p.flashlightOn && p.battery > 0 && (!isHiding || isPeekingSpot)) {
       const range = isPeekingSpot ? 460 : 520;
       const coneWidth = ((isPeekingSpot ? 54 : 82) * Math.PI) / 180;
@@ -2944,7 +2964,7 @@ export class GameRenderer {
         72
       );
       if (conePoly.length >= 2) {
-        const fan = this.buildDynamicFan('mask:flashlight', p.x, p.y, conePoly, false);
+        const fan = this.buildDynamicFan('mask:flashlight', p.x, p.y, conePoly, false, maskOpts);
         this.addMaskFan(
           mf,
           fan,
@@ -2953,6 +2973,31 @@ export class GameRenderer {
           0.68,
           0.98 * flicker,
           0.82 * flicker
+        );
+      }
+
+      const coreRange = isPeekingSpot ? 500 : 560;
+      const coreWidth = ((isPeekingSpot ? 26 : 34) * Math.PI) / 180;
+      const corePoly = computeVisibilityPolygon(
+        engine.map,
+        engine.doorsByTile,
+        p.x,
+        p.y,
+        p.angle - coreWidth / 2,
+        coreWidth,
+        coreRange,
+        36
+      );
+      if (corePoly.length >= 2) {
+        const coreFan = this.buildDynamicFan('mask:flashlightCore', p.x, p.y, corePoly, false, maskOpts);
+        this.addMaskFan(
+          mf,
+          coreFan,
+          10,
+          coreRange,
+          0.56,
+          0.74 * flicker,
+          0.46 * flicker
         );
       }
     } else if (
@@ -2974,7 +3019,7 @@ export class GameRenderer {
         56
       );
       if (conePoly.length >= 2) {
-        const fan = this.buildDynamicFan('mask:ventPeek', p.x, p.y, conePoly, false);
+        const fan = this.buildDynamicFan('mask:ventPeek', p.x, p.y, conePoly, false, maskOpts);
         this.addMaskFan(mf, fan, 12, range, 0.65, 0.74, 0.48);
       }
     }
@@ -3002,8 +3047,8 @@ export class GameRenderer {
         20,
         lp.range,
         0.65,
-        0.96 * lp.intensity,
-        0.78 * lp.intensity
+        1.12 * lp.intensity,
+        0.84 * lp.intensity
       );
     }
 
@@ -3017,8 +3062,8 @@ export class GameRenderer {
           10,
           bruteBeam.range,
           0.66,
-          0.97 * bruteBeam.intensity,
-          0.76 * bruteBeam.intensity
+          1.14 * bruteBeam.intensity,
+          0.84 * bruteBeam.intensity
         );
       }
     }
@@ -3037,7 +3082,6 @@ export class GameRenderer {
     }
 
     // 7. Dropped Glowsticks & Flares
-    const ts = engine.map.tileSize;
     for (const l of engine.droppedLights) {
       const lTx = Math.floor(l.x / ts);
       const lTy = Math.floor(l.y / ts);
@@ -3054,7 +3098,7 @@ export class GameRenderer {
         56
       );
       if (lightPoly.length < 3) continue;
-      const fan = this.buildDynamicFan(`mask:drop:${l.id}`, l.x, l.y, lightPoly, true);
+      const fan = this.buildDynamicFan(`mask:drop:${l.id}`, l.x, l.y, lightPoly, true, maskOpts);
       this.addMaskFan(mf, fan, 6, r, 0.7, 0.94, 0.65);
     }
 
@@ -3108,7 +3152,8 @@ export class GameRenderer {
         bc.x,
         bc.y,
         bc.r,
-        40
+        40,
+        maskOpts
       );
       if (cached.poly.length < 3) continue;
       this.addMaskFan(
@@ -3136,13 +3181,16 @@ export class GameRenderer {
 
   private populatePostScene(
     engine: MonstrumGameEngine,
+    activeDeck: ShipDeck,
     width: number,
     height: number,
     zoom: number,
     camX: number,
     camY: number,
     timeSec: number,
-    incomingStairId: string | null
+    incomingStairId: string | null,
+    cullHalfW: number,
+    cullHalfH: number
   ): void {
     const sp = this.sprites!;
     const ps = this.postSprites!;
@@ -3160,7 +3208,6 @@ export class GameRenderer {
 
     const p = engine.player;
     const b = engine.brute;
-    const activeDeck = engine.getCurrentDeck();
     const canSeeOut = !(p.hidingSpotId !== null && p.peekingSpotId === null);
 
     // 1. Light switch beacons
@@ -3264,8 +3311,11 @@ export class GameRenderer {
       }
     }
 
-    // 4. Brute eyes in darkness (LoS-gated)
-    this.addBruteEyesPostSprites(engine, timeSec, ps);
+    // 4. Brute visor eyes & furnace core gleam in darkness (LoS-gated, aligned to 3D rig anchors)
+    const renderMode = engine.debugConfig.enabled ? engine.debugConfig.renderMode : 'NORMAL';
+    if (renderMode !== 'FULLBRIGHT') {
+      this.addBruteEyesPostSprites(engine, activeDeck, timeSec, ps);
+    }
 
     // 5. Acoustic ripples (constant crisp thin stroke width across all radii)
     const ringHalfThick = 0.68 / Math.max(0.75, zoom);
@@ -3288,10 +3338,7 @@ export class GameRenderer {
     if (nearest) {
       let tx = 0;
       let ty = 0;
-      if (nearest.kind === 'CONTAINER') {
-        tx = nearest.container.x;
-        ty = nearest.container.y;
-      } else if (nearest.kind === 'PICKUP') {
+      if (nearest.kind === 'PICKUP') {
         tx = nearest.pickup.x;
         ty = nearest.pickup.y;
       } else if (nearest.kind === 'HIDING') {
@@ -3340,7 +3387,17 @@ export class GameRenderer {
 
     // 7. Debug Overlays
     if (engine.debugConfig.enabled) {
-      this.populateDebugOverlays(engine, width, height, zoom, camX, camY);
+      this.populateDebugOverlays(
+        engine,
+        activeDeck,
+        width,
+        height,
+        zoom,
+        camX,
+        camY,
+        cullHalfW,
+        cullHalfH
+      );
     }
 
     ps.endFrame();
@@ -3357,6 +3414,7 @@ export class GameRenderer {
 
   private addBruteEyesPostSprites(
     engine: MonstrumGameEngine,
+    activeDeck: ShipDeck,
     timeSec: number,
     ps: SpritePool
   ): void {
@@ -3364,6 +3422,10 @@ export class GameRenderer {
     const b = engine.brute;
     const p = engine.player;
     if (b.state === 'STUNNED' || b.stairClimbTimer > 0) return;
+
+    const bTy = Math.floor(b.y / engine.map.tileSize);
+    const bounds = engine.map.deckBounds[activeDeck];
+    if (bTy < bounds.y1 || bTy > bounds.y2) return;
 
     const dist = Math.hypot(b.x - p.x, b.y - p.y);
     if (dist > 620) return;
@@ -3400,44 +3462,119 @@ export class GameRenderer {
 
     const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
     const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
-    const pulse = 0.75 + Math.sin(timeSec * 10) * 0.2;
-    const glowR = isChasing ? 34 : isStalking ? 26 : 20;
-    const cos = Math.cos(b.angle);
-    const sin = Math.sin(b.angle);
+    const pulse = 0.78 + Math.sin(timeSec * 10) * 0.22;
+    const glowR = isChasing ? 24 : isStalking ? 18 : 14;
+    const eyeTint = isChasing ? 0xffedd5 : isStalking ? 0xfdba74 : 0xfb923c;
+    const camQ = this.worldCamera.quaternion;
+    const anchors = this.characters3d?.getBruteGleamAnchors();
 
-    const placeEye = (lx: number, ly: number, size: number, tint: number, opacity: number) => {
-      ps.place(sp.softDisc, b.x + lx * cos - ly * sin, b.y + lx * sin + ly * cos, {
-        scaleX: size / sp.softDisc.w,
-        scaleY: size / sp.softDisc.h,
+    const placeGlow3d = (
+      wx: number,
+      wy: number,
+      wz: number,
+      sizeX: number,
+      sizeY: number,
+      tint: number,
+      opacity: number,
+      renderOrder: number
+    ) => {
+      ps.place(sp.softDisc, wx, wy, {
+        z: wz,
+        billboardQuaternion: camQ,
+        scaleX: sizeX / sp.softDisc.w,
+        scaleY: sizeY / sp.softDisc.h,
         tint,
         opacity,
-        renderOrder: 1,
+        renderOrder,
       });
     };
 
-    placeEye(
-      12,
-      0,
-      glowR * 2,
-      isChasing ? 0xff5500 : isStalking ? 0xfb923c : 0xf97316,
-      isChasing ? 0.7 * pulse : isStalking ? 0.52 * pulse : 0.36
-    );
-    const eyeTint = isChasing ? 0xffedd5 : isStalking ? 0xfdba74 : 0xfb923c;
-    placeEye(12.5, -3.5, 5.2, eyeTint, 1);
-    placeEye(12.5, 3.5, 5.2, eyeTint, 1);
+    if (anchors && anchors.valid) {
+      // Subtle visor ember aura + razor-narrow eye slits at exact 3D helm coordinates
+      placeGlow3d(
+        anchors.browX,
+        anchors.browY,
+        anchors.browZ,
+        glowR * 0.85,
+        glowR * 0.65,
+        isChasing ? 0xff5500 : isStalking ? 0xfb923c : 0xea580c,
+        isChasing ? 0.28 * pulse : isStalking ? 0.2 * pulse : 0.14,
+        1
+      );
+      placeGlow3d(anchors.leftEyeX, anchors.leftEyeY, anchors.leftEyeZ, 4.4, 2.0, eyeTint, 0.92, 2);
+      placeGlow3d(anchors.rightEyeX, anchors.rightEyeY, anchors.rightEyeZ, 4.4, 2.0, eyeTint, 0.92, 2);
+
+      // Subtle molten furnace core gleam on sternum in darkness
+      placeGlow3d(
+        anchors.chestX,
+        anchors.chestY,
+        anchors.chestZ,
+        (isChasing ? 18 : isStalking ? 14 : 11) * (0.94 + 0.06 * pulse),
+        (isChasing ? 18 : isStalking ? 14 : 11) * (0.94 + 0.06 * pulse),
+        isChasing ? 0xff5500 : isStalking ? 0xea580c : 0xc2410c,
+        (isChasing ? 0.28 : isStalking ? 0.19 : 0.12) * pulse,
+        1
+      );
+      placeGlow3d(
+        anchors.chestX,
+        anchors.chestY,
+        anchors.chestZ,
+        isChasing ? 7.5 : isStalking ? 6.0 : 4.6,
+        isChasing ? 6.5 : isStalking ? 5.2 : 4.0,
+        isChasing ? 0xfdba74 : 0xf97316,
+        (isChasing ? 0.48 : isStalking ? 0.34 : 0.22) * pulse,
+        2
+      );
+    } else {
+      const cos = Math.cos(b.angle);
+      const sin = Math.sin(b.angle);
+      placeGlow3d(
+        b.x + 12 * cos,
+        b.y + 12 * sin,
+        36,
+        glowR * 1.1,
+        glowR * 0.9,
+        isChasing ? 0xff5500 : isStalking ? 0xfb923c : 0xf97316,
+        isChasing ? 0.38 * pulse : isStalking ? 0.28 * pulse : 0.2,
+        1
+      );
+      placeGlow3d(
+        b.x + 12.5 * cos - -3.5 * sin,
+        b.y + 12.5 * sin + -3.5 * cos,
+        36,
+        4.4,
+        2.0,
+        eyeTint,
+        0.92,
+        2
+      );
+      placeGlow3d(
+        b.x + 12.5 * cos - 3.5 * sin,
+        b.y + 12.5 * sin + 3.5 * cos,
+        36,
+        4.4,
+        2.0,
+        eyeTint,
+        0.92,
+        2
+      );
+    }
   }
 
   private populateDebugOverlays(
     engine: MonstrumGameEngine,
+    renderDeck: ShipDeck,
     width: number,
     height: number,
     zoom: number,
     camX: number,
-    camY: number
+    camY: number,
+    cullHalfW: number,
+    cullHalfH: number
   ): void {
     const cfg = engine.debugConfig;
-    const halfW = width / (2 * zoom) + 80;
-    const halfH = height / (2 * zoom) + 80;
+    const halfW = cullHalfW + 80;
+    const halfH = cullHalfH + 80;
 
     if (cfg.showWallSegments) {
       const segs = getLocalOccluders(
@@ -3519,6 +3656,107 @@ export class GameRenderer {
       }
     }
 
+    if (cfg.showStructureGizmos) {
+      const ts = engine.map.tileSize;
+      const bounds = engine.map.deckBounds[renderDeck];
+      for (const door of engine.map.doors) {
+        if (door.ty < bounds.y1 || door.ty > bounds.y2) continue;
+        const cx = (door.tx + 0.5) * ts;
+        const cy = (door.ty + 0.5) * ts;
+        if (Math.abs(cx - camX) > halfW || Math.abs(cy - camY) > halfH) continue;
+
+        const tileX = door.tx * ts;
+        const tileY = door.ty * ts;
+        const lineBatch = door.isBroken
+          ? this.postLinesRed!
+          : door.isLocked
+            ? this.postLinesRose!
+            : door.isWatertight
+              ? this.postLinesCyan!
+              : this.postLinesEmerald!;
+        lineBatch.addRect(tileX + 0.5, tileY + 0.5, ts - 1, ts - 1);
+
+        // Draw centerline axis & open swing arc
+        if (door.orientation === 'H') {
+          this.postLinesWhite!.addSegment(tileX + 4, cy, tileX + ts - 4, cy);
+        } else {
+          this.postLinesWhite!.addSegment(cx, tileY + 4, cx, tileY + ts - 4);
+        }
+
+        const leafW = ts - 8;
+        const hingeX = door.orientation === 'H' ? cx - ts / 2 + 4 : cx;
+        const hingeY = door.orientation === 'H' ? cy : cy - ts / 2 + 4;
+        const closedAng = door.orientation === 'H' ? 0 : Math.PI / 2;
+        const openAng = closedAng - 1.38;
+        for (let s = 0; s < 10; s++) {
+          const a0 = closedAng + ((openAng - closedAng) * s) / 10;
+          const a1 = closedAng + ((openAng - closedAng) * (s + 1)) / 10;
+          this.postLinesAmber!.addSegment(
+            hingeX + Math.cos(a0) * leafW,
+            hingeY + Math.sin(a0) * leafW,
+            hingeX + Math.cos(a1) * leafW,
+            hingeY + Math.sin(a1) * leafW
+          );
+        }
+
+        const kindTag = door.isBroken
+          ? 'BRK'
+          : door.isLocked
+            ? 'LCK'
+            : door.isWatertight
+              ? 'WTR'
+              : 'NRM';
+        const badgeText = `${door.orientation}·${kindTag}`;
+        const badge = this.getTextBadge(`gizmo:d:${badgeText}`, badgeText, {
+          font: '700 9px "JetBrains Mono", monospace',
+          textColor: '#f8fafc',
+          bgColor: 'rgba(2, 6, 23, 0.86)',
+          borderColor:
+            door.isBroken ? '#ef4444' : door.isLocked ? '#f43f5e' : door.isWatertight ? '#38bdf8' : '#34d399',
+          padX: 4,
+          height: 14,
+        });
+        this.postSprites!.place(badge, cx, cy - ts * 0.5 - 8, { renderOrder: 6 });
+      }
+
+      for (const st of engine.map.stairwells) {
+        if (st.deck !== renderDeck) continue;
+        if (Math.abs(st.x - camX) > halfW || Math.abs(st.y - camY) > halfH) continue;
+        const tileX = st.tx * ts;
+        const tileY = st.ty * ts;
+        const stLines = st.direction === 'DOWN' ? this.postLinesCyan! : this.postLinesAmber!;
+        stLines.addRect(tileX + 0.5, tileY + 0.5, ts - 1, ts - 1);
+
+        // Show exact approach vector into stairwell (local +Y_three = inward)
+        const rotZ = this.structure3d?.getStairRotation(st.id) ?? 0;
+        // Three local approach inward is (0, +1) -> world2D: (-sin(-rotZ?), ...). Earlier verified:
+        // Entrance is Three (sin(rotZ), -cos(rotZ)) = world2D (sin(rotZ), cos(rotZ)).
+        // So inward vector from entrance toward stairwell center is (-sin(rotZ), -cos(rotZ)).
+        const inX = -Math.sin(rotZ);
+        const inY = -Math.cos(rotZ);
+        const startX = st.x - inX * 28;
+        const startY = st.y - inY * 28;
+        const endX = st.x + inX * 14;
+        const endY = st.y + inY * 14;
+        this.postLinesWhite!.addSegment(startX, startY, endX, endY);
+        const px = -inY * 6;
+        const py = inX * 6;
+        this.postLinesWhite!.addSegment(endX, endY, endX - inX * 7 + px, endY - inY * 7 + py);
+        this.postLinesWhite!.addSegment(endX, endY, endX - inX * 7 - px, endY - inY * 7 - py);
+
+        const stText = st.direction === 'DOWN' ? '↓ DN' : '↑ UP';
+        const stBadge = this.getTextBadge(`gizmo:st:${stText}`, stText, {
+          font: '700 9px "JetBrains Mono", monospace',
+          textColor: '#f8fafc',
+          bgColor: 'rgba(2, 6, 23, 0.88)',
+          borderColor: st.direction === 'DOWN' ? '#38bdf8' : '#fbbf24',
+          padX: 4,
+          height: 14,
+        });
+        this.postSprites!.place(stBadge, st.x, st.y - ts * 0.5 - 8, { renderOrder: 6 });
+      }
+    }
+
     if (cfg.showBlackProbes && engine.debugProbePoints.length > 0) {
       for (let idx = 0; idx < engine.debugProbePoints.length; idx++) {
         const pt = engine.debugProbePoints[idx];
@@ -3565,12 +3803,17 @@ export class GameRenderer {
 
     this.ensurePortalTargets(portalRadius * 2 * dpr);
 
-    // 1. Render destination world into portalTarget
-    this.portalCamera.left = -viewWorldRadius;
-    this.portalCamera.right = viewWorldRadius;
-    this.portalCamera.top = viewWorldRadius;
-    this.portalCamera.bottom = -viewWorldRadius;
-    this.portalCamera.position.set(dest.x, -dest.y, 100);
+    // 1. Render destination world into portalTarget with 3D perspective camera matching active FOV
+    const activeFov = this.worldCamera.fov || CAMERA_FOV_DEG;
+    const portalTanHalfFov = Math.max(0.08, Math.tan(THREE.MathUtils.degToRad(activeFov * 0.5)));
+    if (this.portalCamera.fov !== activeFov) {
+      this.portalCamera.fov = activeFov;
+    }
+    const portalCamZ = viewWorldRadius / portalTanHalfFov;
+    this.portalCamera.aspect = 1;
+    this.portalCamera.far = Math.max(4000, portalCamZ * 4.5);
+    this.portalCamera.position.set(dest.x, -dest.y, portalCamZ);
+    this.portalCamera.lookAt(dest.x, -dest.y, 0);
     this.portalCamera.updateProjectionMatrix();
 
     const destLitPolys = litRoomPolys.filter(
@@ -3583,6 +3826,18 @@ export class GameRenderer {
       Math.hypot(bruteBeam.ox - dest.x, bruteBeam.oy - dest.y) < bruteBeam.range + peekRange
         ? bruteBeam
         : null;
+
+    this.structure3d?.updateForFrame(
+      engine,
+      dest.deck,
+      dest.x,
+      dest.y,
+      viewWorldRadius + 140,
+      viewWorldRadius + 140,
+      null,
+      timeSec,
+      null
+    );
 
     this.populateWorldScene(
       engine,
@@ -3621,7 +3876,14 @@ export class GameRenderer {
     plf.beginFrame();
     this.losFans!.clear();
     if (destSightPoly.length >= 3) {
-      const fan = this.buildDynamicFan('portalLos', dest.x, dest.y, destSightPoly, true);
+      const fan = this.buildDynamicFan(
+        'portalLos',
+        dest.x,
+        dest.y,
+        destSightPoly,
+        true,
+        this.getMaskCurtainOpts(engine.map.tileSize)
+      );
       plf.addFan(fan, 1, peekRange + 100, 0.5, 0xffffff, 1, 0xffffff, 1, 0xffffff, 1);
     }
     plf.endFrame();
@@ -3676,26 +3938,85 @@ export class GameRenderer {
       hasLineOfSight(engine.map, engine.doorsByTile, dest.x, dest.y, b.x, b.y);
     if (bInView && b.state !== 'STUNNED') {
       const isChasing = b.state === 'CHASE' || b.state === 'SMASH_DOOR';
-      const cos = Math.cos(b.angle);
-      const sin = Math.sin(b.angle);
-      const placePortalEye = (lx: number, ly: number, sz: number, tint: number, op: number) => {
-        const wx = b.x + lx * cos - ly * sin;
-        const wy = b.y + lx * sin + ly * cos;
-        const sx = portalX + (wx - dest.x) * zoom;
-        const sy = portalY + (wy - dest.y) * zoom;
+      const isStalking = b.state === 'STALK' || b.state === 'CHECK_HIDING';
+      const pulse = 0.78 + Math.sin(timeSec * 10) * 0.22;
+      const anchors = this.characters3d?.getBruteGleamAnchors();
+      const placePortal3d = (
+        wx: number,
+        wy: number,
+        wz: number,
+        sz: number,
+        tint: number,
+        op: number,
+        ro = 1
+      ) => {
+        this.tmpVec3.set(wx, -wy, wz).project(this.portalCamera);
+        const sx = portalX + this.tmpVec3.x * portalRadius;
+        const sy = portalY - this.tmpVec3.y * portalRadius;
         if (Math.hypot(sx - portalX, sy - portalY) < portalRadius - 8) {
           ss.place(sp.softDisc, sx, sy, {
             scaleX: (sz * zoom) / sp.softDisc.w,
             scaleY: (sz * zoom) / sp.softDisc.h,
             tint,
             opacity: op,
-            renderOrder: 1,
+            renderOrder: ro,
           });
         }
       };
-      placePortalEye(12, 0, isChasing ? 64 : 44, isChasing ? 0xff5500 : 0xf97316, isChasing ? 0.72 : 0.45);
-      placePortalEye(12.5, -3.5, 5, isChasing ? 0xffedd5 : 0xfdba74, 1);
-      placePortalEye(12.5, 3.5, 5, isChasing ? 0xffedd5 : 0xfdba74, 1);
+
+      if (anchors && anchors.valid) {
+        placePortal3d(
+          anchors.browX,
+          anchors.browY,
+          anchors.browZ,
+          isChasing ? 24 : isStalking ? 18 : 14,
+          isChasing ? 0xff5500 : 0xf97316,
+          (isChasing ? 0.28 : 0.18) * pulse,
+          1
+        );
+        const eyeTint = isChasing ? 0xffedd5 : 0xfdba74;
+        placePortal3d(anchors.leftEyeX, anchors.leftEyeY, anchors.leftEyeZ, 3.6, eyeTint, 0.92, 2);
+        placePortal3d(anchors.rightEyeX, anchors.rightEyeY, anchors.rightEyeZ, 3.6, eyeTint, 0.92, 2);
+        placePortal3d(
+          anchors.chestX,
+          anchors.chestY,
+          anchors.chestZ,
+          isChasing ? 14 : 10,
+          isChasing ? 0xff5500 : 0xea580c,
+          (isChasing ? 0.28 : 0.15) * pulse,
+          1
+        );
+      } else {
+        const cos = Math.cos(b.angle);
+        const sin = Math.sin(b.angle);
+        placePortal3d(
+          b.x + 12 * cos,
+          b.y + 12 * sin,
+          38,
+          isChasing ? 60 : 42,
+          isChasing ? 0xff5500 : 0xf97316,
+          isChasing ? 0.72 : 0.45,
+          1
+        );
+        placePortal3d(
+          b.x + 12.5 * cos - -3.5 * sin,
+          b.y + 12.5 * sin + -3.5 * cos,
+          38,
+          5,
+          isChasing ? 0xffedd5 : 0xfdba74,
+          1,
+          2
+        );
+        placePortal3d(
+          b.x + 12.5 * cos - 3.5 * sin,
+          b.y + 12.5 * sin + 3.5 * cos,
+          38,
+          5,
+          isChasing ? 0xffedd5 : 0xfdba74,
+          1,
+          2
+        );
+      }
     }
 
     // 5. Header badge just above portal rim
@@ -3733,6 +4054,7 @@ export class GameRenderer {
     this.vignetteBundle.uSteamFog.value = engine.player.steamFogAlpha;
     this.vignetteBundle.uRedBoost.value = redBoost;
     this.vignetteBundle.uSpotFlash.value = engine.spotFlashAlpha;
+    this.vignetteBundle.uVignetteIntensity.value = this.graphicsSettings.vignetteIntensity;
   }
 
   private enqueueReadback<T>(fn: () => Promise<T>): Promise<T> {
@@ -3749,7 +4071,7 @@ export class GameRenderer {
       !this.initialized ||
       !this.renderer ||
       !this.probeTarget ||
-      !this.readbackBlitMat ||
+      !this.readbackBlitBundle ||
       engine.debugProbePoints.length === 0
     ) {
       return [];
@@ -3771,12 +4093,13 @@ export class GameRenderer {
       const h = this.lastScreenHeight;
       const dprX = pw / Math.max(1, w);
       const dprY = ph / Math.max(1, h);
-      const zoom = engine.getEffectiveZoom(w, h);
       const results: ProbeReading[] = [];
 
+      this.worldCamera.updateMatrixWorld();
       for (const pt of engine.debugProbePoints) {
-        const sx = (pt.x - engine.cameraX) * zoom + w / 2;
-        const sy = (pt.y - engine.cameraY) * zoom + h / 2;
+        this.tmpVec3.set(pt.x, -pt.y, 0).project(this.worldCamera);
+        const sx = (this.tmpVec3.x * 0.5 + 0.5) * w;
+        const sy = (-this.tmpVec3.y * 0.5 + 0.5) * h;
         const px = Math.round(sx * dprX);
         const py = Math.round(sy * dprY);
         if (px < 0 || py < 0 || px >= pw || py >= ph) continue;
@@ -3807,7 +4130,7 @@ export class GameRenderer {
   }
 
   public async capturePngDataUrlAsync(): Promise<string | null> {
-    if (!this.initialized || !this.renderer || !this.probeTarget || !this.readbackBlitMat) {
+    if (!this.initialized || !this.renderer || !this.probeTarget || !this.readbackBlitBundle) {
       return null;
     }
     return this.enqueueReadback(async () => {
@@ -3851,6 +4174,15 @@ export class GameRenderer {
     this.disposed = true;
     this.initialized = false;
 
+    this.structure3d?.dispose();
+    this.structure3d = null;
+    this.characters3d?.dispose();
+    this.characters3d = null;
+    this.objects3d?.dispose();
+    this.objects3d = null;
+    this.escapes3d?.dispose();
+    this.escapes3d = null;
+
     for (const ch of this.deckChunkMeshes) {
       this.worldScene.remove(ch.mesh);
       ch.geom.dispose();
@@ -3872,8 +4204,10 @@ export class GameRenderer {
     this.worldSprites?.dispose();
     this.postSprites?.dispose();
     this.screenSprites?.dispose();
+    this.poweredWarmWallFans?.dispose();
     this.staticWarmFans?.dispose();
     this.worldWarmFans?.dispose();
+    this.poweredMaskWallFans?.dispose();
     this.staticMaskFans?.dispose();
     this.lightMaskFans?.dispose();
     this.deckBakeWarmFans?.dispose();
@@ -3904,20 +4238,26 @@ export class GameRenderer {
     this.losTarget?.dispose();
     this.lightMaskTarget?.dispose();
     this.finalTarget?.dispose();
+    this.bloomATarget?.dispose();
+    this.bloomBTarget?.dispose();
     this.probeTarget?.dispose();
     this.portalTarget?.dispose();
     this.portalLosTarget?.dispose();
     this.deckWarmTarget?.dispose();
     this.deckMaskTarget?.dispose();
+    this.emptyBlackTex.dispose();
 
     this.oceanBundle?.material.dispose();
     this.compositeBundle?.material.dispose();
     this.vignetteBundle?.material.dispose();
     this.portalBundle?.material.dispose();
+    this.bloomExtractBundle?.material.dispose();
+    this.bloomBlurHBundle?.material.dispose();
+    this.bloomBlurVBundle?.material.dispose();
     this.deckWarmMat?.dispose();
     this.deckMaskMat?.dispose();
-    this.screenBlitMat?.dispose();
-    this.readbackBlitMat?.dispose();
+    this.screenBlitBundle?.material.dispose();
+    this.readbackBlitBundle?.material.dispose();
 
     this.unitQuadGeom.dispose();
     this.ndcQuadGeom.dispose();

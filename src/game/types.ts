@@ -1,4 +1,7 @@
-export const GAME_VERSION = '0.3.0';
+export const GAME_VERSION = '0.3.1';
+
+export const WALL_HEIGHT_RATIO = 1.25;
+export const DOOR_HEIGHT_PX = 46;
 
 export const REFERENCE_VIEWPORT_WIDTH = 1440;
 export const REFERENCE_VIEWPORT_HEIGHT = 900;
@@ -550,7 +553,7 @@ export interface HidingSpot {
   checkedFlash: number; // visual flash timer when Brute rips it open
 }
 
-export type ContainerType = 'CABINET' | 'TOOLBOX' | 'SUPPLY_CRATE' | 'DESK';
+export type ContainerType = 'CABINET' | 'TOOLBOX' | 'DRAWER' | 'DESK';
 
 export interface Container {
   id: string;
@@ -561,8 +564,20 @@ export interface Container {
   type: ContainerType;
   room: RoomName;
   roomId: number;
+  angle: number;
+  isOpen: boolean;
+  openProgress: number;
   searched: boolean;
   item: ItemId | null;
+}
+
+export interface CursorContainerTarget {
+  kind: 'CONTAINER' | 'CONTAINER_ITEM';
+  containerId: string;
+  dist: number;
+  inReach: boolean;
+  hasLos: boolean;
+  item?: ItemId;
 }
 
 export interface SteamPipe {
@@ -622,6 +637,27 @@ export interface BloodStreak {
   roomId?: number;
 }
 
+export interface Deck3HullWedge {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  kind: 'CHAMFER' | 'BOW' | 'STERN';
+}
+
+export interface Deck3RailingSegment {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  nx: number;
+  ny: number;
+  hasStartPost: boolean;
+  hasEndPost: boolean;
+}
+
 export interface ShipMap {
   width: number;
   height: number;
@@ -646,6 +682,8 @@ export interface ShipMap {
   corridorLights: CorridorLightFixture[];
   lockedOnlyRoomIds: number[];
   bloodStreaks: BloodStreak[];
+  deck3HullWedges: Deck3HullWedge[];
+  deck3Railings: Deck3RailingSegment[];
   playerSpawn: { x: number; y: number };
   bruteSpawn: { x: number; y: number };
   lifeboatPos: { x: number; y: number; tx: number; ty: number };
@@ -898,6 +936,8 @@ export interface AcousticContext {
   nearestFlareIntensity: number;
 }
 
+export type DebugRenderMode = 'NORMAL' | 'FULLBRIGHT' | 'LOS_ONLY' | 'LOS_MASK' | 'LIGHT_MASK';
+
 export interface DebugOverlayConfig {
   enabled: boolean;
   freezeAi: boolean;
@@ -908,5 +948,18 @@ export interface DebugOverlayConfig {
   forceVentPeek: boolean;
   forceDoorPeek: boolean;
   forceStairPeek: boolean;
+  renderMode: DebugRenderMode;
+  cameraPitchDeg: number;
+  cameraYawDeg: number;
+  cameraFovDeg: number;
+  wireframeStructure: boolean;
+  hideWallCaps: boolean;
+  showStructureGizmos: boolean;
+  debugDeckOverride: 'AUTO' | ShipDeck;
+  freeCamEnabled: boolean;
+  freeCamX: number;
+  freeCamY: number;
+  freeCamZoom: number;
 }
+
 
