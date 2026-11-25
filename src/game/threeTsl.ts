@@ -506,7 +506,7 @@ function buildPostGradedLinearColor(
   const uExposure = uniform(1.0);
   const uToneMappingMode = uniform(0.0); // 0=ACES, 1=NEUTRAL, 2=REINHARD_EXTENDED
   const uColorGradeMode = uniform(0.0); // 0=COLD_HORROR, 1=AMBER_RUST, 2=NOIR_CONTRAST, 3=NEUTRAL
-  const uFilmGrain = uniform(0.16);
+  const uFilmGrain = uniform(0.5);
   const uTime = uniform(0.0);
   const uHdrActive = uniform(0.0);
   const uPaperWhiteScale = uniform(1.0);
