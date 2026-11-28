@@ -42,6 +42,7 @@ export interface RadialFanMaterialBundle {
 export function createBatchedRadialFanMaterial(depthTest = false): THREE.MeshBasicNodeMaterial {
   const radialOffset = attribute('aRadialOffset', 'vec2');
   const params = attribute('aFanParams', 'vec3');
+  const cone = attribute('aConeParams', 'vec4');
   const c0 = attribute('aColor0', 'vec4');
   const c1 = attribute('aColor1', 'vec4');
   const c2 = attribute('aColor2', 'vec4');
@@ -59,8 +60,15 @@ export function createBatchedRadialFanMaterial(depthTest = false): THREE.MeshBas
   const tHigh = clamp(t.sub(stopSafe).div(float(1.0).sub(stopSafe)), float(0.0), float(1.0));
   const inHigh = step(stopSafe, t);
 
+  const dir = radialOffset.div(max(dist, float(0.0001)));
+  const angDot = dot(dir, cone.xy);
+  const coneMask = smoothstep(cone.w, cone.z, angDot);
+  const originBlend = smoothstep(float(2.0), float(10.0), dist);
+  const angAlpha = mix(float(1.0), coneMask, step(float(-1.2), cone.w).mul(originBlend));
+
   const col = mix(mix(c0.rgb, c1.rgb, tLow), mix(c1.rgb, c2.rgb, tHigh), inHigh);
-  const alpha = mix(mix(c0.w, c1.w, tLow), mix(c1.w, c2.w, tHigh), inHigh);
+  const baseAlpha = mix(mix(c0.w, c1.w, tLow), mix(c1.w, c2.w, tHigh), inHigh);
+  const alpha = baseAlpha.mul(angAlpha);
 
   const material = new THREE.MeshBasicNodeMaterial();
   material.colorNode = col;

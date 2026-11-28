@@ -641,6 +641,18 @@ export function applyDebugScenarioToEngine(
       b.y = setup.bruteApproachPos.y;
       b.angle = Math.atan2(setup.spot.y - b.y, setup.spot.x - b.x);
       // Enter hiding spot via real interaction
+      engine.setRaycastTarget({
+        kind: 'HIDING',
+        targetId: setup.spot.id,
+        ownerKey: `HIDING:${setup.spot.id}`,
+        dist: 16,
+        inReach: true,
+        hasLos: true,
+        hitX: setup.spot.x,
+        hitY: setup.spot.y,
+        hitZ: 24,
+        hitDist: 16,
+      });
       engine.tryInteract();
       // Keep Brute frozen until user/script inspects or unfreezes
       b.watchedPlayerHideSpotId = null;
@@ -664,6 +676,18 @@ export function applyDebugScenarioToEngine(
       b.angle = Math.atan2(setup.spot.y - b.y, setup.spot.x - b.x);
       b.state = 'CHASE';
       // Enter hiding spot right in front of Brute
+      engine.setRaycastTarget({
+        kind: 'HIDING',
+        targetId: setup.spot.id,
+        ownerKey: `HIDING:${setup.spot.id}`,
+        dist: 16,
+        inReach: true,
+        hasLos: true,
+        hitX: setup.spot.x,
+        hitY: setup.spot.y,
+        hitZ: 24,
+        hitDist: 16,
+      });
       engine.tryInteract();
     }
     engine.debugConfig.freezeAi = false;
@@ -931,12 +955,16 @@ export function applyDebugScenarioToEngine(
   engine.cameraY = p.y;
   engine.lookAheadX = 0;
   engine.lookAheadY = 0;
+  engine.fpPitchDeg = 0;
+  engine.fpEyeZ = p.hidingSpotId !== null ? 27 : p.crouching ? 22 : 39;
+  engine.setRaycastTarget(null);
   engine.debugConfig.renderMode = 'NORMAL';
   engine.debugConfig.cameraPitchDeg = DEFAULT_CAMERA_PITCH_DEG;
   engine.debugConfig.cameraYawDeg = DEFAULT_CAMERA_YAW_DEG;
   engine.debugConfig.cameraFovDeg = DEFAULT_CAMERA_FOV_DEG;
   engine.debugConfig.wireframeStructure = false;
   engine.debugConfig.hideWallCaps = false;
+  engine.debugConfig.showCeilings = engine.viewMode === 'FIRST_PERSON';
   engine.debugConfig.debugDeckOverride = 'AUTO';
   engine.debugConfig.freeCamEnabled = false;
   engine.debugConfig.freeCamX = p.x;

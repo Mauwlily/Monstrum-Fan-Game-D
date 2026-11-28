@@ -236,7 +236,7 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
     return true;
   };
 
-  const SUB_POOL_TX = 102;
+  const SUB_POOL_TX = 101;
   const SUB_POOL_TY = 92;
   const SUB_POOL_TW = 4;
   const SUB_POOL_TH = 6;
@@ -1789,11 +1789,11 @@ export function generateCargoShip(inputSeed?: number): ShipMap {
 
   // Anchor Bay 3: Moonpool Submarine Bay (Unique ~12x10, forward bilge)
   const subId = addRoom('Submarine Bay', 'DECK_1', 94, 90, 105, 99, 'FLOOR', 'GRATING');
-  const subTx = 99;
+  const subTx = 98;
   const subTy = 95;
   setTile(subTx, subTy, 'ESCAPE_SUBMARINE', 'Submarine Bay', 'GRATING', subId);
   reserveAround(subTx, subTy, 2);
-  const subLeverTx = 96;
+  const subLeverTx = 95;
   const subLeverTy = 92;
   addProp('SUBMARINE_HULL', 'DECK_1', SUB_POOL_TX, SUB_POOL_TY, SUB_POOL_TW, SUB_POOL_TH, {
     blocking: false,

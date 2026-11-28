@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { ArrowLeft, Sliders } from 'lucide-react';
 import { GraphicsSettings } from '../game/graphicsSettings';
-import { detectDifficultyPreset, DifficultyLevel, GAME_VERSION, RunStats } from '../game/types';
+import { detectDifficultyPreset, DifficultyLevel, GAME_VERSION, GameViewMode, RunStats } from '../game/types';
 import { GraphicsSettingsPanel } from './GraphicsSettingsPanel';
 
 interface PauseModalProps {
   seed: number;
+  viewMode: GameViewMode;
   graphicsSettings: GraphicsSettings;
   onChangeGraphicsSettings: (next: GraphicsSettings) => void;
   onResetGraphicsSettings: () => void;
@@ -17,6 +18,7 @@ interface PauseModalProps {
 
 export const PauseModal: React.FC<PauseModalProps> = ({
   seed,
+  viewMode,
   graphicsSettings,
   onChangeGraphicsSettings,
   onResetGraphicsSettings,
@@ -64,7 +66,9 @@ export const PauseModal: React.FC<PauseModalProps> = ({
         ) : (
           <>
             <h2 className="font-display text-2xl font-bold text-slate-100">Game Paused</h2>
-            <p className="mt-1 text-xs text-slate-400 font-mono-num">Vessel Seed: {seed}</p>
+            <p className="mt-1 text-xs text-slate-400 font-mono-num">
+              Vessel Seed: {seed} · {viewMode === 'FIRST_PERSON' ? 'First-Person' : 'Top-Down 3D'}
+            </p>
 
             <div className="mt-6 flex flex-col gap-2.5">
               <button
@@ -108,6 +112,7 @@ export const PauseModal: React.FC<PauseModalProps> = ({
 interface EndModalProps {
   outcome: 'VICTORY' | 'GAME_OVER';
   stats: RunStats;
+  viewMode: GameViewMode;
   onPlayAgain: () => void;
   onMainMenu: () => void;
 }
@@ -133,6 +138,7 @@ function formatDifficultyLabel(stats: RunStats): string {
 export const EndModal: React.FC<EndModalProps> = ({
   outcome,
   stats,
+  viewMode,
   onPlayAgain,
   onMainMenu,
 }) => {
@@ -143,6 +149,8 @@ export const EndModal: React.FC<EndModalProps> = ({
       <div className="w-full max-w-md rounded-lg border border-slate-800 bg-[#0d1118] p-7 shadow-2xl">
         <div className="text-xs font-medium text-slate-400">
           <span className="font-mono-num text-slate-300">v{GAME_VERSION}</span>
+          <span aria-hidden="true"> · </span>
+          <span>{viewMode === 'FIRST_PERSON' ? 'First-Person' : 'Top-Down'}</span>
           <span aria-hidden="true"> · </span>
           {isVictory ? 'Vessel Escaped' : 'Killed Aboard Ship'}
           <span aria-hidden="true"> · </span>

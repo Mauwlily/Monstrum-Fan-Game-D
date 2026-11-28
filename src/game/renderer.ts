@@ -42,7 +42,7 @@ import {
   StairPortalMaterialBundle,
   VignetteDangerMaterialBundle,
 } from './threeTsl';
-import { ShipStructure3D } from './threeStructure';
+import { EXTERIOR_DECK3_ROOMS, ShipStructure3D } from './threeStructure';
 import { ShipCharacters3D } from './threeCharacters';
 import { ShipObjects3D } from './threeObjects';
 import { ShipEscapes3D } from './threeEscapes';
@@ -51,6 +51,9 @@ import {
   DOOR_HEIGHT_PX,
   getDeckLabel,
   getViewportResolutionScale,
+  RaycastDebugInfo,
+  RaycastInteractTarget,
+  RaycastTargetKind,
   RoomLightSwitch,
   RoomName,
   ShipDeck,
@@ -225,12 +228,14 @@ class FanBatch {
   private posAttr: THREE.BufferAttribute;
   private radialAttr: THREE.BufferAttribute;
   private paramsAttr: THREE.BufferAttribute;
+  private coneAttr: THREE.BufferAttribute;
   private col0Attr: THREE.BufferAttribute;
   private col1Attr: THREE.BufferAttribute;
   private col2Attr: THREE.BufferAttribute;
   private posArr: Float32Array;
   private radialArr: Float32Array;
   private paramsArr: Float32Array;
+  private coneArr: Float32Array;
   private col0Arr: Float32Array;
   private col1Arr: Float32Array;
   private col2Arr: Float32Array;
@@ -255,6 +260,7 @@ class FanBatch {
     this.posArr = new Float32Array(initialVerts * 3);
     this.radialArr = new Float32Array(initialVerts * 2);
     this.paramsArr = new Float32Array(initialVerts * 3);
+    this.coneArr = new Float32Array(initialVerts * 4);
     this.col0Arr = new Float32Array(initialVerts * 4);
     this.col1Arr = new Float32Array(initialVerts * 4);
     this.col2Arr = new Float32Array(initialVerts * 4);
@@ -262,6 +268,7 @@ class FanBatch {
     this.posAttr = new THREE.BufferAttribute(this.posArr, 3).setUsage(THREE.DynamicDrawUsage);
     this.radialAttr = new THREE.BufferAttribute(this.radialArr, 2).setUsage(THREE.DynamicDrawUsage);
     this.paramsAttr = new THREE.BufferAttribute(this.paramsArr, 3).setUsage(THREE.DynamicDrawUsage);
+    this.coneAttr = new THREE.BufferAttribute(this.coneArr, 4).setUsage(THREE.DynamicDrawUsage);
     this.col0Attr = new THREE.BufferAttribute(this.col0Arr, 4).setUsage(THREE.DynamicDrawUsage);
     this.col1Attr = new THREE.BufferAttribute(this.col1Arr, 4).setUsage(THREE.DynamicDrawUsage);
     this.col2Attr = new THREE.BufferAttribute(this.col2Arr, 4).setUsage(THREE.DynamicDrawUsage);
@@ -270,6 +277,7 @@ class FanBatch {
     this.geom.setAttribute('position', this.posAttr);
     this.geom.setAttribute('aRadialOffset', this.radialAttr);
     this.geom.setAttribute('aFanParams', this.paramsAttr);
+    this.geom.setAttribute('aConeParams', this.coneAttr);
     this.geom.setAttribute('aColor0', this.col0Attr);
     this.geom.setAttribute('aColor1', this.col1Attr);
     this.geom.setAttribute('aColor2', this.col2Attr);
@@ -308,6 +316,7 @@ class FanBatch {
     const nextPos = new Float32Array(nextMax * 3);
     const nextRadial = new Float32Array(nextMax * 2);
     const nextParams = new Float32Array(nextMax * 3);
+    const nextCone = new Float32Array(nextMax * 4);
     const nextCol0 = new Float32Array(nextMax * 4);
     const nextCol1 = new Float32Array(nextMax * 4);
     const nextCol2 = new Float32Array(nextMax * 4);
@@ -316,6 +325,7 @@ class FanBatch {
       nextPos.set(this.posArr.subarray(0, this.vertexCursor * 3));
       nextRadial.set(this.radialArr.subarray(0, this.vertexCursor * 2));
       nextParams.set(this.paramsArr.subarray(0, this.vertexCursor * 3));
+      nextCone.set(this.coneArr.subarray(0, this.vertexCursor * 4));
       nextCol0.set(this.col0Arr.subarray(0, this.vertexCursor * 4));
       nextCol1.set(this.col1Arr.subarray(0, this.vertexCursor * 4));
       nextCol2.set(this.col2Arr.subarray(0, this.vertexCursor * 4));
@@ -324,6 +334,7 @@ class FanBatch {
     this.posArr = nextPos;
     this.radialArr = nextRadial;
     this.paramsArr = nextParams;
+    this.coneArr = nextCone;
     this.col0Arr = nextCol0;
     this.col1Arr = nextCol1;
     this.col2Arr = nextCol2;
@@ -331,6 +342,7 @@ class FanBatch {
     this.posAttr = new THREE.BufferAttribute(nextPos, 3).setUsage(THREE.DynamicDrawUsage);
     this.radialAttr = new THREE.BufferAttribute(nextRadial, 2).setUsage(THREE.DynamicDrawUsage);
     this.paramsAttr = new THREE.BufferAttribute(nextParams, 3).setUsage(THREE.DynamicDrawUsage);
+    this.coneAttr = new THREE.BufferAttribute(nextCone, 4).setUsage(THREE.DynamicDrawUsage);
     this.col0Attr = new THREE.BufferAttribute(nextCol0, 4).setUsage(THREE.DynamicDrawUsage);
     this.col1Attr = new THREE.BufferAttribute(nextCol1, 4).setUsage(THREE.DynamicDrawUsage);
     this.col2Attr = new THREE.BufferAttribute(nextCol2, 4).setUsage(THREE.DynamicDrawUsage);
@@ -338,6 +350,7 @@ class FanBatch {
     this.geom.setAttribute('position', this.posAttr);
     this.geom.setAttribute('aRadialOffset', this.radialAttr);
     this.geom.setAttribute('aFanParams', this.paramsAttr);
+    this.geom.setAttribute('aConeParams', this.coneAttr);
     this.geom.setAttribute('aColor0', this.col0Attr);
     this.geom.setAttribute('aColor1', this.col1Attr);
     this.geom.setAttribute('aColor2', this.col2Attr);
@@ -361,7 +374,8 @@ class FanBatch {
     c1Hex: number,
     a1: number,
     c2Hex: number,
-    a2: number
+    a2: number,
+    cone?: { angle: number; innerHalfRad: number; outerHalfRad: number }
   ): void {
     const vCount = fan.vertexCount;
     if (vCount <= 0) return;
@@ -375,6 +389,13 @@ class FanBatch {
     this.mixHash(c1Hex);
     this.mixHash(Math.round(a1 * 1000));
     this.mixHash(Math.round(range));
+    if (cone) {
+      this.mixHash(Math.round(cone.angle * 1000));
+      this.mixHash(Math.round(cone.innerHalfRad * 1000));
+      this.mixHash(Math.round(cone.outerHalfRad * 1000));
+    } else {
+      this.mixHash(0x7fffffff);
+    }
 
     this.ensureCapacity(vCount);
 
@@ -396,7 +417,13 @@ class FanBatch {
     const g2 = this.c2.g;
     const b2 = this.c2.b;
 
+    const cdx = cone ? Math.cos(cone.angle) : 1;
+    const cdy = cone ? -Math.sin(cone.angle) : 0;
+    const cosIn = cone ? Math.cos(cone.innerHalfRad) : -1.5;
+    const cosOut = cone ? Math.min(cosIn - 0.001, Math.cos(cone.outerHalfRad)) : -2.0;
+
     const paramsArr = this.paramsArr;
+    const coneArr = this.coneArr;
     const col0Arr = this.col0Arr;
     const col1Arr = this.col1Arr;
     const col2Arr = this.col2Arr;
@@ -408,6 +435,11 @@ class FanBatch {
       paramsArr[i3 + 1] = range;
       paramsArr[i3 + 2] = stopPos;
       i3 += 3;
+
+      coneArr[i4] = cdx;
+      coneArr[i4 + 1] = cdy;
+      coneArr[i4 + 2] = cosIn;
+      coneArr[i4 + 3] = cosOut;
 
       col0Arr[i4] = r0;
       col0Arr[i4 + 1] = g0;
@@ -463,6 +495,10 @@ class FanBatch {
     this.paramsAttr.clearUpdateRanges();
     this.paramsAttr.addUpdateRange(0, count * 3);
     this.paramsAttr.needsUpdate = true;
+
+    this.coneAttr.clearUpdateRanges();
+    this.coneAttr.addUpdateRange(0, count * 4);
+    this.coneAttr.needsUpdate = true;
 
     this.col0Attr.clearUpdateRanges();
     this.col0Attr.addUpdateRange(0, count * 4);
@@ -874,6 +910,7 @@ export class GameRenderer {
   private bakedLightDeck: ShipDeck | null = null;
   private bakedLightDoorHash1 = 0;
   private bakedLightDoorHash2 = 0;
+  private bakedLightCeilingsVisible = false;
   private targetPixelW = 0;
   private targetPixelH = 0;
   private portalPixelSpan = 0;
@@ -881,6 +918,13 @@ export class GameRenderer {
   // TSL Materials & Quads
   private oceanBundle: OceanMaterialBundle | null = null;
   private oceanMesh: THREE.Mesh | null = null;
+  private skyDomeMesh: THREE.Mesh | null = null;
+  private skyLosMesh: THREE.Mesh | null = null;
+  private skyMaskMesh: THREE.Mesh | null = null;
+  private skyDomeTex: THREE.CanvasTexture | null = null;
+  private skyDomeMat: THREE.MeshBasicMaterial | null = null;
+  private skyLosMat: THREE.MeshBasicMaterial | null = null;
+  private skyMaskMat: THREE.MeshBasicMaterial | null = null;
   private compositeBundle: CompositeMaterialBundle | null = null;
   private vignetteBundle: VignetteDangerMaterialBundle | null = null;
   private portalBundle: StairPortalMaterialBundle | null = null;
@@ -942,6 +986,7 @@ export class GameRenderer {
   private raycaster = new THREE.Raycaster();
   private pointerNdc = new THREE.Vector2();
   private raycastScratch: THREE.Intersection[] = [];
+  private raycastOccScratch: THREE.Intersection[] = [];
   private tmpVec2 = new THREE.Vector2();
   private tmpVec3 = new THREE.Vector3();
   private _groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
@@ -1054,6 +1099,8 @@ export class GameRenderer {
       this.oceanMesh.frustumCulled = false;
       this.oceanMesh.renderOrder = 0;
       this.worldScene.add(this.oceanMesh);
+
+      this.createSkyDomes();
 
       // Pools
       this.worldSprites = new SpritePool(this.worldScene, this.unitQuadGeom, 8, 96, true, true);
@@ -1456,21 +1503,167 @@ export class GameRenderer {
     return entry;
   }
 
-  private getMaskCurtainOpts(tileSize: number): FanCurtainOptions {
+  private createSkyDomes(): void {
+    const w = 512;
+    const h = 256;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d')!;
+
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0.0, '#0e1b30');
+    grad.addColorStop(0.45, '#1a304d');
+    grad.addColorStop(0.82, '#2d4c70');
+    grad.addColorStop(1.0, '#162840');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    // Procedural stormy cloud bands, subtle cold stars & moonlight rift
+    let seed = 42031;
+    const rnd = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 4294967296;
+    };
+    for (let i = 0; i < 42; i++) {
+      const sx = rnd() * w;
+      const sy = rnd() * h * 0.55;
+      const sz = rnd() > 0.72 ? 1.5 : 1.0;
+      ctx.fillStyle = `rgba(219, 234, 254, ${(0.22 + rnd() * 0.45).toFixed(2)})`;
+      ctx.fillRect(sx, sy, sz, sz);
+    }
+    for (let i = 0; i < 65; i++) {
+      const cx = rnd() * w;
+      const cy = h * (0.18 + rnd() * 0.72);
+      const rx = 28 + rnd() * 78;
+      const ry = 8 + rnd() * 22;
+      const bright = rnd() > 0.65;
+      const cg = ctx.createRadialGradient(cx, cy, 1, cx, cy, rx);
+      cg.addColorStop(0, bright ? 'rgba(96, 134, 178, 0.28)' : 'rgba(12, 22, 38, 0.34)');
+      cg.addColorStop(1, 'rgba(12, 22, 38, 0)');
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(1, ry / rx);
+      ctx.fillStyle = cg;
+      ctx.beginPath();
+      ctx.arc(0, 0, rx, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    const moonG = ctx.createRadialGradient(w * 0.72, h * 0.32, 4, w * 0.72, h * 0.32, 110);
+    moonG.addColorStop(0, 'rgba(198, 222, 248, 0.45)');
+    moonG.addColorStop(0.35, 'rgba(110, 146, 190, 0.22)');
+    moonG.addColorStop(1, 'rgba(22, 40, 64, 0)');
+    ctx.fillStyle = moonG;
+    ctx.fillRect(0, 0, w, h);
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    this.skyDomeTex = tex;
+
+    // Upper hemisphere + slight sub-horizon margin (Z-up)
+    const skyGeom = new THREE.SphereGeometry(2800, 32, 16, 0, Math.PI * 2, 0, Math.PI * 0.525);
+    skyGeom.rotateX(Math.PI * 0.5);
+
+    this.skyDomeMat = new THREE.MeshBasicMaterial({
+      map: tex,
+      side: THREE.BackSide,
+      depthWrite: true,
+      depthTest: true,
+    });
+    this.skyDomeMesh = new THREE.Mesh(skyGeom, this.skyDomeMat);
+    this.skyDomeMesh.frustumCulled = false;
+    this.skyDomeMesh.renderOrder = 0;
+    this.skyDomeMesh.visible = false;
+    this.worldScene.add(this.skyDomeMesh);
+
+    this.skyLosMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      side: THREE.BackSide,
+      depthWrite: false,
+      depthTest: true,
+    });
+    this.skyLosMesh = new THREE.Mesh(skyGeom, this.skyLosMat);
+    this.skyLosMesh.frustumCulled = false;
+    this.skyLosMesh.renderOrder = 1;
+    this.skyLosMesh.visible = false;
+    this.losScene.add(this.skyLosMesh);
+
+    this.skyMaskMat = new THREE.MeshBasicMaterial({
+      color: 0xd8e6f8,
+      side: THREE.BackSide,
+      depthWrite: false,
+      depthTest: true,
+    });
+    this.skyMaskMesh = new THREE.Mesh(skyGeom, this.skyMaskMat);
+    this.skyMaskMesh.frustumCulled = false;
+    this.skyMaskMesh.renderOrder = 1;
+    this.skyMaskMesh.visible = false;
+    this.lightMaskScene.add(this.skyMaskMesh);
+  }
+
+  public getCeilingStats(): Record<ShipDeck, { tiles: number; visible: boolean }> | null {
+    return this.structure3d?.getCeilingStats() ?? null;
+  }
+
+  private isCeilingsVisible(engine: MonstrumGameEngine): boolean {
+    if (engine.debugConfig.enabled) {
+      return engine.debugConfig.showCeilings;
+    }
+    return engine.viewMode === 'FIRST_PERSON';
+  }
+
+  private isDeck3ExteriorPos(map: ShipMap, wx: number, wy: number): boolean {
+    const tx = Math.floor(wx / map.tileSize);
+    const ty = Math.floor(wy / map.tileSize);
+    const bounds = map.deckBounds.DECK_3;
+    if (tx < 0 || tx >= map.width || ty < bounds.y1 || ty > bounds.y2) return true;
+    const tile = map.tiles[ty]?.[tx];
+    if (!tile || tile === 'VOID' || tile === 'EXTERIOR_DECK') return true;
+    const room = map.roomGrid[ty]?.[tx];
+    return !room || EXTERIOR_DECK3_ROOMS.has(room);
+  }
+
+  private getMaskCurtainOpts(
+    tileSize: number,
+    withCeilings = false,
+    map?: ShipMap,
+    activeDeck?: ShipDeck
+  ): FanCurtainOptions {
+    const canCap =
+      withCeilings && map && activeDeck === 'DECK_3'
+        ? (wx: number, wy: number) => !this.isDeck3ExteriorPos(map, wx, wy)
+        : undefined;
     return {
       wallHeight: tileSize * WALL_HEIGHT_RATIO - 0.15,
-      doorHeight: DOOR_HEIGHT_PX + 0.4,
+      doorHeight: withCeilings ? tileSize * WALL_HEIGHT_RATIO - 0.15 : DOOR_HEIGHT_PX + 0.4,
       floorZ: 0.04,
       pushInwardPx: 0,
+      ceilingCapZ: withCeilings ? tileSize * WALL_HEIGHT_RATIO - 0.5 : undefined,
+      canCapCeiling: canCap,
     };
   }
 
-  private getWarmCurtainOpts(tileSize: number): FanCurtainOptions {
+  private getWarmCurtainOpts(
+    tileSize: number,
+    withCeilings = false,
+    map?: ShipMap,
+    activeDeck?: ShipDeck
+  ): FanCurtainOptions {
+    const canCap =
+      withCeilings && map && activeDeck === 'DECK_3'
+        ? (wx: number, wy: number) => !this.isDeck3ExteriorPos(map, wx, wy)
+        : undefined;
     return {
       wallHeight: tileSize * WALL_HEIGHT_RATIO - 0.15,
-      doorHeight: DOOR_HEIGHT_PX + 0.4,
+      doorHeight: withCeilings ? tileSize * WALL_HEIGHT_RATIO - 0.15 : DOOR_HEIGHT_PX + 0.4,
       floorZ: 0.04,
-      pushInwardPx: 0.08,
+      pushInwardPx: 0.28,
+      ceilingCapZ: withCeilings ? tileSize * WALL_HEIGHT_RATIO - 0.5 : undefined,
+      canCapCeiling: canCap,
     };
   }
 
@@ -1515,8 +1708,20 @@ export class GameRenderer {
     width: number,
     height: number
   ): void {
-    if (!this.initialized || !this.objects3d || width <= 0 || height <= 0) {
-      engine.setCursorTarget(null);
+    const emptyDbg: RaycastDebugInfo = {
+      hitKind: null,
+      targetId: null,
+      subTarget: null,
+      inReach: false,
+      hasLos: false,
+      blockedBy: null,
+      hitDist: null,
+      occDist: null,
+      hitZ: null,
+      dist2d: null,
+    };
+    if (!this.initialized || !this.objects3d || !this.structure3d || width <= 0 || height <= 0) {
+      engine.setRaycastTarget(null, emptyDbg);
       return;
     }
     const p = engine.player;
@@ -1527,78 +1732,325 @@ export class GameRenderer {
       engine.journalOpen ||
       p.openPaperMapDeck !== null
     ) {
-      engine.setCursorTarget(null);
+      engine.setRaycastTarget(null, emptyDbg);
       return;
     }
 
     const activeDeck = engine.getCurrentDeck();
-    const targets = this.objects3d.getRaycastTargets(activeDeck);
+    const targets: THREE.Object3D[] = [
+      ...this.structure3d.getRaycastTargets(activeDeck),
+      ...this.objects3d.getRaycastTargets(activeDeck),
+      ...(this.escapes3d ? this.escapes3d.getRaycastTargets(activeDeck) : []),
+    ];
     if (targets.length === 0) {
-      engine.setCursorTarget(null);
+      engine.setRaycastTarget(null, emptyDbg);
       return;
     }
 
-    this.pointerNdc.set((screenX / width) * 2 - 1, -(screenY / height) * 2 + 1);
+    const useCenterReticle =
+      engine.viewMode === 'FIRST_PERSON' &&
+      !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
+    if (useCenterReticle) {
+      this.pointerNdc.set(0, 0);
+    } else {
+      this.pointerNdc.set((screenX / width) * 2 - 1, -(screenY / height) * 2 + 1);
+    }
     this.worldCamera.updateMatrixWorld();
     this.raycaster.setFromCamera(this.pointerNdc, this.worldCamera);
     this.raycastScratch.length = 0;
     this.raycaster.intersectObjects(targets, false, this.raycastScratch);
     if (this.raycastScratch.length === 0) {
-      engine.setCursorTarget(null);
+      engine.setRaycastTarget(null, emptyDbg);
       return;
     }
 
-    // Prioritize revealed 3D item hitboxes inside open containers over the surrounding container box
     let chosen = this.raycastScratch[0];
-    for (let i = 0; i < this.raycastScratch.length; i++) {
-      if (this.raycastScratch[i].object.userData?.pickKind === 'CONTAINER_ITEM') {
-        chosen = this.raycastScratch[i];
-        break;
+    const firstUd = chosen.object.userData as {
+      pickKind?: RaycastTargetKind;
+      targetId?: string;
+      containerId?: string;
+    };
+    if (firstUd.pickKind === 'CONTAINER') {
+      for (let i = 0; i < this.raycastScratch.length; i++) {
+        const cand = this.raycastScratch[i];
+        const candUd = cand.object.userData as {
+          pickKind?: RaycastTargetKind;
+          containerId?: string;
+        };
+        if (
+          candUd.pickKind === 'CONTAINER_ITEM' &&
+          candUd.containerId === firstUd.containerId &&
+          cand.distance <= chosen.distance + 14
+        ) {
+          chosen = cand;
+          break;
+        }
+      }
+    } else if (firstUd.pickKind === 'ESCAPE_HELI') {
+      for (let i = 0; i < this.raycastScratch.length; i++) {
+        const cand = this.raycastScratch[i];
+        const candUd = cand.object.userData as {
+          pickKind?: RaycastTargetKind;
+          subTarget?: string;
+        };
+        if (
+          candUd.pickKind === 'ESCAPE_HELI' &&
+          candUd.subTarget === 'CHAIN' &&
+          cand.distance <= chosen.distance + 20
+        ) {
+          chosen = cand;
+          break;
+        }
       }
     }
 
     const ud = chosen.object.userData as {
-      pickKind?: 'CONTAINER' | 'CONTAINER_ITEM';
+      pickKind?: RaycastTargetKind;
+      targetId?: string;
+      subTarget?: 'DOCK' | 'LEVER' | 'CHAIN' | 'HULL';
+      chainIndex?: number;
+      ownerKey?: string;
       containerId?: string;
     };
-    if (!ud.containerId || !ud.pickKind) {
-      engine.setCursorTarget(null);
+    if (!ud.pickKind || !ud.targetId) {
+      engine.setRaycastTarget(null, emptyDbg);
       return;
     }
 
-    const cont = engine.map.containers.find((c) => c.id === ud.containerId);
-    if (!cont) {
-      engine.setCursorTarget(null);
+    const ownerKey = ud.ownerKey ?? `${ud.pickKind}:${ud.targetId}`;
+
+    // Check 3D occlusion against walls, ceilings, closed doors, props, and furniture
+    const occluders: THREE.Object3D[] = [
+      ...this.structure3d.getRaycastOccluders(activeDeck),
+      ...this.objects3d.getRaycastOccluders(activeDeck),
+      ...(this.escapes3d ? this.escapes3d.getRaycastOccluders(activeDeck) : []),
+    ];
+    this.raycastOccScratch.length = 0;
+    if (occluders.length > 0) {
+      this.raycaster.intersectObjects(occluders, false, this.raycastOccScratch);
+    }
+
+    let occHit: THREE.Intersection | null = null;
+    for (let i = 0; i < this.raycastOccScratch.length; i++) {
+      const candidate = this.raycastOccScratch[i];
+      const occKey = candidate.object.userData?.occluderOwnerKey as string | undefined;
+      if (occKey && occKey === ownerKey) continue;
+      occHit = candidate;
+      break;
+    }
+
+    const ts = engine.map.tileSize;
+    let entityX = chosen.point.x;
+    let entityY = -chosen.point.y;
+    let maxReach = 70;
+    let item: RaycastInteractTarget['item'] | undefined;
+
+    if (ud.pickKind === 'DOOR') {
+      const door = engine.map.doors.find((d) => d.id === ud.targetId);
+      if (!door || door.isBroken) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = (door.tx + 0.5) * ts;
+      entityY = (door.ty + 0.5) * ts;
+      maxReach = 70;
+    } else if (ud.pickKind === 'STAIRWELL') {
+      const st = engine.map.stairwells.find((s) => s.id === ud.targetId);
+      if (!st) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = st.x;
+      entityY = st.y;
+      maxReach = 52;
+    } else if (ud.pickKind === 'FUSE_SOCKET') {
+      const fs = engine.map.fuseSockets.find((f) => f.id === ud.targetId);
+      if (!fs) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = fs.x;
+      entityY = fs.y;
+      maxReach = 54;
+    } else if (ud.pickKind === 'LIGHT_SWITCH') {
+      const sw = engine.map.lightSwitches.find((s) => s.id === ud.targetId);
+      if (!sw) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = sw.x;
+      entityY = sw.y;
+      maxReach = 48;
+    } else if (ud.pickKind === 'PICKUP') {
+      const wpId = Number(ud.targetId);
+      const wp = engine.worldPickups.find((w) => w.id === wpId);
+      if (!wp) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = wp.x;
+      entityY = wp.y;
+      item = wp.item;
+      maxReach = 48;
+    } else if (ud.pickKind === 'HIDING') {
+      const hs = engine.map.hidingSpots.find((h) => h.id === ud.targetId);
+      if (!hs) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = hs.x;
+      entityY = hs.y;
+      maxReach = 50;
+    } else if (ud.pickKind === 'PAPER_MAP') {
+      const pm = engine.map.paperMaps.find((m) => m.id === ud.targetId);
+      if (!pm) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = pm.x;
+      entityY = pm.y;
+      maxReach = 56;
+    } else if (ud.pickKind === 'CONTAINER' || ud.pickKind === 'CONTAINER_ITEM') {
+      const cont = engine.map.containers.find((c) => c.id === ud.targetId);
+      if (!cont) {
+        engine.setRaycastTarget(null, emptyDbg);
+        return;
+      }
+      entityX = cont.x;
+      entityY = cont.y;
+      item = cont.item ?? undefined;
+      maxReach = 86;
+    } else if (ud.pickKind === 'ESCAPE_LIFEBOAT') {
+      entityX = engine.map.lifeboatPos.x;
+      entityY = engine.map.lifeboatPos.y;
+      maxReach = 76;
+    } else if (ud.pickKind === 'ESCAPE_HELI') {
+      entityX = engine.map.heliPos.x;
+      entityY = engine.map.heliPos.y;
+      maxReach = 82;
+    } else if (ud.pickKind === 'ESCAPE_SUBMARINE') {
+      if (ud.subTarget === 'LEVER') {
+        entityX = engine.map.submarinePos.leverX;
+        entityY = engine.map.submarinePos.leverY;
+        maxReach = 78;
+      } else {
+        entityX = engine.map.submarinePos.x;
+        entityY = engine.map.submarinePos.y;
+        maxReach = 96;
+      }
+    }
+
+    let dist2d = Math.hypot(entityX - p.x, entityY - p.y);
+    if (ud.pickKind === 'ESCAPE_HELI' && ud.subTarget === 'CHAIN') {
+      dist2d = Math.min(dist2d, Math.hypot(chosen.point.x - p.x, -chosen.point.y - p.y));
+    }
+    const inReach = dist2d <= maxReach;
+    const hasLos2d = hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, entityX, entityY);
+    const occTolerance = ud.pickKind === 'DOOR' || ud.pickKind === 'LIGHT_SWITCH' || ud.pickKind === 'FUSE_SOCKET' ? 1.2 : 0.6;
+    const occluded3d = occHit !== null && occHit.distance + occTolerance < chosen.distance;
+    const blockedBy = occluded3d
+      ? ((occHit!.object.userData?.occluderOwnerKey as string | undefined) ?? 'OCCLUDER')
+      : !hasLos2d
+        ? '2D_LOS'
+        : dist2d > 260
+          ? 'OUT_OF_RANGE'
+          : null;
+
+    const dbgInfo: RaycastDebugInfo = {
+      hitKind: ud.pickKind,
+      targetId: ud.targetId,
+      subTarget: ud.subTarget ?? null,
+      inReach,
+      hasLos: hasLos2d && !occluded3d,
+      blockedBy,
+      hitDist: chosen.distance,
+      occDist: occHit ? occHit.distance : null,
+      hitZ: chosen.point.z,
+      dist2d,
+    };
+
+    if (occluded3d || !hasLos2d || dist2d > 260) {
+      engine.setRaycastTarget(null, dbgInfo);
       return;
     }
 
-    const dist = Math.hypot(cont.x - p.x, cont.y - p.y);
-    const hasLos = hasLineOfSightToEntity(engine.map, engine.doorsByTile, p.x, p.y, cont.x, cont.y);
-    if (!hasLos || dist > 260) {
-      engine.setCursorTarget(null);
-      return;
-    }
+    const effectiveKind: RaycastTargetKind =
+      ud.pickKind === 'CONTAINER_ITEM'
+        ? engine.map.containers.find((c) => c.id === ud.targetId && c.isOpen && c.item !== null)
+          ? 'CONTAINER_ITEM'
+          : 'CONTAINER'
+        : ud.pickKind;
 
-    const inReach = dist <= 86;
-    if (ud.pickKind === 'CONTAINER_ITEM' && cont.item !== null && cont.isOpen) {
-      engine.setCursorTarget({
-        kind: 'CONTAINER_ITEM',
-        containerId: cont.id,
-        dist,
+    engine.setRaycastTarget(
+      {
+        kind: effectiveKind,
+        targetId: ud.targetId,
+        subTarget: ud.subTarget,
+        chainIndex: ud.chainIndex,
+        ownerKey,
+        dist: dist2d,
         inReach,
-        hasLos,
-        item: cont.item,
-      });
-    } else {
-      engine.setCursorTarget({
-        kind: 'CONTAINER',
-        containerId: cont.id,
-        dist,
-        inReach,
-        hasLos,
-        item: cont.item ?? undefined,
-      });
+        hasLos: true,
+        hitX: chosen.point.x,
+        hitY: -chosen.point.y,
+        hitZ: chosen.point.z,
+        hitDist: chosen.distance,
+        item,
+      },
+      dbgInfo
+    );
+  }
+
+  public getInteractableScreenPoint(
+    kind: RaycastTargetKind,
+    targetId: string,
+    subTarget: RaycastInteractTarget['subTarget'] | undefined,
+    width: number,
+    height: number,
+    engine?: MonstrumGameEngine
+  ): { x: number; y: number } | null {
+    if (width <= 0 || height <= 0) return null;
+    let found = false;
+    if (
+      (kind === 'CONTAINER' ||
+        kind === 'CONTAINER_ITEM' ||
+        kind === 'HIDING' ||
+        kind === 'PAPER_MAP' ||
+        kind === 'FUSE_SOCKET' ||
+        kind === 'LIGHT_SWITCH' ||
+        kind === 'PICKUP') &&
+      this.objects3d
+    ) {
+      found = this.objects3d.getTargetWorldHitCenter(kind, targetId, this.tmpVec3);
+    } else if (
+      (kind === 'ESCAPE_HELI' || kind === 'ESCAPE_LIFEBOAT' || kind === 'ESCAPE_SUBMARINE') &&
+      this.escapes3d
+    ) {
+      found = this.escapes3d.getTargetWorldHitCenter(kind, subTarget, this.tmpVec3);
+    } else if (kind === 'DOOR' && engine) {
+      const door = engine.map.doors.find((d) => d.id === targetId);
+      if (door) {
+        this.tmpVec3.set(
+          (door.tx + 0.5) * engine.map.tileSize,
+          -(door.ty + 0.5) * engine.map.tileSize,
+          20
+        );
+        found = true;
+      }
+    } else if (kind === 'STAIRWELL' && engine) {
+      const st = engine.map.stairwells.find((s) => s.id === targetId);
+      if (st) {
+        this.tmpVec3.set(st.x, -st.y, 10);
+        found = true;
+      }
     }
+    if (!found) return null;
+    this.worldCamera.updateMatrixWorld();
+    this.tmpVec3.project(this.worldCamera);
+    return {
+      x: (this.tmpVec3.x * 0.5 + 0.5) * width,
+      y: (-this.tmpVec3.y * 0.5 + 0.5) * height,
+    };
   }
 
   public getContainerScreenPoint(
@@ -1607,16 +2059,7 @@ export class GameRenderer {
     width: number,
     height: number
   ): { x: number; y: number } | null {
-    if (!this.objects3d || width <= 0 || height <= 0) return null;
-    if (!this.objects3d.getContainerWorldHitCenter(containerId, targetPart, this.tmpVec3)) {
-      return null;
-    }
-    this.worldCamera.updateMatrixWorld();
-    this.tmpVec3.project(this.worldCamera);
-    return {
-      x: (this.tmpVec3.x * 0.5 + 0.5) * width,
-      y: (-this.tmpVec3.y * 0.5 + 0.5) * height,
-    };
+    return this.getInteractableScreenPoint(targetPart, containerId, undefined, width, height);
   }
 
   private colorGradeToIndex(grade: ColorGradePreset): number {
@@ -1698,59 +2141,143 @@ export class GameRenderer {
     const dbg = engine.debugConfig;
     const debugActive = dbg.enabled;
     const freeCam = debugActive && dbg.freeCamEnabled;
+    const isFirstPerson = !freeCam && engine.viewMode === 'FIRST_PERSON';
+    const ceilVis = this.isCeilingsVisible(engine);
     const shakeX = engine.screenShake > 0 && !freeCam ? (Math.random() - 0.5) * engine.screenShake : 0;
     const shakeY = engine.screenShake > 0 && !freeCam ? (Math.random() - 0.5) * engine.screenShake : 0;
     const zoom = freeCam
       ? Math.max(0.25, dbg.freeCamZoom * getViewportResolutionScale(width, height))
       : engine.getEffectiveZoom(width, height);
-    const camWorldX = freeCam ? dbg.freeCamX : engine.cameraX - shakeX / zoom;
-    const camWorldY = freeCam ? dbg.freeCamY : engine.cameraY - shakeY / zoom;
+    let camWorldX = freeCam ? dbg.freeCamX : engine.cameraX - shakeX / zoom;
+    let camWorldY = freeCam ? dbg.freeCamY : engine.cameraY - shakeY / zoom;
     const viewCenterX = width / 2 + shakeX;
     const viewCenterY = height / 2 + shakeY;
 
     const baseFov = gfx.cameraFovDeg ?? DEFAULT_CAMERA_FOV_DEG;
     const basePitch = gfx.cameraPitchDeg ?? DEFAULT_CAMERA_PITCH_DEG;
     const baseYaw = gfx.cameraYawDeg ?? DEFAULT_CAMERA_YAW_DEG;
-    const fovDeg = THREE.MathUtils.clamp(debugActive ? dbg.cameraFovDeg : baseFov, 25, 92);
-    const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(fovDeg * 0.5));
-    const pitchRad = THREE.MathUtils.degToRad(
-      THREE.MathUtils.clamp(debugActive ? dbg.cameraPitchDeg : basePitch, 0, 82)
-    );
-    const yawRad = THREE.MathUtils.degToRad(debugActive ? dbg.cameraYawDeg : baseYaw);
-
     const halfW = width / (2 * zoom);
     const halfH = height / (2 * zoom);
-    const camZ = halfH / Math.max(0.08, tanHalfFov);
-    if (this.worldCamera.fov !== fovDeg) {
-      this.worldCamera.fov = fovDeg;
-    }
-    this.worldCamera.aspect = width / Math.max(1, height);
-    this.worldCamera.far = Math.max(4000, camZ * 4.5);
-    const orbitR = camZ * Math.sin(pitchRad);
-    const orbitZ = camZ * Math.cos(pitchRad);
-    this.worldCamera.position.set(
-      camWorldX + Math.sin(yawRad) * orbitR,
-      -camWorldY - Math.cos(yawRad) * orbitR,
-      orbitZ
-    );
-    this.worldCamera.up.set(-Math.sin(yawRad), Math.cos(yawRad), 0);
-    this.worldCamera.lookAt(camWorldX, -camWorldY, 0);
-    this.worldCamera.updateProjectionMatrix();
 
-    const tiltExpand = pitchRad > 0.01 ? 1 + Math.tan(pitchRad) * 1.45 : 1;
-    const cullHalfW = halfW * tiltExpand;
-    const cullHalfH = halfH * tiltExpand;
+    let camZ = 0;
+    let cullHalfW = halfW;
+    let cullHalfH = halfH;
+    let tiltExpand = 1;
+    const activeDeck = engine.getCurrentDeck();
+    const renderDeck = debugActive && dbg.debugDeckOverride !== 'AUTO' ? dbg.debugDeckOverride : activeDeck;
+
+    if (isFirstPerson) {
+      const p = engine.player;
+      const fpBaseFov = gfx.cameraFovDeg > 55 ? gfx.cameraFovDeg : 75;
+      const fovDeg = THREE.MathUtils.clamp(debugActive ? dbg.cameraFovDeg : fpBaseFov, 55, 100);
+      if (this.worldCamera.fov !== fovDeg) {
+        this.worldCamera.fov = fovDeg;
+      }
+      this.worldCamera.near = 1.6;
+      this.worldCamera.aspect = width / Math.max(1, height);
+      this.worldCamera.far = 5200;
+
+      let eyeX = p.x;
+      let eyeY = p.y;
+      const eyeZ =
+        engine.fpEyeZ +
+        (engine.screenShake > 0 ? (Math.random() - 0.5) * engine.screenShake * 0.16 : 0);
+
+      if (p.peekingDoorId) {
+        const pDoor = engine.map.doors.find((d) => d.id === p.peekingDoorId);
+        if (pDoor) {
+          const dcx = (pDoor.tx + 0.5) * engine.map.tileSize;
+          const dcy = (pDoor.ty + 0.5) * engine.map.tileSize;
+          if (pDoor.orientation === 'H') {
+            const crossSign = Math.sign(dcy - p.y) || 1;
+            eyeX = dcx;
+            eyeY = dcy + crossSign * 9;
+          } else {
+            const crossSign = Math.sign(dcx - p.x) || 1;
+            eyeX = dcx + crossSign * 9;
+            eyeY = dcy;
+          }
+        }
+      } else if (p.peekingSpotId) {
+        eyeX += Math.cos(p.angle) * 6;
+        eyeY += Math.sin(p.angle) * 6;
+      }
+
+      camWorldX = eyeX;
+      camWorldY = eyeY;
+      camZ = eyeZ;
+
+      const pitchRadFp = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(engine.fpPitchDeg, -75, 75));
+      const cosPitch = Math.cos(pitchRadFp);
+      const lookDx = Math.cos(p.angle) * cosPitch;
+      const lookDy = -Math.sin(p.angle) * cosPitch;
+      const lookDz = Math.sin(pitchRadFp);
+
+      this.worldCamera.position.set(eyeX, -eyeY, eyeZ);
+      this.worldCamera.up.set(0, 0, 1);
+      this.worldCamera.lookAt(eyeX + lookDx * 120, -eyeY + lookDy * 120, eyeZ + lookDz * 120);
+      this.worldCamera.updateProjectionMatrix();
+
+      cullHalfW = renderDeck === 'DECK_3' ? 1900 : 1050;
+      cullHalfH = renderDeck === 'DECK_3' ? 1900 : 1050;
+    } else {
+      const fovDeg = THREE.MathUtils.clamp(debugActive ? dbg.cameraFovDeg : baseFov, 25, 92);
+      const tanHalfFov = Math.tan(THREE.MathUtils.degToRad(fovDeg * 0.5));
+      const pitchRad = THREE.MathUtils.degToRad(
+        THREE.MathUtils.clamp(debugActive ? dbg.cameraPitchDeg : basePitch, 0, 82)
+      );
+      const yawRad = THREE.MathUtils.degToRad(debugActive ? dbg.cameraYawDeg : baseYaw);
+
+      camZ = halfH / Math.max(0.08, tanHalfFov);
+      if (this.worldCamera.fov !== fovDeg) {
+        this.worldCamera.fov = fovDeg;
+      }
+      this.worldCamera.near = 10;
+      this.worldCamera.aspect = width / Math.max(1, height);
+      this.worldCamera.far = Math.max(4000, camZ * 4.5);
+      const orbitR = camZ * Math.sin(pitchRad);
+      const orbitZ = camZ * Math.cos(pitchRad);
+      this.worldCamera.position.set(
+        camWorldX + Math.sin(yawRad) * orbitR,
+        -camWorldY - Math.cos(yawRad) * orbitR,
+        orbitZ
+      );
+      this.worldCamera.up.set(-Math.sin(yawRad), Math.cos(yawRad), 0);
+      this.worldCamera.lookAt(camWorldX, -camWorldY, 0);
+      this.worldCamera.updateProjectionMatrix();
+
+      tiltExpand = pitchRad > 0.01 ? 1 + Math.tan(pitchRad) * 1.45 : 1;
+      cullHalfW = halfW * tiltExpand;
+      cullHalfH = halfH * tiltExpand;
+    }
 
     if (this.oceanBundle && this.oceanMesh) {
       this.oceanBundle.uTime.value = timeSec;
-      const oceanScale = ((camZ + 45) / Math.max(1, camZ)) * Math.max(1, tiltExpand * 1.15);
       this.oceanMesh.position.set(camWorldX, -camWorldY, -45);
-      this.oceanMesh.scale.set(halfW * 2.5 * oceanScale, halfH * 2.5 * oceanScale, 1);
+      if (isFirstPerson) {
+        this.oceanMesh.scale.set(5600, 5600, 1);
+      } else {
+        const oceanScale = ((camZ + 45) / Math.max(1, camZ)) * Math.max(1, tiltExpand * 1.15);
+        this.oceanMesh.scale.set(halfW * 2.5 * oceanScale, halfH * 2.5 * oceanScale, 1);
+      }
     }
 
-    const activeDeck = engine.getCurrentDeck();
-    const renderDeck = debugActive && dbg.debugDeckOverride !== 'AUTO' ? dbg.debugDeckOverride : activeDeck;
     const incomingStairId = engine.getBruteIncomingStairDestId();
+
+    const showDeck3Sky = renderDeck === 'DECK_3' && (isFirstPerson || ceilVis);
+    const skyZ = isFirstPerson ? camZ : 0;
+    if (this.skyDomeMesh) {
+      this.skyDomeMesh.visible = showDeck3Sky;
+      this.skyDomeMesh.position.set(camWorldX, -camWorldY, skyZ);
+    }
+    if (this.skyLosMesh) {
+      this.skyLosMesh.visible = showDeck3Sky;
+      this.skyLosMesh.position.set(camWorldX, -camWorldY, skyZ);
+    }
+    if (this.skyMaskMesh) {
+      this.skyMaskMesh.visible = showDeck3Sky;
+      this.skyMaskMesh.position.set(camWorldX, -camWorldY, skyZ);
+    }
 
     const peekStair =
       engine.player.peekingStairId !== null &&
@@ -1764,7 +2291,7 @@ export class GameRenderer {
 
     const renderDeckPowered = engine.poweredDecks[renderDeck];
     if (renderDeckPowered) {
-      this.ensureDeckPoweredLightmap(engine, renderDeck);
+      this.ensureDeckPoweredLightmap(engine, renderDeck, ceilVis);
     }
 
     // Precompute raycasted lighting polygons (skipped on renderDeck when pre-baked by Master Fuse!)
@@ -1777,11 +2304,12 @@ export class GameRenderer {
       cullHalfW,
       cullHalfH,
       peekDest,
-      renderDeckPowered
+      renderDeckPowered,
+      ceilVis
     );
-    const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec);
-    const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec);
-    const doorPeekData = this.computeDoorPeekBeam(engine);
+    const bruteBeam = this.computeBruteBeamPolygon(engine, timeSec, ceilVis, renderDeck);
+    const stairGlow = this.computeIncomingStairGlow(engine, incomingStairId, timeSec, ceilVis, renderDeck);
+    const doorPeekData = this.computeDoorPeekBeam(engine, ceilVis, renderDeck);
     const activePeekDoorId = doorPeekData ? engine.player.peekingDoorId : null;
 
     this.structure3d?.setDebugVisualOptions(
@@ -1798,7 +2326,9 @@ export class GameRenderer {
       cullHalfH + 140,
       incomingStairId,
       timeSec,
-      activePeekDoorId
+      activePeekDoorId,
+      ceilVis,
+      isFirstPerson
     );
 
     // 1. Populate & render WORLD SCENE -> sceneTarget
@@ -1818,7 +2348,9 @@ export class GameRenderer {
       doorPeekData,
       true,
       cullHalfW,
-      cullHalfH
+      cullHalfH,
+      ceilVis,
+      isFirstPerson
     );
 
     renderer.autoClear = true;
@@ -1832,10 +2364,18 @@ export class GameRenderer {
       width,
       height,
       zoom,
-      doorPeekData
+      doorPeekData,
+      isFirstPerson,
+      renderDeck
     );
     this.lastPlayerSightPolys = sightPolys;
-    this.populateLosScene(sightPolys, engine.player.x, engine.player.y, engine.map.tileSize);
+    this.populateLosScene(
+      sightPolys,
+      engine.player.x,
+      engine.player.y,
+      engine.map.tileSize,
+      ceilVis
+    );
     renderer.setClearColor(0x000000, 1);
     renderer.setRenderTarget(this.losTarget);
     renderer.render(this.losScene, this.worldCamera);
@@ -1848,7 +2388,10 @@ export class GameRenderer {
       litRoomPolys,
       bruteBeam,
       stairGlow,
-      doorPeekData
+      doorPeekData,
+      sightPolys,
+      ceilVis,
+      isFirstPerson
     );
     renderer.setClearColor(0x000000, 1);
     renderer.setRenderTarget(this.lightMaskTarget);
@@ -1890,7 +2433,8 @@ export class GameRenderer {
       timeSec,
       incomingStairId,
       cullHalfW,
-      cullHalfH
+      cullHalfH,
+      isFirstPerson
     );
     renderer.autoClear = false;
     renderer.render(this.postScene, this.worldCamera);
@@ -1995,7 +2539,9 @@ export class GameRenderer {
     doorPeekData: DoorPeekBeamData | null,
     includePlayer: boolean,
     cullHalfW?: number,
-    cullHalfH?: number
+    cullHalfH?: number,
+    ceilingsVisible = false,
+    isFirstPerson = false
   ): void {
     const sp = this.sprites!;
     const ws = this.worldSprites!;
@@ -2077,11 +2623,11 @@ export class GameRenderer {
       halfW,
       halfH,
       timeSec,
-      includePlayer ? engine.cursorTarget : null
+      includePlayer ? engine.raycastTarget : null
     );
 
-    // Stairwells are 3D recessed/ascending assemblies in ShipStructure3D; preserve incoming floor warning aura
-    if (incomingStairId) {
+    // Stairwells are 3D recessed/ascending assemblies in ShipStructure3D; preserve incoming floor warning aura in Top-Down
+    if (incomingStairId && !isFirstPerson) {
       for (const st of engine.map.stairwells) {
         if (st.deck !== renderDeck || st.id !== incomingStairId) continue;
         if (Math.abs(st.x - camX) > halfW || Math.abs(st.y - camY) > halfH) continue;
@@ -2120,12 +2666,15 @@ export class GameRenderer {
     const bounds = engine.map.deckBounds[renderDeck];
     const deckMinY = bounds.y1 * ts;
     const deckMaxY = (bounds.y2 + 1) * ts;
+    const camQ = isFirstPerson ? this.worldCamera.quaternion : undefined;
     for (const pt of engine.particles) {
       if (pt.y < deckMinY || pt.y > deckMaxY) continue;
       if (Math.abs(pt.x - camX) > halfW || Math.abs(pt.y - camY) > halfH) continue;
       const alpha = Math.max(0, pt.life / pt.maxLife);
       this.setColorFromCss(this.tmpColor, pt.color);
       ws.place(sp.softDisc, pt.x, pt.y, {
+        z: isFirstPerson ? 10 : undefined,
+        billboardQuaternion: camQ,
         scaleX: (pt.size * 2.2) / sp.softDisc.w,
         scaleY: (pt.size * 2.2) / sp.softDisc.h,
         tint: this.tmpColor.getHex(),
@@ -2135,10 +2684,11 @@ export class GameRenderer {
     }
 
     // Subtle glowing overhead fixture discs inside illuminated rooms/corridors (clipped strictly by LoS composite)
+    const fixtureZ = ceilingsVisible ? ts * WALL_HEIGHT_RATIO - 0.6 : 38;
     for (const lp of litRoomPolys) {
       if (lp.poly.length < 3 || lp.deck !== renderDeck || lp.intensity < 0.08) continue;
       ws.place(sp.softDisc, lp.x, lp.y, {
-        z: 38,
+        z: fixtureZ,
         scaleX: 20 / sp.softDisc.w,
         scaleY: 20 / sp.softDisc.h,
         tint: lp.sputterAmount > 0.35 ? 0xe2e8f0 : 0xfff3d1,
@@ -2158,7 +2708,9 @@ export class GameRenderer {
       bruteBeam,
       stairGlow,
       doorPeekData,
-      timeSec
+      timeSec,
+      ceilingsVisible,
+      isFirstPerson
     );
 
     ws.endFrame();
@@ -2171,7 +2723,11 @@ export class GameRenderer {
     this.worldLinesTeal!.endFrame();
   }
 
-  private ensureDeckPoweredLightmap(engine: MonstrumGameEngine, deck: ShipDeck): void {
+  private ensureDeckPoweredLightmap(
+    engine: MonstrumGameEngine,
+    deck: ShipDeck,
+    ceilingsVisible = false
+  ): void {
     const renderer = this.renderer;
     const warmFans = this.deckBakeWarmFans;
     const maskFans = this.deckBakeMaskFans;
@@ -2195,6 +2751,7 @@ export class GameRenderer {
       this.bakedLightDeck === deck &&
       this.bakedLightDoorHash1 === h1 &&
       this.bakedLightDoorHash2 === h2 &&
+      this.bakedLightCeilingsVisible === ceilingsVisible &&
       this.deckWarmTarget &&
       this.deckMaskTarget
     ) {
@@ -2252,8 +2809,10 @@ export class GameRenderer {
     this.deckBakeCamera.position.set(0, 0, 100);
     this.deckBakeCamera.updateProjectionMatrix();
 
-    const maskOpts = this.getMaskCurtainOpts(ts);
-    const warmOpts = this.getWarmCurtainOpts(ts);
+    const maskOpts = this.getMaskCurtainOpts(ts, false);
+    const warmOpts = this.getWarmCurtainOpts(ts, false);
+    const curtainCapZ =
+      ceilingsVisible && deck !== 'DECK_3' ? ts * WALL_HEIGHT_RATIO - 0.16 : undefined;
 
     warmFans.beginFrame();
     maskFans.beginFrame();
@@ -2275,7 +2834,8 @@ export class GameRenderer {
           fx.range,
           56,
           maskOpts,
-          warmOpts
+          warmOpts,
+          curtainCapZ
         );
         if (cached.poly.length < 3) continue;
         warmFans.addFan(
@@ -2323,7 +2883,8 @@ export class GameRenderer {
         cl.range,
         36,
         maskOpts,
-        warmOpts
+        warmOpts,
+        curtainCapZ
       );
       if (cached.poly.length < 3) continue;
       warmFans.addFan(
@@ -2395,6 +2956,7 @@ export class GameRenderer {
     this.bakedLightDeck = deck;
     this.bakedLightDoorHash1 = h1;
     this.bakedLightDoorHash2 = h2;
+    this.bakedLightCeilingsVisible = ceilingsVisible;
   }
 
   private computeLitRoomPolygons(
@@ -2406,13 +2968,14 @@ export class GameRenderer {
     halfW: number,
     halfH: number,
     peekDest?: { deck: ShipDeck; x: number; y: number },
-    skipActiveDeckStatic = false
+    skipActiveDeckStatic = false,
+    ceilingsVisible = false
   ): RayLightPoly[] {
     const polys: RayLightPoly[] = [];
     const b = engine.brute;
     const ts = engine.map.tileSize;
-    const maskOpts = this.getMaskCurtainOpts(ts);
-    const warmOpts = this.getWarmCurtainOpts(ts);
+    const maskOpts = this.getMaskCurtainOpts(ts, ceilingsVisible, engine.map, activeDeck);
+    const warmOpts = this.getWarmCurtainOpts(ts, ceilingsVisible, engine.map, activeDeck);
 
     for (const sw of engine.map.lightSwitches) {
       if (!sw.isOn) continue;
@@ -2523,7 +3086,9 @@ export class GameRenderer {
 
   private computeBruteBeamPolygon(
     engine: MonstrumGameEngine,
-    timeSec: number
+    timeSec: number,
+    ceilingsVisible = false,
+    renderDeck?: ShipDeck
   ): BruteBeamData | null {
     const b = engine.brute;
     if (b.stairClimbTimer > 0) return null;
@@ -2551,13 +3116,18 @@ export class GameRenderer {
       72
     );
     const poly: VisibilityVertex[] = [{ x: ox, y: oy }, ...rayPts];
+    const deck = renderDeck ?? engine.getCurrentDeck();
+    const bruteMaskOpts = this.getMaskCurtainOpts(engine.map.tileSize, ceilingsVisible, engine.map, deck);
+    if (engine.viewMode === 'FIRST_PERSON') {
+      bruteMaskOpts.ceilingCapZ = undefined;
+    }
     const fan = this.buildDynamicFan(
       'bruteBeam',
       ox,
       oy,
       rayPts,
       false,
-      this.getMaskCurtainOpts(engine.map.tileSize)
+      bruteMaskOpts
     );
     const warmFan = this.buildDynamicFan(
       'bruteBeam:warm',
@@ -2565,7 +3135,7 @@ export class GameRenderer {
       oy,
       rayPts,
       false,
-      this.getWarmCurtainOpts(engine.map.tileSize)
+      this.getWarmCurtainOpts(engine.map.tileSize, false, engine.map, deck)
     );
     return { ox, oy, angle: b.angle, range, intensity, isChasing, fan, warmFan, poly };
   }
@@ -2573,7 +3143,9 @@ export class GameRenderer {
   private computeIncomingStairGlow(
     engine: MonstrumGameEngine,
     incomingStairId: string | null,
-    timeSec: number
+    timeSec: number,
+    ceilingsVisible = false,
+    renderDeck?: ShipDeck
   ): StairGlowData | null {
     if (!incomingStairId) return null;
     const st = engine.map.stairwells.find((s) => s.id === incomingStairId);
@@ -2590,13 +3162,14 @@ export class GameRenderer {
       range,
       64
     );
+    const deck = renderDeck ?? st.deck;
     const fan = this.buildDynamicFan(
       'stairGlow',
       st.x,
       st.y,
       poly,
       true,
-      this.getMaskCurtainOpts(engine.map.tileSize)
+      this.getMaskCurtainOpts(engine.map.tileSize, ceilingsVisible, engine.map, deck)
     );
     const warmFan = this.buildDynamicFan(
       'stairGlow:warm',
@@ -2604,12 +3177,16 @@ export class GameRenderer {
       st.y,
       poly,
       true,
-      this.getWarmCurtainOpts(engine.map.tileSize)
+      this.getWarmCurtainOpts(engine.map.tileSize, false, engine.map, deck)
     );
     return { x: st.x, y: st.y, range, intensity, fan, warmFan, poly };
   }
 
-  private computeDoorPeekBeam(engine: MonstrumGameEngine): DoorPeekBeamData | null {
+  private computeDoorPeekBeam(
+    engine: MonstrumGameEngine,
+    ceilingsVisible = false,
+    renderDeck?: ShipDeck
+  ): DoorPeekBeamData | null {
     const p = engine.player;
     if (!p.peekingDoorId || p.hidingSpotId !== null) return null;
     const door = engine.map.doors.find(
@@ -2642,13 +3219,14 @@ export class GameRenderer {
       door.ty * engine.map.width + door.tx
     );
     const poly: VisibilityVertex[] = [{ x: ox, y: oy }, ...rayPts];
+    const deck = renderDeck ?? engine.getCurrentDeck();
     const fan = this.buildDynamicFan(
       'doorPeek',
       ox,
       oy,
       rayPts,
       false,
-      this.getMaskCurtainOpts(ts)
+      this.getMaskCurtainOpts(ts, ceilingsVisible, engine.map, deck)
     );
     const warmFan = this.buildDynamicFan(
       'doorPeek:warm',
@@ -2656,7 +3234,7 @@ export class GameRenderer {
       oy,
       rayPts,
       false,
-      this.getWarmCurtainOpts(ts)
+      this.getWarmCurtainOpts(ts, false, engine.map, deck)
     );
     return { ox, oy, range, isLitSide, fan, warmFan, poly };
   }
@@ -2668,11 +3246,15 @@ export class GameRenderer {
     bruteBeam: BruteBeamData | null,
     stairGlow: StairGlowData | null,
     doorPeekData: DoorPeekBeamData | null,
-    timeSec: number
+    timeSec: number,
+    _ceilingsVisible = false,
+    isFirstPerson = false
   ): void {
     const swf = this.staticWarmFans!;
     const wf = this.worldWarmFans!;
 
+    const roomA0 = isFirstPerson ? 0.11 : 0.145;
+    const roomA1 = isFirstPerson ? 0.06 : 0.085;
     for (const lp of litRoomPolys) {
       if (lp.poly.length < 3 || lp.deck !== renderDeck) continue;
 
@@ -2683,9 +3265,9 @@ export class GameRenderer {
           lp.range,
           0.55,
           0xe2e8f0,
-          0.145 * lp.intensity,
+          roomA0 * lp.intensity,
           0xcbd5e1,
-          0.085 * lp.intensity,
+          roomA1 * lp.intensity,
           0xcbd5e1,
           0
         );
@@ -2696,9 +3278,9 @@ export class GameRenderer {
           lp.range,
           0.55,
           0xfef0c7,
-          0.145 * lp.intensity,
+          roomA0 * lp.intensity,
           0xfde09b,
-          0.085 * lp.intensity,
+          roomA1 * lp.intensity,
           0xfde09b,
           0
         );
@@ -2708,17 +3290,37 @@ export class GameRenderer {
     if (bruteBeam && bruteBeam.poly.length >= 3) {
       const ty = Math.floor(bruteBeam.oy / engine.map.tileSize);
       if ((engine.map.deckGrid[ty]?.[0] ?? renderDeck) === renderDeck) {
+        const bruteCone = isFirstPerson
+          ? {
+              angle: bruteBeam.angle,
+              innerHalfRad: (10 * Math.PI) / 180,
+              outerHalfRad: ((bruteBeam.isChasing ? 33 : 29) * Math.PI) / 180,
+            }
+          : undefined;
         wf.addFan(
           bruteBeam.warmFan,
           6,
           bruteBeam.range,
           0.5,
           0xffc369,
-          (bruteBeam.isChasing ? 0.44 : 0.34) * bruteBeam.intensity,
+          (isFirstPerson
+            ? bruteBeam.isChasing
+              ? 0.16
+              : 0.12
+            : bruteBeam.isChasing
+              ? 0.44
+              : 0.34) * bruteBeam.intensity,
           0xf97316,
-          (bruteBeam.isChasing ? 0.24 : 0.17) * bruteBeam.intensity,
+          (isFirstPerson
+            ? bruteBeam.isChasing
+              ? 0.07
+              : 0.05
+            : bruteBeam.isChasing
+              ? 0.24
+              : 0.17) * bruteBeam.intensity,
           0xea580c,
-          0
+          0,
+          bruteCone
         );
       }
     }
@@ -2730,9 +3332,9 @@ export class GameRenderer {
         stairGlow.range,
         0.55,
         0xff8c1e,
-        0.42 * stairGlow.intensity,
+        (isFirstPerson ? 0.18 : 0.42) * stairGlow.intensity,
         0xea580c,
-        0.18 * stairGlow.intensity,
+        (isFirstPerson ? 0.06 : 0.18) * stairGlow.intensity,
         0xea580c,
         0
       );
@@ -2745,16 +3347,16 @@ export class GameRenderer {
         doorPeekData.range,
         0.55,
         0xfef9e0,
-        0.22,
+        isFirstPerson ? 0.1 : 0.22,
         0xe2e8f0,
-        0.09,
+        isFirstPerson ? 0.03 : 0.09,
         0xe2e8f0,
         0
       );
     }
 
     const ts = engine.map.tileSize;
-    const warmOpts = this.getWarmCurtainOpts(ts);
+    const warmOpts = this.getWarmCurtainOpts(ts, false, engine.map, renderDeck);
     for (let i = 0; i < engine.droppedLights.length; i++) {
       const l = engine.droppedLights[i];
       const lTx = Math.floor(l.x / ts);
@@ -2786,7 +3388,9 @@ export class GameRenderer {
     width: number,
     height: number,
     zoom: number,
-    doorPeekData: DoorPeekBeamData | null
+    doorPeekData: DoorPeekBeamData | null,
+    isFirstPerson = false,
+    renderDeck?: ShipDeck
   ): VisibilityVertex[][] {
     const p = engine.player;
     const isHiding = p.hidingSpotId !== null;
@@ -2819,7 +3423,7 @@ export class GameRenderer {
           24
         )
       );
-      const coneWidth = (54 * Math.PI) / 180;
+      const coneWidth = ((isFirstPerson ? 108 : 54) * Math.PI) / 180;
       sightPolys.push([
         { x: p.x, y: p.y },
         ...computeVisibilityPolygon(
@@ -2830,11 +3434,16 @@ export class GameRenderer {
           p.angle - coneWidth / 2,
           coneWidth,
           460,
-          48
+          isFirstPerson ? 64 : 48
         ),
       ]);
     } else {
-      const maxSightDist = Math.hypot(width, height) / (2 * zoom) + 260;
+      const deck = renderDeck ?? engine.getCurrentDeck();
+      const maxSightDist = isFirstPerson
+        ? deck === 'DECK_3'
+          ? 2600
+          : 980
+        : Math.hypot(width, height) / (2 * zoom) + 260;
       sightPolys.push(
         computeVisibilityPolygon(
           engine.map,
@@ -2844,7 +3453,7 @@ export class GameRenderer {
           0,
           Math.PI * 2,
           maxSightDist,
-          120
+          isFirstPerson ? (deck === 'DECK_3' ? 180 : 140) : 120
         )
       );
     }
@@ -2860,12 +3469,15 @@ export class GameRenderer {
     sightPolys: VisibilityVertex[][],
     playerX: number,
     playerY: number,
-    tileSize: number
+    tileSize: number,
+    ceilingsVisible = false,
+    map?: ShipMap,
+    renderDeck?: ShipDeck
   ): void {
     const lf = this.losFans!;
     lf.beginFrame();
     this.portalLosFans?.clear();
-    const maskOpts = this.getMaskCurtainOpts(tileSize);
+    const maskOpts = this.getMaskCurtainOpts(tileSize, ceilingsVisible, map, renderDeck);
 
     for (let i = 0; i < sightPolys.length; i++) {
       const poly = sightPolys[i];
@@ -2892,9 +3504,10 @@ export class GameRenderer {
     range: number,
     stopPos: number,
     a0: number,
-    a1: number
+    a1: number,
+    cone?: { angle: number; innerHalfRad: number; outerHalfRad: number }
   ): void {
-    batch.addFan(fan, innerR, range, stopPos, 0xffffff, a0, 0xffffff, a1, 0xffffff, 0);
+    batch.addFan(fan, innerR, range, stopPos, 0xffffff, a0, 0xffffff, a1, 0xffffff, 0, cone);
   }
 
   private populateLightMaskScene(
@@ -2904,7 +3517,10 @@ export class GameRenderer {
     litRoomPolys: RayLightPoly[],
     bruteBeam: BruteBeamData | null,
     stairGlow: StairGlowData | null,
-    doorPeekData: DoorPeekBeamData | null
+    doorPeekData: DoorPeekBeamData | null,
+    sightPolys: VisibilityVertex[][],
+    ceilingsVisible = false,
+    isFirstPerson = false
   ): void {
     const smf = this.staticMaskFans!;
     const mf = this.lightMaskFans!;
@@ -2913,7 +3529,7 @@ export class GameRenderer {
 
     const p = engine.player;
     const ts = engine.map.tileSize;
-    const maskOpts = this.getMaskCurtainOpts(ts);
+    const maskOpts = this.getMaskCurtainOpts(ts, ceilingsVisible, engine.map, activeDeck);
     const isHiding = p.hidingSpotId !== null;
     const isPeekingSpot = p.peekingSpotId !== null;
     const poweredMaskVisible =
@@ -2923,8 +3539,42 @@ export class GameRenderer {
     }
     this.poweredMaskWallFans?.setVisible(poweredMaskVisible);
 
+    // 0. Exterior Deck 3 moonlit base across visible outdoor walls & weather decks
+    if (
+      activeDeck === 'DECK_3' &&
+      (isFirstPerson || ceilingsVisible) &&
+      !isHiding &&
+      this.isDeck3ExteriorPos(engine.map, p.x, p.y) &&
+      sightPolys[0]?.length >= 3
+    ) {
+      const moonCurtainOpts: FanCurtainOptions = {
+        ...this.getMaskCurtainOpts(ts, false),
+        pushInwardPx: 0,
+      };
+      const moonFan = this.buildDynamicFan(
+        'mask:deck3Moon',
+        p.x,
+        p.y,
+        sightPolys[0],
+        true,
+        moonCurtainOpts
+      );
+      smf.addFan(
+        moonFan,
+        24,
+        2600,
+        0.5,
+        0xa2b9d8,
+        0.95,
+        0xa2b9d8,
+        0.86,
+        0xa2b9d8,
+        0.76
+      );
+    }
+
     // 1. Close tactile ambient awareness around player
-    const ambientRadius = isHiding ? 34 : 92;
+    const ambientRadius = isHiding ? 34 : isFirstPerson ? 128 : 92;
     const ambPoly = computeVisibilityPolygon(
       engine.map,
       engine.doorsByTile,
@@ -2942,16 +3592,29 @@ export class GameRenderer {
         fan,
         6,
         ambientRadius,
-        0.55,
-        isHiding ? 0.86 : 0.9,
-        isHiding ? 0.34 : 0.44
+        isFirstPerson && !isHiding ? 0.42 : 0.55,
+        isHiding ? 0.86 : isFirstPerson ? 0.85 : 0.9,
+        isHiding ? 0.34 : isFirstPerson ? 0.4 : 0.44
       );
     }
 
     // 2. Flashlight double-cone (broad spill + focused HDR hotspot core) or silent lit-room vent peek
     if (p.flashlightOn && p.battery > 0 && (!isHiding || isPeekingSpot)) {
-      const range = isPeekingSpot ? 460 : 520;
-      const coneWidth = ((isPeekingSpot ? 54 : 82) * Math.PI) / 180;
+      const range = isFirstPerson
+        ? isPeekingSpot
+          ? 480
+          : 580
+        : isPeekingSpot
+          ? 460
+          : 520;
+      const coneWidthDeg = isFirstPerson
+        ? isPeekingSpot
+          ? 70
+          : 136
+        : isPeekingSpot
+          ? 54
+          : 82;
+      const coneWidth = (coneWidthDeg * Math.PI) / 180;
       const flicker = p.battery < 18 && Math.sin(timeSec * 37) > 0.72 ? 0.45 : 1.0;
       const conePoly = computeVisibilityPolygon(
         engine.map,
@@ -2961,10 +3624,17 @@ export class GameRenderer {
         p.angle - coneWidth / 2,
         coneWidth,
         range,
-        72
+        isFirstPerson ? 88 : 72
       );
       if (conePoly.length >= 2) {
         const fan = this.buildDynamicFan('mask:flashlight', p.x, p.y, conePoly, false, maskOpts);
+        const fpCone = isFirstPerson
+          ? {
+              angle: p.angle,
+              innerHalfRad: ((isPeekingSpot ? 18 : 30) * Math.PI) / 180,
+              outerHalfRad: ((isPeekingSpot ? 34 : 66) * Math.PI) / 180,
+            }
+          : undefined;
         this.addMaskFan(
           mf,
           fan,
@@ -2972,12 +3642,26 @@ export class GameRenderer {
           range,
           0.68,
           0.98 * flicker,
-          0.82 * flicker
+          0.82 * flicker,
+          fpCone
         );
       }
 
-      const coreRange = isPeekingSpot ? 500 : 560;
-      const coreWidth = ((isPeekingSpot ? 26 : 34) * Math.PI) / 180;
+      const coreRange = isFirstPerson
+        ? isPeekingSpot
+          ? 520
+          : 600
+        : isPeekingSpot
+          ? 500
+          : 560;
+      const coreWidthDeg = isFirstPerson
+        ? isPeekingSpot
+          ? 28
+          : 44
+        : isPeekingSpot
+          ? 26
+          : 34;
+      const coreWidth = (coreWidthDeg * Math.PI) / 180;
       const corePoly = computeVisibilityPolygon(
         engine.map,
         engine.doorsByTile,
@@ -2989,7 +3673,15 @@ export class GameRenderer {
         36
       );
       if (corePoly.length >= 2) {
-        const coreFan = this.buildDynamicFan('mask:flashlightCore', p.x, p.y, corePoly, false, maskOpts);
+        const coreMaskOpts = isFirstPerson ? { ...maskOpts, ceilingCapZ: undefined } : maskOpts;
+        const coreFan = this.buildDynamicFan('mask:flashlightCore', p.x, p.y, corePoly, false, coreMaskOpts);
+        const fpCoreCone = isFirstPerson
+          ? {
+              angle: p.angle,
+              innerHalfRad: (8 * Math.PI) / 180,
+              outerHalfRad: ((isPeekingSpot ? 13 : 20) * Math.PI) / 180,
+            }
+          : undefined;
         this.addMaskFan(
           mf,
           coreFan,
@@ -2997,7 +3689,8 @@ export class GameRenderer {
           coreRange,
           0.56,
           0.74 * flicker,
-          0.46 * flicker
+          0.46 * flicker,
+          fpCoreCone
         );
       }
     } else if (
@@ -3007,7 +3700,7 @@ export class GameRenderer {
       engine.isHidingSpotRoomLit(p.hidingSpotId)
     ) {
       const range = 420;
-      const coneWidth = (54 * Math.PI) / 180;
+      const coneWidth = ((isFirstPerson ? 108 : 54) * Math.PI) / 180;
       const conePoly = computeVisibilityPolygon(
         engine.map,
         engine.doorsByTile,
@@ -3016,11 +3709,18 @@ export class GameRenderer {
         p.angle - coneWidth / 2,
         coneWidth,
         range,
-        56
+        isFirstPerson ? 68 : 56
       );
       if (conePoly.length >= 2) {
         const fan = this.buildDynamicFan('mask:ventPeek', p.x, p.y, conePoly, false, maskOpts);
-        this.addMaskFan(mf, fan, 12, range, 0.65, 0.74, 0.48);
+        const ventCone = isFirstPerson
+          ? {
+              angle: p.angle,
+              innerHalfRad: (24 * Math.PI) / 180,
+              outerHalfRad: (52 * Math.PI) / 180,
+            }
+          : undefined;
+        this.addMaskFan(mf, fan, 12, range, 0.65, 0.74, 0.48, ventCone);
       }
     }
 
@@ -3052,10 +3752,17 @@ export class GameRenderer {
       );
     }
 
-    // 5. Brute Searchlight Beam
+    // 5. Brute Searchlight Beam (+ soft wide ceiling bounce in FP so ceiling isn't laser-streaked)
     if (bruteBeam && bruteBeam.poly.length >= 3) {
       const ty = Math.floor(bruteBeam.oy / engine.map.tileSize);
       if ((engine.map.deckGrid[ty]?.[0] ?? activeDeck) === activeDeck) {
+        const bruteCone = isFirstPerson
+          ? {
+              angle: bruteBeam.angle,
+              innerHalfRad: (10 * Math.PI) / 180,
+              outerHalfRad: ((bruteBeam.isChasing ? 33 : 29) * Math.PI) / 180,
+            }
+          : undefined;
         this.addMaskFan(
           mf,
           bruteBeam.fan,
@@ -3063,8 +3770,41 @@ export class GameRenderer {
           bruteBeam.range,
           0.66,
           1.14 * bruteBeam.intensity,
-          0.84 * bruteBeam.intensity
+          0.84 * bruteBeam.intensity,
+          bruteCone
         );
+        if (isFirstPerson && ceilingsVisible) {
+          const bounceR = Math.min(220, bruteBeam.range * 0.65);
+          const bouncePoly = computeVisibilityPolygon(
+            engine.map,
+            engine.doorsByTile,
+            bruteBeam.ox,
+            bruteBeam.oy,
+            0,
+            Math.PI * 2,
+            bounceR,
+            32
+          );
+          if (bouncePoly.length >= 3) {
+            const bounceFan = this.buildDynamicFan(
+              'mask:bruteBounce',
+              bruteBeam.ox,
+              bruteBeam.oy,
+              bouncePoly,
+              true,
+              maskOpts
+            );
+            this.addMaskFan(
+              mf,
+              bounceFan,
+              10,
+              bounceR,
+              0.55,
+              0.46 * bruteBeam.intensity,
+              0.16 * bruteBeam.intensity
+            );
+          }
+        }
       }
     }
 
@@ -3190,7 +3930,8 @@ export class GameRenderer {
     timeSec: number,
     incomingStairId: string | null,
     cullHalfW: number,
-    cullHalfH: number
+    cullHalfH: number,
+    isFirstPerson = false
   ): void {
     const sp = this.sprites!;
     const ps = this.postSprites!;
@@ -3210,8 +3951,8 @@ export class GameRenderer {
     const b = engine.brute;
     const canSeeOut = !(p.hidingSpotId !== null && p.peekingSpotId === null);
 
-    // 1. Light switch beacons
-    if (canSeeOut) {
+    // 1. Light switch beacons (Top-Down / FreeCam floor dots; 3D switches carry emissive LEDs in FP)
+    if (canSeeOut && !isFirstPerson) {
       for (const sw of engine.map.lightSwitches) {
         const swDeck = engine.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
         if (swDeck !== activeDeck) continue;
@@ -3240,7 +3981,7 @@ export class GameRenderer {
         });
       }
 
-      // 2. Stairwell beacons
+      // 2. Stairwell beacons (Top-Down / FreeCam floor beacons)
       for (const st of engine.map.stairwells) {
         if (st.deck !== activeDeck) continue;
         const dist = Math.hypot(st.x - p.x, st.y - p.y);
@@ -3333,50 +4074,78 @@ export class GameRenderer {
       );
     }
 
-    // 6. Interact halo
-    const nearest = engine.findNearestInteractable();
-    if (nearest) {
-      let tx = 0;
-      let ty = 0;
-      if (nearest.kind === 'PICKUP') {
-        tx = nearest.pickup.x;
-        ty = nearest.pickup.y;
-      } else if (nearest.kind === 'HIDING') {
-        tx = nearest.spot.x;
-        ty = nearest.spot.y;
-      } else if (nearest.kind === 'PAPER_MAP') {
-        tx = nearest.stand.x;
-        ty = nearest.stand.y;
-      } else if (nearest.kind === 'FUSE_SOCKET') {
-        tx = nearest.fuseSocket.x;
-        ty = nearest.fuseSocket.y;
-      } else if (nearest.kind === 'LIGHT_SWITCH') {
-        tx = nearest.lightSwitch.x;
-        ty = nearest.lightSwitch.y;
-      } else if (nearest.kind === 'STAIRWELL') {
-        tx = nearest.stairwell.x;
-        ty = nearest.stairwell.y;
-      } else if (nearest.kind === 'DOOR') {
-        tx = (nearest.door.tx + 0.5) * engine.map.tileSize;
-        ty = (nearest.door.ty + 0.5) * engine.map.tileSize;
-      } else if (nearest.kind === 'ESCAPE_LIFEBOAT') {
+    // 6. Interact halo (Top-Down / FreeCam only; First-Person uses crisp HUD crosshair reticle)
+    const rt = engine.raycastTarget;
+    if (rt && rt.inReach && rt.hasLos && !isFirstPerson && p.peekingDoorId === null && p.hidingSpotId === null) {
+      let tx = rt.hitX;
+      let ty = rt.hitY;
+      let tz = Math.max(0.5, rt.hitZ);
+      if (rt.kind === 'PICKUP') {
+        const wp = engine.worldPickups.find((w) => w.id === Number(rt.targetId));
+        if (wp) {
+          tx = wp.x;
+          ty = wp.y;
+          tz = 8;
+        }
+      } else if (rt.kind === 'HIDING') {
+        const hs = engine.map.hidingSpots.find((h) => h.id === rt.targetId);
+        if (hs) {
+          tx = hs.x;
+          ty = hs.y;
+          tz = 14;
+        }
+      } else if (rt.kind === 'PAPER_MAP') {
+        const pm = engine.map.paperMaps.find((m) => m.id === rt.targetId);
+        if (pm) {
+          tx = pm.x;
+          ty = pm.y;
+          tz = 16;
+        }
+      } else if (rt.kind === 'FUSE_SOCKET') {
+        const fs = engine.map.fuseSockets.find((f) => f.id === rt.targetId);
+        if (fs) {
+          tx = fs.x;
+          ty = fs.y;
+          tz = 18;
+        }
+      } else if (rt.kind === 'LIGHT_SWITCH') {
+        const sw = engine.map.lightSwitches.find((s) => s.id === rt.targetId);
+        if (sw) {
+          tx = sw.x;
+          ty = sw.y;
+          tz = 22;
+        }
+      } else if (rt.kind === 'STAIRWELL') {
+        const st = engine.map.stairwells.find((s) => s.id === rt.targetId);
+        if (st) {
+          tx = st.x;
+          ty = st.y;
+          tz = 4;
+        }
+      } else if (rt.kind === 'DOOR') {
+        const door = engine.map.doors.find((d) => d.id === rt.targetId);
+        if (door) {
+          tx = (door.tx + 0.5) * engine.map.tileSize;
+          ty = (door.ty + 0.5) * engine.map.tileSize;
+          tz = 18;
+        }
+      } else if (rt.kind === 'ESCAPE_LIFEBOAT') {
         tx = engine.map.lifeboatPos.x;
         ty = engine.map.lifeboatPos.y;
-      } else if (nearest.kind === 'ESCAPE_HELI') {
+        tz = 16;
+      } else if (rt.kind === 'ESCAPE_HELI' && rt.subTarget !== 'CHAIN') {
         tx = engine.map.heliPos.x;
         ty = engine.map.heliPos.y;
-      } else if (nearest.kind === 'ESCAPE_SUBMARINE') {
-        tx =
-          nearest.subTarget === 'LEVER'
-            ? engine.map.submarinePos.leverX
-            : engine.map.submarinePos.x;
-        ty =
-          nearest.subTarget === 'LEVER'
-            ? engine.map.submarinePos.leverY
-            : engine.map.submarinePos.y;
+        tz = 20;
+      } else if (rt.kind === 'ESCAPE_SUBMARINE') {
+        tx = rt.subTarget === 'LEVER' ? engine.map.submarinePos.leverX : engine.map.submarinePos.x;
+        ty = rt.subTarget === 'LEVER' ? engine.map.submarinePos.leverY : engine.map.submarinePos.y;
+        tz = rt.subTarget === 'LEVER' ? 18 : 10;
       }
-      const pulse = 18 + Math.sin(timeSec * 6) * 2.5;
+      const pulse = 16 + Math.sin(timeSec * 6) * 2.5;
       ps.place(sp.softRing, tx, ty, {
+        z: engine.viewMode === 'FIRST_PERSON' ? tz : 0,
+        billboardQuaternion: engine.viewMode === 'FIRST_PERSON' ? this.worldCamera.quaternion : undefined,
         scaleX: (pulse * 2) / sp.softRing.w,
         scaleY: (pulse * 2) / sp.softRing.h,
         tint: 0xf8fafc,
@@ -3792,8 +4561,10 @@ export class GameRenderer {
   ): void {
     const renderer = this.renderer!;
     const sp = this.sprites!;
-    const rawPortalX = viewCenterX + (st.x - engine.cameraX) * zoom;
-    const rawPortalY = viewCenterY + (st.y - engine.cameraY) * zoom;
+    const rawPortalX =
+      engine.viewMode === 'FIRST_PERSON' ? width * 0.5 : viewCenterX + (st.x - engine.cameraX) * zoom;
+    const rawPortalY =
+      engine.viewMode === 'FIRST_PERSON' ? height * 0.5 : viewCenterY + (st.y - engine.cameraY) * zoom;
     const portalRadius = Math.max(145, Math.min(280, Math.round(200 * zoom)));
     const margin = portalRadius + 16;
     const portalX = Math.max(margin, Math.min(width - margin, rawPortalX));
@@ -3801,10 +4572,14 @@ export class GameRenderer {
     const viewWorldRadius = portalRadius / zoom;
     const peekRange = Math.min(600, viewWorldRadius + 28);
 
+    if (this.skyDomeMesh) this.skyDomeMesh.visible = false;
+    if (this.skyLosMesh) this.skyLosMesh.visible = false;
+    if (this.skyMaskMesh) this.skyMaskMesh.visible = false;
+
     this.ensurePortalTargets(portalRadius * 2 * dpr);
 
     // 1. Render destination world into portalTarget with 3D perspective camera matching active FOV
-    const activeFov = this.worldCamera.fov || CAMERA_FOV_DEG;
+    const activeFov = CAMERA_FOV_DEG;
     const portalTanHalfFov = Math.max(0.08, Math.tan(THREE.MathUtils.degToRad(activeFov * 0.5)));
     if (this.portalCamera.fov !== activeFov) {
       this.portalCamera.fov = activeFov;
@@ -3836,7 +4611,8 @@ export class GameRenderer {
       viewWorldRadius + 140,
       null,
       timeSec,
-      null
+      null,
+      false
     );
 
     this.populateWorldScene(
@@ -3853,6 +4629,9 @@ export class GameRenderer {
       destBeam,
       null,
       null,
+      false,
+      undefined,
+      undefined,
       false
     );
 
@@ -4248,6 +5027,11 @@ export class GameRenderer {
     this.emptyBlackTex.dispose();
 
     this.oceanBundle?.material.dispose();
+    this.skyDomeMesh?.geometry.dispose();
+    this.skyDomeMat?.dispose();
+    this.skyLosMat?.dispose();
+    this.skyMaskMat?.dispose();
+    this.skyDomeTex?.dispose();
     this.compositeBundle?.material.dispose();
     this.vignetteBundle?.material.dispose();
     this.portalBundle?.material.dispose();

@@ -220,14 +220,72 @@ function makeDoorLeafTexture(
   return tex;
 }
 
+export const EXTERIOR_DECK3_ROOMS = new Set([
+  'Helideck',
+  'Weather Deck',
+  'Container Bay',
+  'Forecastle',
+  'Catwalk',
+]);
+
+function makeCeilingTexture(anisotropy: number): THREE.CanvasTexture {
+  const s = 128;
+  const [c, ctx] = makeCanvas(s, s);
+
+  ctx.fillStyle = '#141c27';
+  ctx.fillRect(0, 0, s, s);
+
+  // Subtle ribbed overhead steel decking panels
+  for (let i = 0; i < 4; i++) {
+    const x = i * (s / 4);
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.06)';
+    ctx.fillRect(x + 2, 2, s / 4 - 6, s - 4);
+    ctx.fillStyle = 'rgba(4, 7, 12, 0.35)';
+    ctx.fillRect(x + s / 4 - 3, 0, 3, s);
+  }
+
+  // Structural cross-girder beams & riveted seams
+  ctx.fillStyle = '#0d131c';
+  ctx.fillRect(0, 0, s, 8);
+  ctx.fillRect(0, s * 0.5 - 3, s, 6);
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.14)';
+  ctx.fillRect(0, 8, s, 1.5);
+  ctx.fillRect(0, s * 0.5 + 3, s, 1.5);
+
+  // Subtle overhead cable tray conduit
+  ctx.fillStyle = '#182230';
+  ctx.fillRect(s * 0.44, 0, 12, s);
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.05)';
+  ctx.fillRect(s * 0.44 + 2, 0, 2, s);
+  ctx.fillRect(s * 0.44 + 8, 0, 2, s);
+
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.anisotropy = anisotropy;
+  tex.needsUpdate = true;
+  return tex;
+}
+
 interface DeckWallMeshes {
   deck: ShipDeck;
   sidesGeom: THREE.BufferGeometry;
   capsGeom: THREE.BufferGeometry;
+  ceilingGeom: THREE.BufferGeometry;
+  ceilingTileCount: number;
   worldSides: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   worldCaps: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  worldCeilings: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   losCaps: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
   maskCaps: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  losSides: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  maskSides: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  losCeilings: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
+  maskCeilings: THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>;
 }
 
 function buildDeckWallMeshes(
@@ -454,14 +512,139 @@ function buildDeckWallMeshes(
   maskCaps.frustumCulled = false;
   maskCaps.renderOrder = 0;
 
+  const losSides = new THREE.Mesh(sidesGeom, capMat);
+  losSides.frustumCulled = false;
+  losSides.renderOrder = 0;
+  losSides.visible = false;
+
+  const maskSides = new THREE.Mesh(sidesGeom, capMat);
+  maskSides.frustumCulled = false;
+  maskSides.renderOrder = 0;
+  maskSides.visible = false;
+
+  // Per-deck ceilings: Deck 1 & 2 full interior (excluding UP stair openings); Deck 3 indoor compartments only
+  const stairSet = new Set<number>();
+  for (const st of map.stairwells) {
+    if (st.deck === deck && st.direction === 'UP') {
+      stairSet.add(st.ty * width + st.tx);
+    }
+  }
+  const ceilPos: number[] = [];
+  const ceilNorm: number[] = [];
+  const ceilUv: number[] = [];
+  let ceilingTileCount = 0;
+  const cz = wallHeight - 0.04;
+
+  const isIndoorTile = (tx: number, ty: number): boolean => {
+    const t = tiles[ty]?.[tx];
+    if (!t || t === 'VOID') return false;
+    if (deck !== 'DECK_3') return true;
+    if (t === 'EXTERIOR_DECK') return false;
+    const room = map.roomGrid[ty]?.[tx];
+    return !EXTERIOR_DECK3_ROOMS.has(room);
+  };
+
+  for (let ty = yStart; ty <= yEnd; ty++) {
+    for (let tx = 0; tx < width; tx++) {
+      const t = tiles[ty][tx];
+      if (t === 'VOID') continue;
+      if (stairSet.has(ty * width + tx)) continue;
+
+      let cover = false;
+      if (deck !== 'DECK_3') {
+        cover = true;
+      } else if (t !== 'WALL') {
+        cover = isIndoorTile(tx, ty);
+      } else {
+        for (let dy = -1; dy <= 1 && !cover; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = tx + dx;
+            const ny = ty + dy;
+            if (ny < yStart || ny > yEnd || nx < 0 || nx >= width) continue;
+            const nt = tiles[ny][nx];
+            if (nt !== 'VOID' && nt !== 'WALL' && isIndoorTile(nx, ny)) {
+              cover = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!cover) continue;
+      ceilingTileCount++;
+
+      const x0 = tx * ts;
+      const x1 = (tx + 1) * ts;
+      const threeY0 = -(ty + 1) * ts;
+      const threeY1 = -ty * ts;
+
+      // Downward-facing (-Z) ceiling quad
+      ceilPos.push(
+        x0, threeY0, cz,
+        x1, threeY1, cz,
+        x1, threeY0, cz,
+        x0, threeY0, cz,
+        x0, threeY1, cz,
+        x1, threeY1, cz
+      );
+      ceilNorm.push(
+        0, 0, -1,
+        0, 0, -1,
+        0, 0, -1,
+        0, 0, -1,
+        0, 0, -1,
+        0, 0, -1
+      );
+      ceilUv.push(
+        0, 0,
+        1, 1,
+        1, 0,
+        0, 0,
+        0, 1,
+        1, 1
+      );
+    }
+  }
+
+  const ceilingGeom = new THREE.BufferGeometry();
+  ceilingGeom.setAttribute('position', new THREE.Float32BufferAttribute(ceilPos, 3));
+  ceilingGeom.setAttribute('normal', new THREE.Float32BufferAttribute(ceilNorm, 3));
+  ceilingGeom.setAttribute('uv', new THREE.Float32BufferAttribute(ceilUv, 2));
+
+  const worldCeilings = new THREE.Mesh(ceilingGeom, sidesMat);
+  worldCeilings.frustumCulled = false;
+  worldCeilings.renderOrder = 4;
+  worldCeilings.visible = false;
+  worldCeilings.userData.occluderOwnerKey = `CEILING:${deck}`;
+
+  const losCeilings = new THREE.Mesh(ceilingGeom, capMat);
+  losCeilings.frustumCulled = false;
+  losCeilings.renderOrder = 0;
+  losCeilings.visible = false;
+
+  const maskCeilings = new THREE.Mesh(ceilingGeom, capMat);
+  maskCeilings.frustumCulled = false;
+  maskCeilings.renderOrder = 0;
+  maskCeilings.visible = false;
+
+  worldSides.userData.occluderOwnerKey = `WALL:${deck}`;
+  worldCaps.userData.occluderOwnerKey = `WALLCAP:${deck}`;
+
   return {
     deck,
     sidesGeom,
     capsGeom,
+    ceilingGeom,
+    ceilingTileCount,
     worldSides,
     worldCaps,
+    worldCeilings,
     losCaps,
     maskCaps,
+    losSides,
+    maskSides,
+    losCeilings,
+    maskCeilings,
   };
 }
 
@@ -505,12 +688,15 @@ class ClosedDoorBlockerBatch {
     camY: number,
     halfW: number,
     halfH: number,
-    excludeDoorId?: string | null
+    excludeDoorId?: string | null,
+    verticalWallHeight = 0
   ): void {
     const ts = map.tileSize;
     const z = DOOR_HEIGHT_PX + 0.2;
     let quadCount = 0;
     const bounds = map.deckBounds[renderDeck];
+    const emitVert = verticalWallHeight > 0;
+    const quadsPerDoor = emitVert ? 2 : 1;
 
     for (let i = 0; i < map.doors.length; i++) {
       const d = map.doors[i];
@@ -522,7 +708,7 @@ class ClosedDoorBlockerBatch {
       const dcy = (d.ty + 0.5) * ts;
       if (Math.abs(dcx - camX) > halfW || Math.abs(dcy - camY) > halfH) continue;
 
-      this.ensureQuads(quadCount + 1);
+      this.ensureQuads(quadCount + quadsPerDoor);
       let idx = quadCount * 18;
       let x0 = 0;
       let x1 = 0;
@@ -536,6 +722,29 @@ class ClosedDoorBlockerBatch {
         x1 = (d.tx + 1) * ts;
         y0 = farCenterY - 1.6;
         y1 = farCenterY + 1.6;
+
+        const tyBot = -y1;
+        const tyTop = -y0;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        quadCount++;
+
+        if (emitVert) {
+          const vY = -farCenterY;
+          const ax = signY >= 0 ? x0 : x1;
+          const bx = signY >= 0 ? x1 : x0;
+          this.posArr[idx++] = ax; this.posArr[idx++] = vY; this.posArr[idx++] = 0;
+          this.posArr[idx++] = bx; this.posArr[idx++] = vY; this.posArr[idx++] = 0;
+          this.posArr[idx++] = bx; this.posArr[idx++] = vY; this.posArr[idx++] = verticalWallHeight;
+          this.posArr[idx++] = ax; this.posArr[idx++] = vY; this.posArr[idx++] = 0;
+          this.posArr[idx++] = bx; this.posArr[idx++] = vY; this.posArr[idx++] = verticalWallHeight;
+          this.posArr[idx++] = ax; this.posArr[idx++] = vY; this.posArr[idx++] = verticalWallHeight;
+          quadCount++;
+        }
       } else {
         const signX = camX >= dcx ? 1 : -1;
         const farCenterX = dcx - signX * 3.0;
@@ -543,17 +752,29 @@ class ClosedDoorBlockerBatch {
         x1 = farCenterX + 1.6;
         y0 = d.ty * ts;
         y1 = (d.ty + 1) * ts;
-      }
 
-      const tyBot = -y1;
-      const tyTop = -y0;
-      this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
-      this.posArr[idx++] = x1; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
-      this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
-      this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
-      this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
-      this.posArr[idx++] = x0; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
-      quadCount++;
+        const tyBot = -y1;
+        const tyTop = -y0;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyBot; this.posArr[idx++] = z;
+        this.posArr[idx++] = x1; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        this.posArr[idx++] = x0; this.posArr[idx++] = tyTop; this.posArr[idx++] = z;
+        quadCount++;
+
+        if (emitVert) {
+          const ay = signX >= 0 ? tyBot : tyTop;
+          const by = signX >= 0 ? tyTop : tyBot;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = ay; this.posArr[idx++] = 0;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = by; this.posArr[idx++] = 0;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = by; this.posArr[idx++] = verticalWallHeight;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = ay; this.posArr[idx++] = 0;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = by; this.posArr[idx++] = verticalWallHeight;
+          this.posArr[idx++] = farCenterX; this.posArr[idx++] = ay; this.posArr[idx++] = verticalWallHeight;
+          quadCount++;
+        }
+      }
     }
 
     const vertCount = quadCount * 6;
@@ -582,9 +803,11 @@ interface DoorRig3D {
   cx: number;
   cy: number;
   root: THREE.Group;
+  transomMesh: THREE.Mesh;
   hingePivot: THREE.Group;
   leafMesh: THREE.Mesh;
   leafTopMesh: THREE.Mesh;
+  hitMesh: THREE.Mesh;
   normalHandles: THREE.Group;
   lockedAttach: THREE.Group;
   watertightAttach: THREE.Group;
@@ -600,6 +823,8 @@ interface StairRig3D {
   y: number;
   direction: 'UP' | 'DOWN';
   root: THREE.Group;
+  upHatchGroup?: THREE.Group;
+  hitMesh: THREE.Mesh;
   trimMat: THREE.MeshBasicMaterial;
   accentMat: THREE.MeshBasicMaterial;
   baseColorHex: number;
@@ -614,15 +839,21 @@ export class ShipStructure3D {
 
   // Shared procedural textures
   private wallTex: THREE.CanvasTexture;
+  private ceilingTex: THREE.CanvasTexture;
   private doorTextures: Record<'normal' | 'locked' | 'watertight', THREE.CanvasTexture>;
 
   // Shared materials
   private wallSidesMat: THREE.MeshBasicMaterial;
+  private ceilingMat: THREE.MeshBasicMaterial;
   private blackCapMat: THREE.MeshBasicMaterial;
+  private maskFrontMat: THREE.MeshBasicMaterial;
+  private blackBackMat: THREE.MeshBasicMaterial;
+  private hitProxyMat: THREE.MeshBasicMaterial;
   private doorLeafMaterials: Record<'normal' | 'locked' | 'watertight', THREE.MeshBasicMaterial>;
   private doorTopCapMaterials: Record<'normal' | 'locked' | 'watertight', THREE.MeshBasicMaterial>;
   private doorJambMat: THREE.MeshBasicMaterial;
   private doorLintelMat: THREE.MeshBasicMaterial;
+  private doorTransomMat: THREE.MeshBasicMaterial;
   private doorBraceMat: THREE.MeshBasicMaterial;
   private doorThresholdMat: THREE.MeshBasicMaterial;
   private steelLightMat: THREE.MeshBasicMaterial;
@@ -641,6 +872,8 @@ export class ShipStructure3D {
   private deckWalls: Map<ShipDeck, DeckWallMeshes> = new Map();
   private doorRigs: DoorRig3D[] = [];
   private stairRigs: StairRig3D[] = [];
+  private raycastHitMeshes: THREE.Object3D[] = [];
+  private raycastOccluderMeshes: THREE.Object3D[] = [];
   private stairMaterials: THREE.MeshBasicMaterial[] = [];
   private debugWireMaterials: THREE.MeshBasicMaterial[] = [];
   private deck3ExteriorGroup = new THREE.Group();
@@ -665,6 +898,7 @@ export class ShipStructure3D {
     this.wallHeight = map.tileSize * WALL_HEIGHT_RATIO;
 
     this.wallTex = makeWallTexture(anisotropy);
+    this.ceilingTex = makeCeilingTexture(anisotropy);
     this.doorTextures = {
       normal: makeDoorLeafTexture('normal', anisotropy),
       locked: makeDoorLeafTexture('locked', anisotropy),
@@ -678,12 +912,46 @@ export class ShipStructure3D {
       depthTest: true,
       depthWrite: true,
     });
+    this.ceilingMat = new THREE.MeshBasicMaterial({
+      map: this.ceilingTex,
+      side: THREE.FrontSide,
+      depthTest: true,
+      depthWrite: true,
+    });
     this.blackCapMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
       toneMapped: false,
       side: THREE.FrontSide,
       depthTest: true,
       depthWrite: true,
+    });
+    this.maskFrontMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      toneMapped: false,
+      side: THREE.FrontSide,
+      depthTest: true,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: 2,
+      polygonOffsetUnits: 4,
+    });
+    this.blackBackMat = new THREE.MeshBasicMaterial({
+      color: 0x000000,
+      toneMapped: false,
+      side: THREE.BackSide,
+      depthTest: true,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: 2,
+      polygonOffsetUnits: 4,
+    });
+    this.hitProxyMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      colorWrite: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
     });
 
     const makeLeafMat = (tex: THREE.CanvasTexture) =>
@@ -723,6 +991,13 @@ export class ShipStructure3D {
     });
     this.doorLintelMat = new THREE.MeshBasicMaterial({
       color: 0x131b26,
+      depthTest: true,
+      depthWrite: true,
+    });
+    this.doorTransomMat = new THREE.MeshBasicMaterial({
+      map: this.wallTex,
+      color: 0x94a3b8,
+      side: THREE.FrontSide,
       depthTest: true,
       depthWrite: true,
     });
@@ -811,6 +1086,7 @@ export class ShipStructure3D {
 
     this.debugWireMaterials.push(
       this.wallSidesMat,
+      this.ceilingMat,
       this.blackCapMat,
       this.doorLeafMaterials.normal,
       this.doorLeafMaterials.locked,
@@ -820,6 +1096,7 @@ export class ShipStructure3D {
       this.doorTopCapMaterials.watertight,
       this.doorJambMat,
       this.doorLintelMat,
+      this.doorTransomMat,
       this.doorBraceMat,
       this.doorThresholdMat,
       this.steelLightMat,
@@ -836,18 +1113,30 @@ export class ShipStructure3D {
       this.deck3RailMat
     );
 
-    // Build per-deck wall meshes
+    // Build per-deck wall & ceiling meshes
     for (const deck of SHIP_DECK_ORDER) {
       const dw = buildDeckWallMeshes(map, deck, this.wallHeight, this.wallSidesMat, this.blackCapMat);
+      dw.worldCeilings.material = this.ceilingMat;
+      dw.losCaps.material = this.maskFrontMat;
+      dw.maskCaps.material = this.maskFrontMat;
+      dw.losCeilings.material = this.maskFrontMat;
+      dw.maskCeilings.material = this.maskFrontMat;
+      dw.losSides.material = this.blackBackMat;
+      dw.maskSides.material = this.blackBackMat;
       this.deckWalls.set(deck, dw);
       this.worldScene.add(dw.worldSides);
       this.worldScene.add(dw.worldCaps);
+      this.worldScene.add(dw.worldCeilings);
       this.losScene.add(dw.losCaps);
+      this.losScene.add(dw.losSides);
+      this.losScene.add(dw.losCeilings);
       this.lightMaskScene.add(dw.maskCaps);
+      this.lightMaskScene.add(dw.maskSides);
+      this.lightMaskScene.add(dw.maskCeilings);
     }
 
-    this.losDoorBlockers = new ClosedDoorBlockerBatch(this.losScene, this.blackCapMat, 0);
-    this.maskDoorBlockers = new ClosedDoorBlockerBatch(this.lightMaskScene, this.blackCapMat, 0);
+    this.losDoorBlockers = new ClosedDoorBlockerBatch(this.losScene, this.maskFrontMat, 0);
+    this.maskDoorBlockers = new ClosedDoorBlockerBatch(this.lightMaskScene, this.maskFrontMat, 0);
 
     this.buildDoors();
     this.buildStairwells();
@@ -899,6 +1188,7 @@ export class ShipStructure3D {
     const jambGeom = this.trackGeom(new THREE.BoxGeometry(jambW, jambD, jambH));
     // Twin outer transom header rails bridge dh..wh outside ±6.2 so Top 0° door hardware stays 100% unobstructed
     const lintelRailGeom = this.trackGeom(new THREE.BoxGeometry(ts - jambW * 1.4, 2.0, lintelH));
+    const transomGeom = this.trackGeom(new THREE.BoxGeometry(ts - jambW * 1.4, 14.4, lintelH + 0.6));
     const hingeKnuckleGeom = this.trackGeom(new THREE.CylinderGeometry(1.75, 1.75, 4.2, 8));
     hingeKnuckleGeom.rotateX(Math.PI / 2);
 
@@ -970,7 +1260,11 @@ export class ShipStructure3D {
       lintelFront.position.set(0, -7.2, lintelZ);
       const lintelBack = new THREE.Mesh(lintelRailGeom, this.doorLintelMat);
       lintelBack.position.set(0, 7.2, lintelZ);
-      root.add(lintelFront, lintelBack);
+      const transomMesh = new THREE.Mesh(transomGeom, this.doorTransomMat);
+      transomMesh.position.set(0, 0, lintelZ);
+      transomMesh.userData.occluderOwnerKey = `DOOR:${door.id}:TRANSOM`;
+      transomMesh.visible = false;
+      root.add(lintelFront, lintelBack, transomMesh);
 
       for (const hz of [10, dh * 0.5, dh - 8]) {
         const knuckle = new THREE.Mesh(hingeKnuckleGeom, this.steelLightMat);
@@ -991,11 +1285,24 @@ export class ShipStructure3D {
 
       const leafMesh = new THREE.Mesh(leafGeom, this.doorLeafMaterials[kind]);
       leafMesh.position.set(leafW * 0.5, 0, leafBodyH * 0.5);
+      leafMesh.userData.occluderOwnerKey = `DOOR:${door.id}`;
       hingePivot.add(leafMesh);
 
       const leafTopMesh = new THREE.Mesh(leafTopGeom, this.doorTopCapMaterials[kind]);
       leafTopMesh.position.set(leafW * 0.5, 0, dh - 1.1);
       hingePivot.add(leafTopMesh);
+
+      const hitMesh = new THREE.Mesh(
+        this.trackGeom(new THREE.BoxGeometry(leafW + 4, 15, dh + 2)),
+        this.hitProxyMat
+      );
+      hitMesh.position.set(leafW * 0.5, 0, dh * 0.5);
+      hitMesh.userData = {
+        pickKind: 'DOOR',
+        targetId: door.id,
+        ownerKey: `DOOR:${door.id}`,
+      };
+      hingePivot.add(hitMesh);
 
       // Normal handles (mounted on upper chest so readable both from angled 3D and top-down)
       const normalHandles = new THREE.Group();
@@ -1091,6 +1398,7 @@ export class ShipStructure3D {
       // CRITICAL: WebGPURenderer sets groupOrder from any traversed Group.renderOrder;
       // enforce renderOrder = 5 on every child Group & Mesh so doors always draw after oceanMesh (0) & floor/walls (2/4).
       this.setRenderOrderRecursive(root, 5);
+      transomMesh.visible = false;
       root.visible = false;
       this.worldScene.add(root);
 
@@ -1100,9 +1408,11 @@ export class ShipStructure3D {
         cx,
         cy,
         root,
+        transomMesh,
         hingePivot,
         leafMesh,
         leafTopMesh,
+        hitMesh,
         normalHandles,
         lockedAttach,
         watertightAttach,
@@ -1206,6 +1516,14 @@ export class ShipStructure3D {
     const upPortalBeamGeom = this.trackGeom(new THREE.BoxGeometry(38.4, 6.0, 3.2));
     const upPortalThroatGeom = this.trackGeom(new THREE.PlaneGeometry(32.0, 24.0));
     const upSideRailGeom = this.trackGeom(new THREE.CylinderGeometry(1.05, 1.05, 36.0, 6));
+    const upHatchFrontH = Math.max(4, this.wallHeight - 44.0);
+    const upHatchBackH = Math.max(4, this.wallHeight - 26.0);
+    const upHatchSideH = Math.max(4, this.wallHeight - 38.0);
+    const upHatchFrontGeom = this.trackGeom(new THREE.BoxGeometry(43.6, 1.6, upHatchFrontH));
+    const upHatchBackGeom = this.trackGeom(new THREE.BoxGeometry(43.6, 1.6, upHatchBackH));
+    const upHatchSideGeom = this.trackGeom(new THREE.BoxGeometry(1.6, 43.6, upHatchSideH));
+    const upHatchCapGeom = this.trackGeom(new THREE.PlaneGeometry(44.0, 44.0));
+    upHatchCapGeom.rotateX(Math.PI);
 
     // Clean flat beveled chevron arrow (points toward +Y in local stair frame)
     const arrowShape = new THREE.Shape();
@@ -1295,6 +1613,8 @@ export class ShipStructure3D {
       const tRight = new THREE.Mesh(trimRingLRGeom, trimMat);
       tRight.position.set(21.1, 0, 1.9);
       root.add(tTop, tBot, tLeft, tRight);
+
+      let upHatchGroup: THREE.Group | undefined;
 
       if (st.direction === 'DOWN') {
         // Enclosed recessed shaft (z = -34 .. 0) + opaque floor pan + structural corner pilasters
@@ -1440,9 +1760,41 @@ export class ShipStructure3D {
         chevron.position.set(0, 18.2, 28.85);
         chevron.scale.set(0.78, 0.72, 1);
         root.add(chevron);
+
+        // Enclosed First-Person upper stairwell companionway hood (toggled with ceilingsVisible)
+        upHatchGroup = new THREE.Group();
+        const frontHeader = new THREE.Mesh(upHatchFrontGeom, this.doorTransomMat);
+        frontHeader.position.set(0, -21.2, 44.0 + upHatchFrontH * 0.5);
+        const backWall = new THREE.Mesh(upHatchBackGeom, this.doorTransomMat);
+        backWall.position.set(0, 21.2, 26.0 + upHatchBackH * 0.5);
+        const leftWall = new THREE.Mesh(upHatchSideGeom, this.doorTransomMat);
+        leftWall.position.set(-21.2, 0, 38.0 + upHatchSideH * 0.5);
+        const rightWall = new THREE.Mesh(upHatchSideGeom, this.doorTransomMat);
+        rightWall.position.set(21.2, 0, 38.0 + upHatchSideH * 0.5);
+        const hatchCap = new THREE.Mesh(upHatchCapGeom, this.ceilingMat);
+        hatchCap.position.set(0, 0, this.wallHeight - 0.04);
+        upHatchGroup.add(frontHeader, backWall, leftWall, rightWall, hatchCap);
+        root.add(upHatchGroup);
       }
 
+      const hitMesh = new THREE.Mesh(
+        this.trackGeom(
+          new THREE.BoxGeometry(40, 40, st.direction === 'UP' ? 48 : 40)
+        ),
+        this.hitProxyMat
+      );
+      hitMesh.position.set(0, 0, st.direction === 'UP' ? 24 : 10);
+      hitMesh.userData = {
+        pickKind: 'STAIRWELL',
+        targetId: st.id,
+        ownerKey: `STAIRWELL:${st.id}`,
+      };
+      root.add(hitMesh);
+
       this.setRenderOrderRecursive(root, 3);
+      if (upHatchGroup) {
+        upHatchGroup.visible = false;
+      }
       root.visible = false;
       this.worldScene.add(root);
 
@@ -1453,6 +1805,8 @@ export class ShipStructure3D {
         y: st.y,
         direction: st.direction,
         root,
+        upHatchGroup,
+        hitMesh,
         trimMat,
         accentMat,
         baseColorHex,
@@ -1460,6 +1814,54 @@ export class ShipStructure3D {
         wasComing: false,
       });
     }
+  }
+
+  public getRaycastTargets(activeDeck: ShipDeck): THREE.Object3D[] {
+    this.raycastHitMeshes.length = 0;
+    for (let i = 0; i < this.doorRigs.length; i++) {
+      const rig = this.doorRigs[i];
+      if (rig.deck !== activeDeck || !rig.root.visible || rig.door.isBroken) continue;
+      this.raycastHitMeshes.push(rig.hitMesh);
+    }
+    for (let i = 0; i < this.stairRigs.length; i++) {
+      const sr = this.stairRigs[i];
+      if (sr.deck !== activeDeck || !sr.root.visible) continue;
+      this.raycastHitMeshes.push(sr.hitMesh);
+    }
+    return this.raycastHitMeshes;
+  }
+
+  public getRaycastOccluders(activeDeck: ShipDeck): THREE.Object3D[] {
+    this.raycastOccluderMeshes.length = 0;
+    const dw = this.deckWalls.get(activeDeck);
+    if (dw) {
+      if (dw.worldSides.visible) this.raycastOccluderMeshes.push(dw.worldSides);
+      if (dw.worldCaps.visible) this.raycastOccluderMeshes.push(dw.worldCaps);
+      if (dw.worldCeilings.visible) this.raycastOccluderMeshes.push(dw.worldCeilings);
+    }
+    for (let i = 0; i < this.doorRigs.length; i++) {
+      const rig = this.doorRigs[i];
+      if (rig.deck !== activeDeck || !rig.root.visible) continue;
+      if (rig.transomMesh.visible) {
+        this.raycastOccluderMeshes.push(rig.transomMesh);
+      }
+      if (!rig.door.isBroken && rig.hingePivot.visible) {
+        this.raycastOccluderMeshes.push(rig.leafMesh);
+      }
+    }
+    return this.raycastOccluderMeshes;
+  }
+
+  public getCeilingStats(): Record<ShipDeck, { tiles: number; visible: boolean }> {
+    const out = {} as Record<ShipDeck, { tiles: number; visible: boolean }>;
+    for (const deck of SHIP_DECK_ORDER) {
+      const dw = this.deckWalls.get(deck);
+      out[deck] = {
+        tiles: dw?.ceilingTileCount ?? 0,
+        visible: Boolean(dw?.worldCeilings.visible),
+      };
+    }
+    return out;
   }
 
   public updateForFrame(
@@ -1471,17 +1873,24 @@ export class ShipStructure3D {
     halfH: number,
     incomingStairId: string | null,
     timeSec: number,
-    peekOpenDoorId?: string | null
+    peekOpenDoorId?: string | null,
+    ceilingsVisible = false,
+    isFirstPerson = false
   ): void {
     if (this.disposed) return;
 
-    // 1. Toggle per-deck walls & Deck 3 exterior wedges/railings
+    // 1. Toggle per-deck walls, ceilings & Deck 3 exterior wedges/railings
     for (const [deck, dw] of this.deckWalls) {
       const vis = deck === renderDeck;
       dw.worldSides.visible = vis;
       dw.worldCaps.visible = vis && !this.debugHideWallCaps;
+      dw.worldCeilings.visible = vis && ceilingsVisible;
       dw.losCaps.visible = vis;
       dw.maskCaps.visible = vis;
+      dw.losSides.visible = vis && ceilingsVisible;
+      dw.maskSides.visible = vis && ceilingsVisible;
+      dw.losCeilings.visible = vis && ceilingsVisible;
+      dw.maskCeilings.visible = vis && ceilingsVisible;
     }
     this.deck3ExteriorGroup.visible = renderDeck === 'DECK_3';
 
@@ -1500,6 +1909,7 @@ export class ShipStructure3D {
       }
 
       rig.root.visible = true;
+      rig.transomMesh.visible = ceilingsVisible;
       const d = rig.door;
 
       if (d.isBroken) {
@@ -1507,7 +1917,9 @@ export class ShipStructure3D {
         rig.padlockDebris.visible = false;
         rig.brokenGroup.visible = true;
       } else {
-        rig.hingePivot.visible = true;
+        const hidePeekedLeaf =
+          isFirstPerson && Boolean(peekOpenDoorId) && d.id === peekOpenDoorId;
+        rig.hingePivot.visible = !hidePeekedLeaf;
         rig.brokenGroup.visible = false;
         rig.padlockDebris.visible = Boolean(d.lockCut);
         rig.hingePivot.rotation.z = d.openProgress * 1.38;
@@ -1542,6 +1954,9 @@ export class ShipStructure3D {
       }
 
       sr.root.visible = true;
+      if (sr.upHatchGroup) {
+        sr.upHatchGroup.visible = ceilingsVisible;
+      }
       const isComing = sr.id === incomingStairId;
       if (isComing) {
         sr.trimMat.color.setHex(0xff7314).lerp(this.incomingWarmCol, pulse * 0.45);
@@ -1555,6 +1970,7 @@ export class ShipStructure3D {
     }
 
     // 4. Update dynamic closed-door depth-blocking strips in LoS and LightMask scenes
+    const vertBlockH = ceilingsVisible ? this.wallHeight : 0;
     this.losDoorBlockers.update(
       this.map,
       renderDeck,
@@ -1562,7 +1978,8 @@ export class ShipStructure3D {
       camY,
       doorPadX,
       doorPadY,
-      peekOpenDoorId
+      peekOpenDoorId,
+      vertBlockH
     );
     this.maskDoorBlockers.update(
       this.map,
@@ -1571,7 +1988,8 @@ export class ShipStructure3D {
       camY,
       doorPadX,
       doorPadY,
-      peekOpenDoorId
+      peekOpenDoorId,
+      vertBlockH
     );
   }
 
@@ -1582,10 +2000,16 @@ export class ShipStructure3D {
     for (const dw of this.deckWalls.values()) {
       this.worldScene.remove(dw.worldSides);
       this.worldScene.remove(dw.worldCaps);
+      this.worldScene.remove(dw.worldCeilings);
       this.losScene.remove(dw.losCaps);
+      this.losScene.remove(dw.losSides);
+      this.losScene.remove(dw.losCeilings);
       this.lightMaskScene.remove(dw.maskCaps);
+      this.lightMaskScene.remove(dw.maskSides);
+      this.lightMaskScene.remove(dw.maskCeilings);
       dw.sidesGeom.dispose();
       dw.capsGeom.dispose();
+      dw.ceilingGeom.dispose();
     }
     this.deckWalls.clear();
 
@@ -1598,6 +2022,8 @@ export class ShipStructure3D {
       this.worldScene.remove(sr.root);
     }
     this.stairRigs = [];
+    this.raycastHitMeshes = [];
+    this.raycastOccluderMeshes = [];
 
     this.worldScene.remove(this.deck3ExteriorGroup);
 
@@ -1615,12 +2041,17 @@ export class ShipStructure3D {
     this.stairMaterials = [];
 
     this.wallTex.dispose();
+    this.ceilingTex.dispose();
     this.doorTextures.normal.dispose();
     this.doorTextures.locked.dispose();
     this.doorTextures.watertight.dispose();
 
     this.wallSidesMat.dispose();
+    this.ceilingMat.dispose();
     this.blackCapMat.dispose();
+    this.maskFrontMat.dispose();
+    this.blackBackMat.dispose();
+    this.hitProxyMat.dispose();
     this.doorLeafMaterials.normal.dispose();
     this.doorLeafMaterials.locked.dispose();
     this.doorLeafMaterials.watertight.dispose();
@@ -1629,6 +2060,7 @@ export class ShipStructure3D {
     this.doorTopCapMaterials.watertight.dispose();
     this.doorJambMat.dispose();
     this.doorLintelMat.dispose();
+    this.doorTransomMat.dispose();
     this.doorBraceMat.dispose();
     this.doorThresholdMat.dispose();
     this.steelLightMat.dispose();

@@ -6,7 +6,13 @@ import {
   DEFAULT_CAMERA_PITCH_DEG,
   DEFAULT_CAMERA_YAW_DEG,
 } from '../game/graphicsSettings';
-import { DebugOverlayConfig, DebugScenarioId } from '../game/types';
+import {
+  DebugOverlayConfig,
+  DebugScenarioId,
+  GameViewMode,
+  RaycastDebugInfo,
+  ShipDeck,
+} from '../game/types';
 
 export interface ProbeReading {
   label: string;
@@ -18,6 +24,11 @@ export interface ProbeReading {
 
 export interface DebugTelemetry {
   scenario: DebugScenarioId | null;
+  viewMode: GameViewMode;
+  fpYawDeg: number;
+  fpPitchDeg: number;
+  fpEyeZ: number;
+  pointerLocked: boolean;
   playerX: number;
   playerY: number;
   hidingSpotId: string | null;
@@ -32,6 +43,8 @@ export interface DebugTelemetry {
   inspectSpotId: string | null;
   inspectTimer: number;
   bruteDistance: number;
+  raycast: RaycastDebugInfo;
+  ceilingStats: Record<ShipDeck, { tiles: number; visible: boolean }> | null;
   probes: ProbeReading[];
 }
 
@@ -42,6 +55,7 @@ interface DebugPanelProps {
   onClose: () => void;
   onLoadScenario: (id: DebugScenarioId) => void;
   onUpdateConfig: (patch: Partial<DebugOverlayConfig>) => void;
+  onRestartWithViewMode: (mode: GameViewMode) => void;
   onStepFrame: () => void;
   onFocusDoor: () => void;
   onFocusStair: (dir: 'UP' | 'DOWN') => void;
@@ -65,6 +79,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
   onClose,
   onLoadScenario,
   onUpdateConfig,
+  onRestartWithViewMode,
   onStepFrame,
   onFocusDoor,
   onFocusStair,
@@ -93,7 +108,9 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
         {/* 3D Camera & Render Mode Inspector */}
         <section className="space-y-2.5">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-slate-400">3D Visual Inspector</span>
+            <span className="text-[11px] font-semibold text-slate-400">
+              3D Visual Inspector ({telemetry.viewMode === 'FIRST_PERSON' ? 'FP' : 'TD'})
+            </span>
             <button
               type="button"
               onClick={() =>
@@ -104,6 +121,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
                   cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
                   wireframeStructure: false,
                   hideWallCaps: false,
+                  showCeilings: telemetry.viewMode === 'FIRST_PERSON',
                   showStructureGizmos: false,
                   debugDeckOverride: 'AUTO',
                   freeCamEnabled: false,
@@ -112,6 +130,33 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
               className="text-[10px] font-medium text-slate-400 hover:text-white cursor-pointer"
             >
               Reset View
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              onClick={() => onRestartWithViewMode('TOP_DOWN')}
+              title="Start a fresh deterministic run in Top-Down 3D"
+              className={`rounded border px-2 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                telemetry.viewMode === 'TOP_DOWN'
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              New Run: Top-Down
+            </button>
+            <button
+              type="button"
+              onClick={() => onRestartWithViewMode('FIRST_PERSON')}
+              title="Start a fresh deterministic run in First-Person"
+              className={`rounded border px-2 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                telemetry.viewMode === 'FIRST_PERSON'
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              New Run: First-Person
             </button>
           </div>
 
@@ -266,7 +311,7 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-3 gap-1">
+          <div className="grid grid-cols-2 gap-1">
             <button
               type="button"
               onClick={() => onUpdateConfig({ wireframeStructure: !config.wireframeStructure })}
@@ -288,6 +333,17 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
               }`}
             >
               Hide Caps
+            </button>
+            <button
+              type="button"
+              onClick={() => onUpdateConfig({ showCeilings: !config.showCeilings })}
+              className={`rounded border px-1.5 py-1 text-[10px] font-medium whitespace-nowrap cursor-pointer ${
+                config.showCeilings
+                  ? 'border-amber-500/70 bg-amber-500/15 text-amber-200'
+                  : 'border-slate-800 bg-slate-900/70 text-slate-300 hover:border-slate-700'
+              }`}
+            >
+              Ceilings
             </button>
             <button
               type="button"
@@ -513,6 +569,15 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
                 {Math.round(telemetry.playerX)}, {Math.round(telemetry.playerY)}
               </span>
             </div>
+            {telemetry.viewMode === 'FIRST_PERSON' && (
+              <div className="flex justify-between">
+                <span className="text-slate-400">FP Pose</span>
+                <span className="text-sky-300">
+                  Y {Math.round(telemetry.fpYawDeg)}° · P {Math.round(telemetry.fpPitchDeg)}° · Z{' '}
+                  {telemetry.fpEyeZ.toFixed(1)}
+                </span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-slate-400">Flashlight</span>
               <span className={telemetry.flashlightOn ? 'text-amber-300' : 'text-slate-400'}>
@@ -548,6 +613,52 @@ export const DebugPanel: React.FC<DebugPanelProps> = ({
                 {telemetry.inspectSpotId ?? 'None'} ({telemetry.inspectTimer.toFixed(2)}s)
               </span>
             </div>
+          </div>
+
+          {/* 3D Raycast Target Inspector */}
+          <div className="space-y-1 rounded border border-slate-800 bg-[#05070b] p-2.5 font-mono-num text-[11px]">
+            <div className="text-[10px] font-semibold text-slate-400">3D Raycast Inspector</div>
+            <div className="flex justify-between gap-2">
+              <span className="text-slate-400">Hit</span>
+              <span className="truncate text-slate-200">
+                {telemetry.raycast.hitKind ?? 'None'}
+                {telemetry.raycast.subTarget ? `:${telemetry.raycast.subTarget}` : ''}
+              </span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-slate-400">Dist 2D / 3D</span>
+              <span>
+                {telemetry.raycast.dist2d !== null ? Math.round(telemetry.raycast.dist2d) : '-'} /{' '}
+                {telemetry.raycast.hitDist !== null ? Math.round(telemetry.raycast.hitDist) : '-'}
+              </span>
+            </div>
+            <div className="flex justify-between gap-2">
+              <span className="text-slate-400">Reach / LoS</span>
+              <span
+                className={
+                  telemetry.raycast.inReach && telemetry.raycast.hasLos
+                    ? 'text-emerald-400'
+                    : 'text-slate-300'
+                }
+              >
+                {telemetry.raycast.inReach ? 'IN' : 'OUT'} · {telemetry.raycast.hasLos ? 'CLEAR' : 'BLOCKED'}
+              </span>
+            </div>
+            {telemetry.raycast.blockedBy && (
+              <div className="flex justify-between gap-2">
+                <span className="text-slate-400">Blocked By</span>
+                <span className="truncate text-rose-400">{telemetry.raycast.blockedBy}</span>
+              </div>
+            )}
+            {telemetry.ceilingStats && (
+              <div className="flex justify-between gap-2 pt-0.5 text-[10px] text-slate-400">
+                <span>Ceilings</span>
+                <span>
+                  D3:{telemetry.ceilingStats.DECK_3.tiles} D2:{telemetry.ceilingStats.DECK_2.tiles} D1:
+                  {telemetry.ceilingStats.DECK_1.tiles}
+                </span>
+              </div>
+            )}
           </div>
 
           {telemetry.probes.length > 0 && (

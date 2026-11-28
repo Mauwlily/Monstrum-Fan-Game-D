@@ -23,9 +23,14 @@ import {
   DebugScenarioId,
   DifficultyConfig,
   GameStatus,
+  GameViewMode,
   HudSnapshot,
   ItemId,
+  RaycastDebugInfo,
+  RaycastInteractTarget,
+  RaycastTargetKind,
   RunStats,
+  ShipDeck,
 } from './game/types';
 
 declare global {
@@ -209,6 +214,29 @@ declare global {
         screenY: number;
         cursorTarget: unknown;
       } | null;
+      startWithViewMode: (mode: GameViewMode, seed?: number) => void;
+      getViewMode: () => GameViewMode | null;
+      setFirstPersonPose: (
+        x: number,
+        y: number,
+        yawDeg: number,
+        pitchDeg?: number
+      ) => void;
+      getRaycastDebugState: () => {
+        target: RaycastInteractTarget | null;
+        debug: RaycastDebugInfo;
+      } | null;
+      getCeilingStats: () => Record<ShipDeck, { tiles: number; visible: boolean }> | null;
+      aimAtInteractable: (
+        kind: RaycastTargetKind,
+        targetId: string,
+        subTarget?: RaycastInteractTarget['subTarget']
+      ) => {
+        screenX: number;
+        screenY: number;
+        raycastTarget: RaycastInteractTarget | null;
+        raycastDebug: RaycastDebugInfo;
+      } | null;
       probePixels: () => ProbeReading[];
       probePixelsAsync: () => Promise<ProbeReading[]>;
       captureCanvasDataUrl: () => string | null;
@@ -220,6 +248,13 @@ declare global {
 export default function App() {
   const [status, setStatus] = useState<GameStatus>('TITLE_MENU');
   const [difficulty, setDifficulty] = useState<DifficultyConfig>({ ...DIFFICULTY_PRESETS.STANDARD });
+  const [viewMode, setViewMode] = useState<GameViewMode>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const v = (params.get('view') ?? '').toLowerCase();
+    return v === 'fp' || v === 'first_person' || params.get('fp') === '1'
+      ? 'FIRST_PERSON'
+      : 'TOP_DOWN';
+  });
   const [devModeUnlocked, setDevModeUnlocked] = useState<boolean>(
     () => new URLSearchParams(window.location.search).get('debug') === '1'
   );
@@ -251,6 +286,7 @@ export default function App() {
   const groundScratchRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const graphicsSettingsRef = useRef<GraphicsSettings>(graphicsSettings);
   const statusRef = useRef<GameStatus>('TITLE_MENU');
+  const viewModeRef = useRef<GameViewMode>(viewMode);
   const debugOpenRef = useRef(false);
   const devModeUnlockedRef = useRef(devModeUnlocked);
   const doorCycleIdxRef = useRef(-1);
@@ -264,10 +300,22 @@ export default function App() {
     lastY: number;
     moved: boolean;
   }>({ active: false, mode: 'orbit', startX: 0, startY: 0, lastX: 0, lastY: 0, moved: false });
+  const fpDragLookRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    moved: boolean;
+  }>({ active: false, startX: 0, startY: 0, lastX: 0, lastY: 0, moved: false });
 
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    viewModeRef.current = viewMode;
+  }, [viewMode]);
 
   useEffect(() => {
     devModeUnlockedRef.current = devModeUnlocked;
@@ -323,7 +371,12 @@ export default function App() {
   }, [difficulty]);
 
   const startNewRun = useCallback(
-    (overrideRandomSeed = false, forcedSeed?: number, openDebugAfter = false) => {
+    (
+      overrideRandomSeed = false,
+      forcedSeed?: number,
+      openDebugAfter = false,
+      forcedViewMode?: GameViewMode
+    ) => {
       audioRef.current?.dispose();
       audioRef.current = null;
 
@@ -344,6 +397,12 @@ export default function App() {
             ? Number.parseInt(seedInput.trim(), 10)
             : undefined;
 
+      const activeViewMode = forcedViewMode ?? viewModeRef.current;
+      if (forcedViewMode) {
+        setViewMode(forcedViewMode);
+        viewModeRef.current = forcedViewMode;
+      }
+
       const engine = new MonstrumGameEngine(
         difficulty,
         audio,
@@ -360,7 +419,8 @@ export default function App() {
         },
         Number.isFinite(parsedSeed) ? parsedSeed : undefined,
         bruteTuning,
-        customTuningActive
+        customTuningActive,
+        activeViewMode
       );
 
       engine.setParticleDensity(gfx.particleDensity);
@@ -383,6 +443,11 @@ export default function App() {
     if (!engine) return null;
     return {
       scenario: engine.debugScenario,
+      viewMode: engine.viewMode,
+      fpYawDeg: Math.round(((engine.player.angle * 180) / Math.PI) * 10) / 10,
+      fpPitchDeg: Math.round(engine.fpPitchDeg * 10) / 10,
+      fpEyeZ: Math.round(engine.fpEyeZ * 10) / 10,
+      pointerLocked: engine.pointerLocked,
       playerX: engine.player.x,
       playerY: engine.player.y,
       hidingSpotId: engine.player.hidingSpotId,
@@ -397,6 +462,8 @@ export default function App() {
       inspectSpotId: engine.brute.currentInspectSpotId,
       inspectTimer: engine.brute.inspectTimer,
       bruteDistance: engine.getEffectiveBruteDistance(),
+      raycast: { ...engine.raycastDebug },
+      ceilingStats: rendererRef.current?.getCeilingStats() ?? null,
       probes,
     };
   }, []);
@@ -819,7 +886,10 @@ export default function App() {
         const w = window.innerWidth;
         const h = window.innerHeight;
         if (statusRef.current === 'PLAYING') {
-          if (engine.mouseMoved && renderer.isInitialized()) {
+          const isFpLive =
+            engine.viewMode === 'FIRST_PERSON' &&
+            !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
+          if (!isFpLive && engine.mouseMoved && renderer.isInitialized()) {
             if (
               renderer.screenToWorldGround(
                 engine.mouseScreenX,
@@ -840,10 +910,13 @@ export default function App() {
 
         if (renderer.isInitialized()) {
           if (statusRef.current === 'PLAYING') {
+            const isFpLive =
+              engine.viewMode === 'FIRST_PERSON' &&
+              !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
             renderer.updatePointerHover(
               engine,
-              engine.mouseScreenX,
-              engine.mouseScreenY,
+              isFpLive ? w * 0.5 : engine.mouseScreenX,
+              isFpLive ? h * 0.5 : engine.mouseScreenY,
               w,
               h
             );
@@ -884,7 +957,12 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('debug') === '1' && statusRef.current === 'TITLE_MENU') {
-      startNewRun(false, 100000, true);
+      const v = (params.get('view') ?? '').toLowerCase();
+      const forcedMode: GameViewMode | undefined =
+        v === 'fp' || v === 'first_person' || params.get('fp') === '1'
+          ? 'FIRST_PERSON'
+          : undefined;
+      startNewRun(false, 100000, true, forcedMode);
     }
   }, [startNewRun]);
 
@@ -1210,27 +1288,206 @@ export default function App() {
           window.innerHeight
         );
         if (!pt) return null;
-        engine.mouseScreenX = pt.x;
-        engine.mouseScreenY = pt.y;
-        engine.mouseMoved = true;
-        if (
-          renderer.screenToWorldGround(
-            pt.x,
-            pt.y,
-            window.innerWidth,
-            window.innerHeight,
-            groundScratchRef.current,
-            16
-          )
-        ) {
-          engine.setWorldMouse(groundScratchRef.current.x, groundScratchRef.current.y);
+        if (engine.viewMode !== 'FIRST_PERSON' || engine.debugConfig.freeCamEnabled) {
+          engine.mouseScreenX = pt.x;
+          engine.mouseScreenY = pt.y;
+          engine.mouseMoved = true;
+          if (
+            renderer.screenToWorldGround(
+              pt.x,
+              pt.y,
+              window.innerWidth,
+              window.innerHeight,
+              groundScratchRef.current,
+              16
+            )
+          ) {
+            engine.setWorldMouse(groundScratchRef.current.x, groundScratchRef.current.y);
+          }
         }
-        renderer.updatePointerHover(engine, pt.x, pt.y, window.innerWidth, window.innerHeight);
+        renderer.updatePointerHover(
+          engine,
+          engine.viewMode === 'FIRST_PERSON' && !engine.debugConfig.freeCamEnabled
+            ? window.innerWidth * 0.5
+            : pt.x,
+          engine.viewMode === 'FIRST_PERSON' && !engine.debugConfig.freeCamEnabled
+            ? window.innerHeight * 0.5
+            : pt.y,
+          window.innerWidth,
+          window.innerHeight
+        );
         renderImmediateFrame();
         return {
           screenX: pt.x,
           screenY: pt.y,
           cursorTarget: engine.cursorTarget ? { ...engine.cursorTarget } : null,
+        };
+      },
+      startWithViewMode: (mode: GameViewMode, seed = 100000) => {
+        startNewRun(false, seed, debugOpenRef.current, mode);
+      },
+      getViewMode: () => engineRef.current?.viewMode ?? null,
+      setFirstPersonPose: (x: number, y: number, yawDeg: number, pitchDeg = 0) => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        engine.player.x = x;
+        engine.player.y = y;
+        engine.cameraX = x;
+        engine.cameraY = y;
+        let rad = (yawDeg * Math.PI) / 180;
+        while (rad > Math.PI) rad -= Math.PI * 2;
+        while (rad < -Math.PI) rad += Math.PI * 2;
+        engine.player.angle = rad;
+        engine.fpPitchDeg = Math.max(-75, Math.min(75, pitchDeg));
+        renderImmediateFrame();
+        const renderer = rendererRef.current;
+        if (renderer?.isInitialized()) {
+          renderer.updatePointerHover(
+            engine,
+            window.innerWidth * 0.5,
+            window.innerHeight * 0.5,
+            window.innerWidth,
+            window.innerHeight
+          );
+        }
+        renderImmediateFrame();
+        syncDebugTelemetry();
+      },
+      getRaycastDebugState: () => {
+        const engine = engineRef.current;
+        if (!engine) return null;
+        return {
+          target: engine.raycastTarget ? { ...engine.raycastTarget } : null,
+          debug: { ...engine.raycastDebug },
+        };
+      },
+      getCeilingStats: () => rendererRef.current?.getCeilingStats() ?? null,
+      aimAtInteractable: (
+        kind: RaycastTargetKind,
+        targetId: string,
+        subTarget?: RaycastInteractTarget['subTarget']
+      ) => {
+        const engine = engineRef.current;
+        const renderer = rendererRef.current;
+        if (!engine || !renderer || !renderer.isInitialized()) return null;
+        renderImmediateFrame();
+        let screenPt = renderer.getInteractableScreenPoint(
+          kind,
+          targetId,
+          subTarget,
+          window.innerWidth,
+          window.innerHeight,
+          engine
+        );
+        if (
+          engine.viewMode === 'FIRST_PERSON' &&
+          !engine.debugConfig.freeCamEnabled
+        ) {
+          // Orient player yaw toward target world XY if known so it sits near center reticle
+          let wx: number | null = null;
+          let wy: number | null = null;
+          if (kind === 'DOOR') {
+            const d = engine.map.doors.find((item) => item.id === targetId);
+            if (d) {
+              wx = (d.tx + 0.5) * engine.map.tileSize;
+              wy = (d.ty + 0.5) * engine.map.tileSize;
+            }
+          } else if (kind === 'STAIRWELL') {
+            const st = engine.map.stairwells.find((s) => s.id === targetId);
+            if (st) {
+              wx = st.x;
+              wy = st.y;
+            }
+          } else if (
+            kind === 'CONTAINER' ||
+            kind === 'CONTAINER_ITEM'
+          ) {
+            const c = engine.map.containers.find((item) => item.id === targetId);
+            if (c) {
+              wx = c.x;
+              wy = c.y;
+            }
+          } else if (kind === 'HIDING') {
+            const h = engine.map.hidingSpots.find((item) => item.id === targetId);
+            if (h) {
+              wx = h.x;
+              wy = h.y;
+            }
+          } else if (kind === 'PAPER_MAP') {
+            const pm = engine.map.paperMaps.find((item) => item.id === targetId);
+            if (pm) {
+              wx = pm.x;
+              wy = pm.y;
+            }
+          } else if (kind === 'FUSE_SOCKET') {
+            const fs = engine.map.fuseSockets.find((item) => item.id === targetId);
+            if (fs) {
+              wx = fs.x;
+              wy = fs.y;
+            }
+          } else if (kind === 'LIGHT_SWITCH') {
+            const ls = engine.map.lightSwitches.find((item) => item.id === targetId);
+            if (ls) {
+              wx = (ls.tx + 0.5) * engine.map.tileSize;
+              wy = (ls.ty + 0.5) * engine.map.tileSize;
+            }
+          } else if (kind === 'PICKUP') {
+            const pk = engine.worldPickups.find((item) => String(item.id) === targetId);
+            if (pk) {
+              wx = pk.x;
+              wy = pk.y;
+            }
+          } else if (kind === 'ESCAPE_HELI') {
+            wx = engine.map.heliPos.x;
+            wy = engine.map.heliPos.y;
+          } else if (kind === 'ESCAPE_LIFEBOAT') {
+            wx = engine.map.lifeboatPos.x;
+            wy = engine.map.lifeboatPos.y;
+          } else if (kind === 'ESCAPE_SUBMARINE') {
+            wx =
+              subTarget === 'LEVER'
+                ? engine.map.submarinePos.leverX
+                : engine.map.submarinePos.x;
+            wy =
+              subTarget === 'LEVER'
+                ? engine.map.submarinePos.leverY
+                : engine.map.submarinePos.y;
+          }
+          if (wx !== null && wy !== null) {
+            engine.player.angle = Math.atan2(wy - engine.player.y, wx - engine.player.x);
+            engine.fpPitchDeg = kind === 'PICKUP' || kind === 'STAIRWELL' ? -22 : -4;
+            renderImmediateFrame();
+            screenPt = renderer.getInteractableScreenPoint(
+              kind,
+              targetId,
+              subTarget,
+              window.innerWidth,
+              window.innerHeight,
+              engine
+            );
+          }
+        }
+        const sx =
+          engine.viewMode === 'FIRST_PERSON' && !engine.debugConfig.freeCamEnabled
+            ? window.innerWidth * 0.5
+            : (screenPt?.x ?? window.innerWidth * 0.5);
+        const sy =
+          engine.viewMode === 'FIRST_PERSON' && !engine.debugConfig.freeCamEnabled
+            ? window.innerHeight * 0.5
+            : (screenPt?.y ?? window.innerHeight * 0.5);
+        if (engine.viewMode !== 'FIRST_PERSON' || engine.debugConfig.freeCamEnabled) {
+          engine.mouseScreenX = sx;
+          engine.mouseScreenY = sy;
+          engine.mouseMoved = true;
+        }
+        renderer.updatePointerHover(engine, sx, sy, window.innerWidth, window.innerHeight);
+        renderImmediateFrame();
+        syncDebugTelemetry();
+        return {
+          screenX: sx,
+          screenY: sy,
+          raycastTarget: engine.raycastTarget ? { ...engine.raycastTarget } : null,
+          raycastDebug: { ...engine.raycastDebug },
         };
       },
       probePixels: () => {
@@ -1262,9 +1519,40 @@ export default function App() {
     handleUpdateDebugConfig,
     refreshProbesAsync,
     renderImmediateFrame,
+    startNewRun,
     syncDebugTelemetry,
     toggleNearestDoorInDebug,
   ]);
+
+  // Pointer lock lifecycle for First-Person FPS look
+  useEffect(() => {
+    const onPointerLockChange = () => {
+      const locked =
+        canvasRef.current !== null && document.pointerLockElement === canvasRef.current;
+      const engine = engineRef.current;
+      if (engine) {
+        engine.setPointerLocked(locked);
+        if (!locked) {
+          engine.holdingInteract = false;
+        }
+      }
+    };
+    document.addEventListener('pointerlockchange', onPointerLockChange);
+    return () => {
+      document.removeEventListener('pointerlockchange', onPointerLockChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    const shouldReleaseLock =
+      status !== 'PLAYING' ||
+      debugOpen ||
+      Boolean(hud?.journalOpen) ||
+      hud?.paperMapDeck !== null;
+    if (shouldReleaseLock && document.pointerLockElement) {
+      document.exitPointerLock?.();
+    }
+  }, [status, debugOpen, hud?.journalOpen, hud?.paperMapDeck]);
 
   // Keyboard & mouse handlers
   useEffect(() => {
@@ -1322,10 +1610,13 @@ export default function App() {
           engine.toggleCrouch();
         } else if (e.code === 'KeyE' || e.code === 'Space') {
           if (rendererRef.current?.isInitialized()) {
+            const isFpLive =
+              engine.viewMode === 'FIRST_PERSON' &&
+              !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
             rendererRef.current.updatePointerHover(
               engine,
-              engine.mouseScreenX,
-              engine.mouseScreenY,
+              isFpLive ? window.innerWidth * 0.5 : engine.mouseScreenX,
+              isFpLive ? window.innerHeight * 0.5 : engine.mouseScreenY,
               window.innerWidth,
               window.innerHeight
             );
@@ -1364,6 +1655,7 @@ export default function App() {
       if (!engine) return;
       engine.keys.clear();
       engine.holdingInteract = false;
+      fpDragLookRef.current.active = false;
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -1388,6 +1680,9 @@ export default function App() {
 
   useEffect(() => {
     return () => {
+      if (document.pointerLockElement) {
+        document.exitPointerLock?.();
+      }
       audioRef.current?.dispose();
       rendererRef.current?.dispose();
       rendererRef.current = null;
@@ -1400,6 +1695,8 @@ export default function App() {
       <TitleMenu
         difficulty={difficulty}
         onSelectDifficulty={handleSelectDifficulty}
+        viewMode={viewMode}
+        onChangeViewMode={setViewMode}
         seedInput={seedInput}
         onSeedInputChange={setSeedInput}
         muted={muted}
@@ -1423,7 +1720,7 @@ export default function App() {
     <div className="relative h-screen w-screen overflow-hidden bg-black">
       <canvas
         ref={canvasRef}
-        className="block h-full w-full cursor-crosshair"
+        className={`block h-full w-full ${viewMode === 'FIRST_PERSON' ? 'cursor-none' : 'cursor-crosshair'}`}
         onMouseMove={(e) => {
           const engine = engineRef.current;
           if (!engine || statusRef.current !== 'PLAYING') return;
@@ -1452,6 +1749,42 @@ export default function App() {
               const zScale = 1 / Math.max(0.35, engine.debugConfig.freeCamZoom);
               engine.debugConfig.freeCamX -= (dx * cosY + dy * sinY) * zScale;
               engine.debugConfig.freeCamY -= (-dx * sinY + dy * cosY) * zScale;
+            }
+            return;
+          }
+          const isFpLive =
+            engine.viewMode === 'FIRST_PERSON' &&
+            !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
+          if (isFpLive) {
+            const sens = Math.max(0.01, graphicsSettingsRef.current.mouseSensitivity || 1);
+            if (document.pointerLockElement === canvasRef.current) {
+              let nextAngle = engine.player.angle + e.movementX * 0.0024 * sens;
+              while (nextAngle > Math.PI) nextAngle -= Math.PI * 2;
+              while (nextAngle < -Math.PI) nextAngle += Math.PI * 2;
+              engine.player.angle = nextAngle;
+              engine.fpPitchDeg = Math.max(
+                -75,
+                Math.min(75, engine.fpPitchDeg - e.movementY * 0.14 * sens)
+              );
+            } else if (fpDragLookRef.current.active) {
+              const dx = e.clientX - fpDragLookRef.current.lastX;
+              const dy = e.clientY - fpDragLookRef.current.lastY;
+              fpDragLookRef.current.lastX = e.clientX;
+              fpDragLookRef.current.lastY = e.clientY;
+              if (
+                Math.abs(e.clientX - fpDragLookRef.current.startX) > 3 ||
+                Math.abs(e.clientY - fpDragLookRef.current.startY) > 3
+              ) {
+                fpDragLookRef.current.moved = true;
+              }
+              let nextAngle = engine.player.angle + dx * 0.0045 * sens;
+              while (nextAngle > Math.PI) nextAngle -= Math.PI * 2;
+              while (nextAngle < -Math.PI) nextAngle += Math.PI * 2;
+              engine.player.angle = nextAngle;
+              engine.fpPitchDeg = Math.max(
+                -75,
+                Math.min(75, engine.fpPitchDeg - dy * 0.25 * sens)
+              );
             }
             return;
           }
@@ -1508,13 +1841,56 @@ export default function App() {
             };
             return;
           }
+          const isFpLive =
+            engine.viewMode === 'FIRST_PERSON' &&
+            !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
           if (e.button === 0) {
-            engine.useSelectedItem();
+            const wasLocked = document.pointerLockElement === canvasRef.current;
+            if (isFpLive) {
+              if (!wasLocked && !debugOpenRef.current) {
+                fpDragLookRef.current = {
+                  active: true,
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  lastX: e.clientX,
+                  lastY: e.clientY,
+                  moved: false,
+                };
+                try {
+                  void Promise.resolve(canvasRef.current?.requestPointerLock?.()).catch(() => {});
+                } catch {
+                  // Ignore rejected pointer lock in restricted/iframe contexts
+                }
+              }
+            } else {
+              engine.mouseScreenX = e.clientX;
+              engine.mouseScreenY = e.clientY;
+              engine.mouseMoved = true;
+            }
+            if (rendererRef.current?.isInitialized()) {
+              rendererRef.current.updatePointerHover(
+                engine,
+                isFpLive ? window.innerWidth * 0.5 : e.clientX,
+                isFpLive ? window.innerHeight * 0.5 : e.clientY,
+                window.innerWidth,
+                window.innerHeight
+              );
+            }
+            if (engine.raycastTarget?.inReach && engine.raycastTarget.hasLos) {
+              engine.holdingInteract = true;
+              engine.tryInteract();
+            } else if (!isFpLive || wasLocked) {
+              engine.useSelectedItem();
+            }
           } else if (e.button === 2) {
             engine.toggleFlashlight();
           }
         }}
         onMouseUp={(e) => {
+          if (e.button === 0 && engineRef.current) {
+            engineRef.current.holdingInteract = false;
+            fpDragLookRef.current.active = false;
+          }
           if (dragOrbitRef.current.active) {
             const wasClick = e.button === 2 && !dragOrbitRef.current.moved;
             dragOrbitRef.current.active = false;
@@ -1571,6 +1947,9 @@ export default function App() {
           onClose={() => setDebugOpen(false)}
           onLoadScenario={handleLoadScenario}
           onUpdateConfig={handleUpdateDebugConfig}
+          onRestartWithViewMode={(mode) => {
+            startNewRun(false, engineRef.current?.map.seed ?? 100000, true, mode);
+          }}
           onStepFrame={handleStepDebugFrame}
           onFocusDoor={() => {
             focusDoorInDebug();
@@ -1594,6 +1973,7 @@ export default function App() {
       {status === 'PAUSED' && engineRef.current && (
         <PauseModal
           seed={engineRef.current.map.seed}
+          viewMode={engineRef.current.viewMode}
           graphicsSettings={graphicsSettings}
           onChangeGraphicsSettings={handleChangeGraphicsSettings}
           onResetGraphicsSettings={handleResetGraphicsSettings}
@@ -1616,6 +1996,7 @@ export default function App() {
         <EndModal
           outcome={status}
           stats={runStats}
+          viewMode={engineRef.current?.viewMode ?? viewMode}
           onPlayAgain={() => startNewRun(true)}
           onMainMenu={returnToTitle}
         />

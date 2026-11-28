@@ -24,6 +24,7 @@ import {
   EscapeProgress,
   FloorMaterial,
   FuseSocket,
+  GameViewMode,
   getDeckIndex,
   getDeckLabel,
   getViewportResolutionScale,
@@ -34,6 +35,8 @@ import {
   PaperMapStand,
   Particle,
   PlayerState,
+  RaycastDebugInfo,
+  RaycastInteractTarget,
   RoomLightSwitch,
   RoomName,
   RunStats,
@@ -116,6 +119,11 @@ export class MonstrumGameEngine {
   };
   private subMoonpoolBounds: { tx1: number; ty1: number; tx2: number; ty2: number } | null = null;
 
+  public readonly viewMode: GameViewMode;
+  public fpPitchDeg = 0;
+  public fpEyeZ = 39;
+  public pointerLocked = false;
+
   public debugConfig: DebugOverlayConfig = {
     enabled: false,
     freezeAi: false,
@@ -132,6 +140,7 @@ export class MonstrumGameEngine {
     cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
     wireframeStructure: false,
     hideWallCaps: false,
+    showCeilings: false,
     showStructureGizmos: false,
     debugDeckOverride: 'AUTO',
     freeCamEnabled: false,
@@ -151,7 +160,32 @@ export class MonstrumGameEngine {
   public particleDensity = 1.0;
   public mouseMoved = false;
   public holdingInteract = false;
-  public cursorTarget: CursorContainerTarget | null = null;
+  public raycastTarget: RaycastInteractTarget | null = null;
+  public raycastDebug: RaycastDebugInfo = {
+    hitKind: null,
+    targetId: null,
+    subTarget: null,
+    inReach: false,
+    hasLos: false,
+    blockedBy: null,
+    hitDist: null,
+    occDist: null,
+    hitZ: null,
+    dist2d: null,
+  };
+
+  public get cursorTarget(): CursorContainerTarget | null {
+    const rt = this.raycastTarget;
+    if (!rt || (rt.kind !== 'CONTAINER' && rt.kind !== 'CONTAINER_ITEM')) return null;
+    return {
+      kind: rt.kind,
+      containerId: rt.targetId,
+      dist: rt.dist,
+      inReach: rt.inReach,
+      hasLos: rt.hasLos,
+      item: rt.item,
+    };
+  }
 
   public setWorldMouse(wx: number, wy: number): void {
     this.worldMouseX = wx;
@@ -167,14 +201,23 @@ export class MonstrumGameEngine {
     this.particleDensity = Math.max(0.25, Math.min(1.5, density));
   }
 
+  public setPointerLocked(locked: boolean): void {
+    if (this.pointerLocked === locked) return;
+    this.pointerLocked = locked;
+    this.emitHud();
+  }
+
   constructor(
     difficulty: DifficultyConfig,
     audio: HorrorAudioEngine,
     callbacks: GameEngineCallbacks,
     seed?: number,
     bruteTuning?: BruteTuningNumbers,
-    customBruteTuning = false
+    customBruteTuning = false,
+    viewMode: GameViewMode = 'TOP_DOWN'
   ) {
+    this.viewMode = viewMode;
+    this.debugConfig.showCeilings = viewMode === 'FIRST_PERSON';
     this.difficulty = { ...difficulty };
     this.bruteTuning = bruteTuning ? { ...bruteTuning } : undefined;
     this.customBruteTuning = customBruteTuning;
@@ -323,21 +366,62 @@ export class MonstrumGameEngine {
     this.targetZoom = Math.max(1.0, Math.min(2.5, Math.round((this.targetZoom + step) * 100) / 100));
   }
 
-  public setCursorTarget(next: CursorContainerTarget | null): void {
-    const prev = this.cursorTarget;
+  public setRaycastTarget(
+    next: RaycastInteractTarget | null,
+    debugInfo?: RaycastDebugInfo
+  ): void {
+    const prev = this.raycastTarget;
     const same =
       prev === next ||
       (prev !== null &&
         next !== null &&
         prev.kind === next.kind &&
-        prev.containerId === next.containerId &&
+        prev.targetId === next.targetId &&
+        prev.subTarget === next.subTarget &&
+        prev.chainIndex === next.chainIndex &&
         prev.inReach === next.inReach &&
         prev.hasLos === next.hasLos &&
         prev.item === next.item);
-    this.cursorTarget = next;
+    this.raycastTarget = next;
+    if (debugInfo) {
+      this.raycastDebug = debugInfo;
+    } else if (!next) {
+      this.raycastDebug = {
+        hitKind: null,
+        targetId: null,
+        subTarget: null,
+        inReach: false,
+        hasLos: false,
+        blockedBy: null,
+        hitDist: null,
+        occDist: null,
+        hitZ: null,
+        dist2d: null,
+      };
+    }
     if (!same) {
       this.emitHud();
     }
+  }
+
+  public setCursorTarget(next: CursorContainerTarget | null): void {
+    if (!next) {
+      this.setRaycastTarget(null);
+      return;
+    }
+    this.setRaycastTarget({
+      kind: next.kind,
+      targetId: next.containerId,
+      ownerKey: `CONTAINER:${next.containerId}`,
+      dist: next.dist,
+      inReach: next.inReach,
+      hasLos: next.hasLos,
+      hitX: 0,
+      hitY: 0,
+      hitZ: 0,
+      hitDist: next.dist,
+      item: next.item,
+    });
   }
 
   private getContainerLabel(type: ContainerType): string {
@@ -359,7 +443,10 @@ export class MonstrumGameEngine {
     this.bruteStuckTimer = 0;
     this.maxEmittedAcousticRadius = 0;
     this.poweredDecks = { DECK_3: false, DECK_2: false, DECK_1: false };
+    this.fpPitchDeg = 0;
+    this.raycastTarget = null;
     const meta = applyDebugScenarioToEngine(this, scenarioId);
+    this.fpEyeZ = this.player.crouching ? 22 : 39;
     return meta;
   }
 
@@ -426,55 +513,62 @@ export class MonstrumGameEngine {
     }
     this.updateRipplesAndParticles(clampedDt);
 
-    // Expressive camera look-ahead toward mouse aim & peek vectors
-    const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
-    let desiredLookX = 0;
-    let desiredLookY = 0;
-    if (this.player.peekingDoorId) {
-      const door = this.map.doors.find((d) => d.id === this.player.peekingDoorId);
-      if (door) {
-        const dcx = (door.tx + 0.5) * this.map.tileSize;
-        const dcy = (door.ty + 0.5) * this.map.tileSize;
-        const dx = dcx - this.player.x;
-        const dy = dcy - this.player.y;
-        const len = Math.max(1, Math.hypot(dx, dy));
-        const peekBias = 132 / Math.sqrt(this.zoom);
-        desiredLookX = (dx / len) * peekBias;
-        desiredLookY = (dy / len) * peekBias;
+    // Expressive camera look-ahead toward mouse aim & peek vectors (Top-Down) or locked directly to player eye (First-Person)
+    if (this.viewMode === 'FIRST_PERSON') {
+      this.lookAheadX = 0;
+      this.lookAheadY = 0;
+      this.cameraX = this.player.x;
+      this.cameraY = this.player.y;
+    } else {
+      const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
+      let desiredLookX = 0;
+      let desiredLookY = 0;
+      if (this.player.peekingDoorId) {
+        const door = this.map.doors.find((d) => d.id === this.player.peekingDoorId);
+        if (door) {
+          const dcx = (door.tx + 0.5) * this.map.tileSize;
+          const dcy = (door.ty + 0.5) * this.map.tileSize;
+          const dx = dcx - this.player.x;
+          const dy = dcy - this.player.y;
+          const len = Math.max(1, Math.hypot(dx, dy));
+          const peekBias = 132 / Math.sqrt(this.zoom);
+          desiredLookX = (dx / len) * peekBias;
+          desiredLookY = (dy / len) * peekBias;
+        }
+      } else if (this.player.peekingStairId) {
+        const st = this.map.stairwells.find((s) => s.id === this.player.peekingStairId);
+        if (st) {
+          const dx = st.x - this.player.x;
+          const dy = st.y - this.player.y;
+          const len = Math.max(1, Math.hypot(dx, dy));
+          const peekBias = 56 / Math.sqrt(this.zoom);
+          desiredLookX = (dx / len) * peekBias;
+          desiredLookY = (dy / len) * peekBias;
+        }
+      } else if (this.player.peekingSpotId) {
+        const peekBias = 112 / Math.sqrt(this.zoom);
+        desiredLookX = Math.cos(this.player.angle) * peekBias;
+        desiredLookY = Math.sin(this.player.angle) * peekBias;
+      } else if (this.player.hidingSpotId !== null) {
+        desiredLookX = 0;
+        desiredLookY = 0;
+      } else if (this.mouseMoved && canvasWidth > 0 && canvasHeight > 0 && effZoom > 0) {
+        const nx = Math.max(-1, Math.min(1, (this.mouseScreenX - canvasWidth / 2) / (canvasWidth * 0.42)));
+        const ny = Math.max(-1, Math.min(1, (this.mouseScreenY - canvasHeight / 2) / (canvasHeight * 0.42)));
+        const maxLook = 135 / Math.sqrt(this.zoom);
+        desiredLookX = nx * maxLook;
+        desiredLookY = ny * maxLook;
       }
-    } else if (this.player.peekingStairId) {
-      const st = this.map.stairwells.find((s) => s.id === this.player.peekingStairId);
-      if (st) {
-        const dx = st.x - this.player.x;
-        const dy = st.y - this.player.y;
-        const len = Math.max(1, Math.hypot(dx, dy));
-        const peekBias = 56 / Math.sqrt(this.zoom);
-        desiredLookX = (dx / len) * peekBias;
-        desiredLookY = (dy / len) * peekBias;
-      }
-    } else if (this.player.peekingSpotId) {
-      const peekBias = 112 / Math.sqrt(this.zoom);
-      desiredLookX = Math.cos(this.player.angle) * peekBias;
-      desiredLookY = Math.sin(this.player.angle) * peekBias;
-    } else if (this.player.hidingSpotId !== null) {
-      desiredLookX = 0;
-      desiredLookY = 0;
-    } else if (this.mouseMoved && canvasWidth > 0 && canvasHeight > 0 && effZoom > 0) {
-      const nx = Math.max(-1, Math.min(1, (this.mouseScreenX - canvasWidth / 2) / (canvasWidth * 0.42)));
-      const ny = Math.max(-1, Math.min(1, (this.mouseScreenY - canvasHeight / 2) / (canvasHeight * 0.42)));
-      const maxLook = 135 / Math.sqrt(this.zoom);
-      desiredLookX = nx * maxLook;
-      desiredLookY = ny * maxLook;
+
+      this.lookAheadX += (desiredLookX - this.lookAheadX) * Math.min(1, clampedDt * 6.5);
+      this.lookAheadY += (desiredLookY - this.lookAheadY) * Math.min(1, clampedDt * 6.5);
+
+      const camSpeed = 9;
+      const targetCamX = this.player.x + this.lookAheadX;
+      const targetCamY = this.player.y + this.lookAheadY;
+      this.cameraX += (targetCamX - this.cameraX) * Math.min(1, clampedDt * camSpeed);
+      this.cameraY += (targetCamY - this.cameraY) * Math.min(1, clampedDt * camSpeed);
     }
-
-    this.lookAheadX += (desiredLookX - this.lookAheadX) * Math.min(1, clampedDt * 6.5);
-    this.lookAheadY += (desiredLookY - this.lookAheadY) * Math.min(1, clampedDt * 6.5);
-
-    const camSpeed = 9;
-    const targetCamX = this.player.x + this.lookAheadX;
-    const targetCamY = this.player.y + this.lookAheadY;
-    this.cameraX += (targetCamX - this.cameraX) * Math.min(1, clampedDt * camSpeed);
-    this.cameraY += (targetCamY - this.cameraY) * Math.min(1, clampedDt * camSpeed);
 
     this.audio.updateAmbient(clampedDt, this.buildAcousticContext());
 
@@ -694,9 +788,25 @@ export class MonstrumGameEngine {
       }
     }
 
-    // Aim toward mouse cursor (uses 3D ground-plane raycast world coords when available, else flat unproject)
+    // Smooth First-Person eye height (crouch, hide, door peek, stair climb, subtle stride bob)
+    let targetEyeZ = 39;
+    if (p.climbingStairId !== null) {
+      const climbSt = this.map.stairwells.find((s) => s.id === p.climbingStairId);
+      targetEyeZ = 39 + (climbSt?.direction === 'UP' ? p.climbProgress * 20 : -p.climbProgress * 18);
+    } else if (p.hidingSpotId !== null) {
+      targetEyeZ = p.peekingSpotId !== null ? 33 : 27;
+    } else if (p.peekingDoorId !== null) {
+      targetEyeZ = p.crouching ? 25 : 35;
+    } else if (p.crouching) {
+      targetEyeZ = 22 + (p.isMoving ? Math.sin(p.walkPhase * 2) * 0.45 : 0);
+    } else {
+      targetEyeZ = 39 + (p.isMoving ? Math.sin(p.walkPhase * 2) * (p.sprinting ? 1.05 : 0.65) : 0);
+    }
+    this.fpEyeZ += (targetEyeZ - this.fpEyeZ) * Math.min(1, dt * 14);
+
+    // Aim toward mouse cursor in Top-Down mode (FP uses mouse-look yaw & pitch directly)
     const effZoom = this.getEffectiveZoom(canvasWidth, canvasHeight);
-    if (this.mouseMoved && effZoom > 0) {
+    if (this.viewMode === 'TOP_DOWN' && this.mouseMoved && effZoom > 0) {
       const aimX =
         this.worldMouseX !== null
           ? this.worldMouseX
@@ -905,10 +1015,25 @@ export class MonstrumGameEngine {
 
     let mx = 0;
     let my = 0;
-    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) my -= 1;
-    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) my += 1;
-    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) mx -= 1;
-    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) mx += 1;
+    if (this.viewMode === 'FIRST_PERSON') {
+      const fwd =
+        (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) -
+        (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
+      const strafe =
+        (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) -
+        (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0);
+      if (fwd !== 0 || strafe !== 0) {
+        const cosA = Math.cos(p.angle);
+        const sinA = Math.sin(p.angle);
+        mx = fwd * cosA - strafe * sinA;
+        my = fwd * sinA + strafe * cosA;
+      }
+    } else {
+      if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) my -= 1;
+      if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) my += 1;
+      if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) mx -= 1;
+      if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) mx += 1;
+    }
 
     const moving = mx !== 0 || my !== 0;
     p.isMoving = moving;
@@ -916,7 +1041,7 @@ export class MonstrumGameEngine {
       const len = Math.hypot(mx, my);
       mx /= len;
       my /= len;
-      if (!this.mouseMoved) {
+      if (this.viewMode === 'TOP_DOWN' && !this.mouseMoved) {
         p.angle = Math.atan2(my, mx);
       }
     }
@@ -1069,17 +1194,21 @@ export class MonstrumGameEngine {
 
   private updateEscapeInteractHold(dt: number): void {
     const p = this.player;
-    const distLife = Math.hypot(p.x - this.map.lifeboatPos.x, p.y - this.map.lifeboatPos.y);
-    const distHeli = Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y);
-    const distSubDock = Math.hypot(p.x - this.map.submarinePos.x, p.y - this.map.submarinePos.y);
-    const distSubLever = Math.hypot(p.x - this.map.submarinePos.leverX, p.y - this.map.submarinePos.leverY);
+    const rt = this.raycastTarget;
+    const validRt = rt && rt.inReach && rt.hasLos ? rt : null;
+
+    const targetingLifeboat = validRt?.kind === 'ESCAPE_LIFEBOAT';
+    const targetingHeli = validRt?.kind === 'ESCAPE_HELI';
+    const targetingHeliChain = targetingHeli && validRt?.subTarget === 'CHAIN';
+    const targetingSubDock = validRt?.kind === 'ESCAPE_SUBMARINE' && validRt?.subTarget !== 'LEVER';
+    const targetingSubLever = validRt?.kind === 'ESCAPE_SUBMARINE' && validRt?.subTarget === 'LEVER';
 
     let label: string | null = null;
     let progress = 0;
 
     // 1. Lifeboat Davit partial repair or crank/crane release lever
     const heldLifePart = this.getHeldPartForRoute('LIFEBOAT');
-    if (this.holdingInteract && distLife < 72 && this.escape.lifeboatState === 'IDLE') {
+    if (this.holdingInteract && targetingLifeboat && this.escape.lifeboatState === 'IDLE') {
       if (this.escape.lifeboatParts.length < 3 && heldLifePart) {
         this.escape.lifeboatPartProgress = Math.min(1, this.escape.lifeboatPartProgress + dt / 5.0);
         label = `Installing ${ITEM_CATALOG[heldLifePart].name}...`;
@@ -1171,13 +1300,13 @@ export class MonstrumGameEngine {
     const shouldCutHeliChain =
       this.escape.heliChainsRemaining > 0 &&
       hasCutters &&
-      (selectedItem === 'BOLT_CUTTERS' || !selectedIsHeliPart || !heldHeliPart);
+      (targetingHeliChain || selectedItem === 'BOLT_CUTTERS' || !selectedIsHeliPart || !heldHeliPart);
 
     let heliCutting = false;
     let heliRepairing = false;
     let heliStarting = false;
 
-    if (this.holdingInteract && distHeli < 78 && this.escape.heliState === 'IDLE') {
+    if (this.holdingInteract && targetingHeli && this.escape.heliState === 'IDLE') {
       if (shouldCutHeliChain) {
         heliCutting = true;
         this.escape.heliChainCutProgress = Math.min(1, this.escape.heliChainCutProgress + dt / 2.0);
@@ -1324,7 +1453,7 @@ export class MonstrumGameEngine {
     let subPartHolding = false;
     let subLeverHolding = false;
     if (this.holdingInteract && this.escape.submarineState === 'IDLE') {
-      if (this.escape.submarineParts.length < 3 && heldSubPart && distSubDock < 92) {
+      if (this.escape.submarineParts.length < 3 && heldSubPart && targetingSubDock) {
         subPartHolding = true;
         this.escape.submarinePartProgress = Math.min(1, this.escape.submarinePartProgress + dt / 5.0);
         label = `Installing ${ITEM_CATALOG[heldSubPart].name}...`;
@@ -1378,7 +1507,7 @@ export class MonstrumGameEngine {
           );
           this.emitHud();
         }
-      } else if (this.escape.submarineParts.length === 3 && distSubLever < 78) {
+      } else if (this.escape.submarineParts.length === 3 && targetingSubLever) {
         subLeverHolding = true;
         this.escape.submarineActivatingHold = Math.min(1, this.escape.submarineActivatingHold + dt / 1.4);
         label = 'Pulling Floodgate Launch Lever...';
@@ -3453,18 +3582,20 @@ export class MonstrumGameEngine {
       }
     } else if (itemId === 'BOLT_CUTTERS') {
       if (
+        this.raycastTarget?.kind === 'ESCAPE_HELI' &&
+        this.raycastTarget.inReach &&
+        this.raycastTarget.hasLos &&
         this.escape.heliChainsRemaining > 0 &&
-        this.escape.heliState === 'IDLE' &&
-        Math.hypot(p.x - this.map.heliPos.x, p.y - this.map.heliPos.y) < 78
+        this.escape.heliState === 'IDLE'
       ) {
         this.showToast(
-          `Hold E at the Helicopter to cut heavy chains (${this.escape.heliChainsRemaining} remaining, 2s each).`
+          `Hold E or Click at the Helicopter to cut heavy chains (${this.escape.heliChainsRemaining} remaining, 2s each).`
         );
       } else {
         this.tryInteract(true);
       }
     } else if (itemId === 'MASTER_FUSE') {
-      this.showToast('Take the Master Fuse to any deck’s Fuse Control panel and press E.');
+      this.showToast('Take the Master Fuse to any deck’s Fuse Control panel and press E or Click.');
     }
 
     if (p.selectedSlot >= p.inventory.length) {
@@ -3499,9 +3630,12 @@ export class MonstrumGameEngine {
       return;
     }
 
-    // 2. Cursor-targeted Containers (Drawers, Toolboxes, Cabinets, Desks) & Revealed Items inside
-    if (!cuttersOnly && this.cursorTarget && this.cursorTarget.inReach && this.cursorTarget.hasLos) {
-      const c = this.map.containers.find((item) => item.id === this.cursorTarget!.containerId);
+    // All world interactables require an unobstructed Three.js 3D raycast target within reach & 2D LoS
+    const rt = this.raycastTarget;
+    if (!rt || !rt.inReach || !rt.hasLos) return;
+
+    if (!cuttersOnly && (rt.kind === 'CONTAINER' || rt.kind === 'CONTAINER_ITEM')) {
+      const c = this.map.containers.find((item) => item.id === rt.targetId);
       if (c) {
         if (!c.isOpen) {
           c.isOpen = true;
@@ -3512,7 +3646,7 @@ export class MonstrumGameEngine {
           this.audio.playContainerToggle(c.type, true);
           const label = this.getContainerLabel(c.type);
           if (c.item) {
-            this.showToast(`Opened ${label} — aim at the item and press E to take it.`, 2.4);
+            this.showToast(`Opened ${label} — aim at the item and press E or Click to take it.`, 2.4);
           } else {
             this.showToast(`${label} is empty.`, 1.8);
           }
@@ -3520,7 +3654,7 @@ export class MonstrumGameEngine {
           return;
         }
 
-        if (this.cursorTarget.kind === 'CONTAINER_ITEM' && c.item) {
+        if (rt.kind === 'CONTAINER_ITEM' && c.item) {
           const pickedItem = c.item;
           const meta = ITEM_CATALOG[pickedItem];
           if (pickedItem === 'BACKPACK') {
@@ -3557,44 +3691,44 @@ export class MonstrumGameEngine {
       }
     }
 
-    const nearest = this.findNearestInteractable();
-    if (!nearest) return;
-
-    if (nearest.kind === 'PAPER_MAP' && !cuttersOnly) {
-      p.openPaperMapDeck = nearest.stand.deck;
+    if (rt.kind === 'PAPER_MAP' && !cuttersOnly) {
+      const stand = this.map.paperMaps.find((s) => s.id === rt.targetId);
+      if (!stand) return;
+      p.openPaperMapDeck = stand.deck;
       p.openPaperMapStandPos = {
-        x: nearest.stand.x,
-        y: nearest.stand.y,
-        deck: nearest.stand.deck,
+        x: stand.x,
+        y: stand.y,
+        deck: stand.deck,
       };
       this.audio.playPaperMapToggle(true);
       this.emitHud();
       return;
     }
 
-    if (nearest.kind === 'ESCAPE_LIFEBOAT' && !cuttersOnly) {
+    if (rt.kind === 'ESCAPE_LIFEBOAT' && !cuttersOnly) {
       if (this.escape.lifeboatState === 'READY') {
         this.triggerVictory('LIFEBOAT');
       }
       return;
     }
 
-    if (nearest.kind === 'ESCAPE_HELI' && !cuttersOnly) {
+    if (rt.kind === 'ESCAPE_HELI' && !cuttersOnly) {
       if (this.escape.heliState === 'READY') {
         this.triggerVictory('HELICOPTER');
       }
       return;
     }
 
-    if (nearest.kind === 'ESCAPE_SUBMARINE' && !cuttersOnly) {
+    if (rt.kind === 'ESCAPE_SUBMARINE' && !cuttersOnly) {
       if (this.escape.submarineState === 'READY') {
         this.triggerVictory('SUBMARINE');
       }
       return;
     }
 
-    if (nearest.kind === 'PICKUP' && !cuttersOnly) {
-      const pickup = nearest.pickup;
+    if (rt.kind === 'PICKUP' && !cuttersOnly) {
+      const pickup = this.worldPickups.find((w) => String(w.id) === rt.targetId);
+      if (!pickup) return;
       const meta = ITEM_CATALOG[pickup.item];
       if (pickup.item === 'BACKPACK') {
         p.hasBackpack = true;
@@ -3616,10 +3750,11 @@ export class MonstrumGameEngine {
       return;
     }
 
-    if (nearest.kind === 'STAIRWELL' && !cuttersOnly) {
-      const dest = this.map.stairwells.find((s) => s.id === nearest.stairwell.targetStairId);
-      if (dest) {
-        p.climbingStairId = nearest.stairwell.id;
+    if (rt.kind === 'STAIRWELL' && !cuttersOnly) {
+      const st = this.map.stairwells.find((s) => s.id === rt.targetId);
+      const dest = st ? this.map.stairwells.find((s) => s.id === st.targetStairId) : undefined;
+      if (st && dest) {
+        p.climbingStairId = st.id;
         p.climbProgress = 0;
         this.climbMidRungPlayed = false;
         p.peekingDoorId = null;
@@ -3627,17 +3762,11 @@ export class MonstrumGameEngine {
         p.sprinting = false;
         p.isMoving = false;
         this.audio.playStairTraversal(0);
-        this.emitNoise(
-          nearest.stairwell.x,
-          nearest.stairwell.y,
-          240,
-          'rgba(148, 163, 184, 0.32)',
-          true,
-          0.65
-        );
+        this.emitNoise(st.x, st.y, 240, 'rgba(148, 163, 184, 0.32)', true, 0.65);
       }
-    } else if (nearest.kind === 'FUSE_SOCKET' && !cuttersOnly) {
-      const socket = nearest.fuseSocket;
+    } else if (rt.kind === 'FUSE_SOCKET' && !cuttersOnly) {
+      const socket = this.map.fuseSockets.find((f) => f.id === rt.targetId);
+      if (!socket) return;
       if (socket.hasFuse) {
         this.showToast(`${getDeckLabel(socket.deck)} Master Fuse active — lights locked ON.`);
       } else {
@@ -3671,8 +3800,9 @@ export class MonstrumGameEngine {
           this.showToast('Master Fuse socket empty — find the Master Fuse aboard the vessel.');
         }
       }
-    } else if (nearest.kind === 'LIGHT_SWITCH' && !cuttersOnly) {
-      const sw = nearest.lightSwitch;
+    } else if (rt.kind === 'LIGHT_SWITCH' && !cuttersOnly) {
+      const sw = this.map.lightSwitches.find((s) => s.id === rt.targetId);
+      if (!sw) return;
       const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
       if (this.poweredDecks[swDeck]) {
         sw.isOn = true;
@@ -3684,9 +3814,9 @@ export class MonstrumGameEngine {
         this.emitNoise(sw.x, sw.y, 180, 'rgba(253, 224, 71, 0.38)', true, 0.28);
         this.showToast(`${sw.room} overhead lights ${sw.isOn ? 'ON' : 'OFF'}.`);
       }
-    } else if (nearest.kind === 'DOOR') {
-      const d = nearest.door;
-      if (d.isBroken) return;
+    } else if (rt.kind === 'DOOR') {
+      const d = this.map.doors.find((item) => item.id === rt.targetId);
+      if (!d || d.isBroken) return;
       if (d.isLocked) {
         const cutterIdx = p.inventory.indexOf('BOLT_CUTTERS');
         if (cutterIdx !== -1) {
@@ -3709,8 +3839,6 @@ export class MonstrumGameEngine {
           this.showToast('Padlocked bulkhead — requires Bolt Cutters.');
         }
       } else if (!cuttersOnly) {
-        // Walking or sprinting slams doors loudly; sneaking (C) or standing still opens/closes slower
-        // Watertight Deck 1 doors are always heavier, slower to swing, and significantly louder
         const slam = p.isMoving && !p.crouching;
         const silent = !slam;
         const wt = Boolean(d.isWatertight);
@@ -3737,9 +3865,9 @@ export class MonstrumGameEngine {
           this.emitNoise(dx, dy, 340, 'rgba(148, 163, 184, 0.45)', true, 0.6);
         }
       }
-    } else if (nearest.kind === 'HIDING' && !cuttersOnly) {
-      const spot = nearest.spot;
-      // Check if Brute currently sees player or is actively chasing nearby with clear LoS
+    } else if (rt.kind === 'HIDING' && !cuttersOnly) {
+      const spot = this.map.hidingSpots.find((s) => s.id === rt.targetId);
+      if (!spot) return;
       const bruteSawHide =
         canBruteSeePlayer(
           this.brute,
@@ -4167,10 +4295,325 @@ export class MonstrumGameEngine {
     });
   }
 
+  private getRaycastPrompt(rt: RaycastInteractTarget): { prompt: string; sub: string } | null {
+    const p = this.player;
+    const actionKey = 'Click / E';
+
+    if (rt.kind === 'CONTAINER' || rt.kind === 'CONTAINER_ITEM') {
+      const c = this.map.containers.find((item) => item.id === rt.targetId);
+      if (!c) return null;
+      const label = this.getContainerLabel(c.type);
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to ${c.isOpen ? 'Close' : 'Open'} ${label}`,
+          sub: 'Aim at drawers or toolboxes within reach and Click or press E.',
+        };
+      }
+      if (!c.isOpen) {
+        return { prompt: `${actionKey} — Open ${label}`, sub: c.room };
+      }
+      if (rt.kind === 'CONTAINER_ITEM' && c.item) {
+        const meta = ITEM_CATALOG[c.item];
+        return {
+          prompt:
+            c.item === 'BACKPACK'
+              ? `${actionKey} — Equip Crew Backpack`
+              : `${actionKey} — Take ${meta.name}`,
+          sub: meta.description,
+        };
+      }
+      return {
+        prompt: `${actionKey} — Close ${label}`,
+        sub: c.item
+          ? 'Aim directly at the item inside and Click or press E to take it.'
+          : `${c.room} · Empty compartment`,
+      };
+    }
+
+    if (rt.kind === 'DOOR') {
+      const d = this.map.doors.find((item) => item.id === rt.targetId);
+      if (!d || d.isBroken) return null;
+      if (!rt.inReach) {
+        return {
+          prompt: d.isLocked ? 'Move Closer to Locked Bulkhead' : 'Move Closer to Door',
+          sub: d.isLocked ? 'Requires Bolt Cutters' : 'Approach within reach to open or peek [Q].',
+        };
+      }
+      const slam = p.isMoving && !p.crouching;
+      const wt = Boolean(d.isWatertight);
+      return {
+        prompt: d.isLocked
+          ? p.inventory.includes('BOLT_CUTTERS')
+            ? `${actionKey} — Cut Padlock`
+            : 'Locked Bulkhead'
+          : wt
+            ? d.isOpen
+              ? `${actionKey} — Seal Watertight Door (Slow & Loud)`
+              : `${actionKey} — Crank Watertight Door (Slow & Loud)`
+            : d.isOpen
+              ? slam
+                ? `${actionKey} — Slam Door Shut (Loud)`
+                : `${actionKey} — Close Door Slowly (Silent)`
+              : slam
+                ? `${actionKey} — Slam Door Open (Loud)`
+                : `${actionKey} — Open Door Slowly (Silent)`,
+        sub: d.isLocked
+          ? 'Requires Bolt Cutters'
+          : wt
+            ? 'Heavy Deck 1 bulkhead · Slow swing & loud hydraulic clank'
+            : d.isOpen
+              ? 'Sneak (C) or stand still to close silently · Walking/Sprinting slams'
+              : 'Hold Q to Peek · Sneak (C) or stand still for silent swing',
+      };
+    }
+
+    if (rt.kind === 'STAIRWELL') {
+      const st = this.map.stairwells.find((s) => s.id === rt.targetId);
+      if (!st) return null;
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Stairs (${getDeckLabel(st.targetDeck)})`,
+          sub: `${st.label} → ${st.targetRoom}`,
+        };
+      }
+      return {
+        prompt:
+          st.direction === 'DOWN'
+            ? `${actionKey} — Take Stairs Down (${getDeckLabel(st.targetDeck)})`
+            : `${actionKey} — Take Stairs Up (${getDeckLabel(st.targetDeck)})`,
+        sub: `Hold Q to Peek Landing · ${st.label} → ${st.targetRoom}`,
+      };
+    }
+
+    if (rt.kind === 'HIDING') {
+      const s = this.map.hidingSpots.find((item) => item.id === rt.targetId);
+      if (!s) return null;
+      const label = s.type.replace('_', ' ');
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Hide (${label})`,
+          sub: 'Break line of sight first — Brute sweeps lockers',
+        };
+      }
+      return {
+        prompt: `${actionKey} — Hide (${label})`,
+        sub: 'Break line of sight first — Brute sweeps lockers',
+      };
+    }
+
+    if (rt.kind === 'PAPER_MAP') {
+      const stand = this.map.paperMaps.find((s) => s.id === rt.targetId);
+      if (!stand) return null;
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Deck Paper Map (${getDeckLabel(stand.deck)})`,
+          sub: 'Fixed wall chart — world stays live while reading!',
+        };
+      }
+      return {
+        prompt: `${actionKey} — Inspect Deck Paper Map (${getDeckLabel(stand.deck)})`,
+        sub: 'Fixed wall chart — world stays live while reading! Cannot be carried.',
+      };
+    }
+
+    if (rt.kind === 'FUSE_SOCKET') {
+      const fs = this.map.fuseSockets.find((s) => s.id === rt.targetId);
+      if (!fs) return null;
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Fuse Control (${getDeckLabel(fs.deck)})`,
+          sub: fs.hasFuse ? 'Deck lights locked ON.' : 'Insert Master Fuse to power this entire deck.',
+        };
+      }
+      const hasFuseItem = p.inventory.includes('MASTER_FUSE');
+      return {
+        prompt: fs.hasFuse
+          ? `Master Fuse Active (${getDeckLabel(fs.deck)})`
+          : hasFuseItem
+            ? `${actionKey} — Insert Master Fuse (Power ${getDeckLabel(fs.deck)})`
+            : `Master Fuse Socket Empty (${getDeckLabel(fs.deck)})`,
+        sub: fs.hasFuse
+          ? 'All compartments and hallways on this deck are permanently lit.'
+          : hasFuseItem
+            ? 'Permanently illuminates every room and corridor on this deck (consumes fuse).'
+            : 'Locate the single Master Fuse on board to power this deck.',
+      };
+    }
+
+    if (rt.kind === 'LIGHT_SWITCH') {
+      const sw = this.map.lightSwitches.find((s) => s.id === rt.targetId);
+      if (!sw) return null;
+      const swDeck = this.map.deckGrid[sw.ty]?.[sw.tx] ?? 'DECK_2';
+      const deckLocked = this.poweredDecks[swDeck];
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to ${sw.room} Light Switch`,
+          sub: deckLocked ? 'Breaker Locked ON (Master Fuse)' : 'Toggles overhead room lights.',
+        };
+      }
+      return {
+        prompt: deckLocked
+          ? 'Breaker Locked ON (Master Fuse)'
+          : sw.isOn
+            ? `${actionKey} — Turn OFF ${sw.room} Lights`
+            : `${actionKey} — Turn ON ${sw.room} Lights`,
+        sub: deckLocked
+          ? `Master Fuse powers all rooms and hallways across ${getDeckLabel(swDeck)}.`
+          : sw.isOn
+            ? 'Lit compartments extend Brute sight & trigger Stalker Mode'
+            : 'Illuminates room without draining flashlight battery',
+      };
+    }
+
+    if (rt.kind === 'PICKUP') {
+      const wp = this.worldPickups.find((w) => String(w.id) === rt.targetId);
+      if (!wp) return null;
+      const meta = ITEM_CATALOG[wp.item];
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to ${meta.name}`,
+          sub: meta.description,
+        };
+      }
+      return {
+        prompt: `${actionKey} — Pick up ${meta.name}`,
+        sub: meta.description,
+      };
+    }
+
+    if (rt.kind === 'ESCAPE_LIFEBOAT') {
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Bow Lifeboat Davit (${this.escape.lifeboatParts.length}/3)`,
+          sub: 'Approach the davit winches to install parts or launch.',
+        };
+      }
+      const heldLife = this.getHeldPartForRoute('LIFEBOAT');
+      let prompt = `Bow Lifeboat Davit (${this.escape.lifeboatParts.length}/3)`;
+      let sub = 'Press J to view required Lifeboat parts in your Field Journal.';
+      if (this.escape.lifeboatState === 'READY') {
+        prompt = `${actionKey} — Board Lifeboat & Escape!`;
+        sub = 'Davit crane has lowered the boat clear of the hull — go!';
+      } else if (this.escape.lifeboatState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.lifeboatActivationProgress * 100);
+        prompt = `Lowering Lifeboat Over Railing (${pct}%)`;
+        sub = 'Hydraulic winch is screaming — survive until 100%, then Click or press E!';
+      } else if (this.escape.lifeboatParts.length === 3) {
+        prompt = `Hold Click / E — Engage Hydraulic Davit Crane`;
+        sub = 'All 3 parts installed — swinging boat over the rail draws the Brute!';
+      } else if (heldLife) {
+        prompt = `Hold Click / E — Install ${ITEM_CATALOG[heldLife].name} (${this.escape.lifeboatParts.length}/3)`;
+        sub = 'Slow mechanical repair (~5s) — loud clanks will draw the Brute.';
+      }
+      return { prompt, sub };
+    }
+
+    if (rt.kind === 'ESCAPE_HELI') {
+      if (!rt.inReach) {
+        return {
+          prompt: `Move Closer to Stern Helicopter (${this.escape.heliParts.length}/3 Parts · ${this.escape.heliChainsRemaining}/6 Chains)`,
+          sub: 'Approach the chopper or chains to cut rigging and install parts.',
+        };
+      }
+      const heldHeli = this.getHeldPartForRoute('HELI');
+      const chains = this.escape.heliChainsRemaining;
+      const hasCutters = p.inventory.includes('BOLT_CUTTERS');
+      const selectedItem = p.inventory[p.selectedSlot];
+      const selectedIsHeliPart = selectedItem
+        ? ITEM_CATALOG[selectedItem].category === 'HELI_PART' &&
+          !this.escape.heliParts.includes(selectedItem)
+        : false;
+      const preferCut =
+        chains > 0 &&
+        hasCutters &&
+        (rt.subTarget === 'CHAIN' ||
+          selectedItem === 'BOLT_CUTTERS' ||
+          !selectedIsHeliPart ||
+          !heldHeli);
+
+      let prompt = `Stern Helideck (${this.escape.heliParts.length}/3 Parts · ${chains}/6 Chains)`;
+      let sub =
+        chains > 0
+          ? 'Cut 6 heavy deck chains with Bolt Cutters (~2s each) & install 3 parts.'
+          : 'Press J to view required Helicopter parts in your Field Journal.';
+      if (this.escape.heliState === 'READY') {
+        prompt = `${actionKey} — Board Helicopter & Escape!`;
+        sub = 'Rotors at full flight RPM — Click or press E now to lift off!';
+      } else if (this.escape.heliState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.heliActivationProgress * 100);
+        prompt = `Helicopter Turbine Spinning Up (${pct}%)`;
+        sub = 'Deafening engine spool — survive until 100%, then Click or press E!';
+      } else if (preferCut) {
+        prompt = `Hold Click / E — Cut Helicopter Chain (${6 - chains + 1}/6)`;
+        sub = `Takes 2s per chain · Loud snap attracts Brute · ${chains} remaining.`;
+      } else if (heldHeli) {
+        prompt = `Hold Click / E — Install ${ITEM_CATALOG[heldHeli].name} (${this.escape.heliParts.length}/3)`;
+        sub =
+          chains > 0
+            ? `Slow mechanical repair (~5s) · ${chains} deck chains still need Bolt Cutters.`
+            : 'Slow mechanical repair (~5s) — noise attracts the Brute.';
+      } else if (this.escape.heliParts.length === 3 && chains === 0) {
+        prompt = `Hold Click / E — Start Helicopter Turbine`;
+        sub = 'All 3 parts installed & chains cleared — loud spin-up alerts the Brute!';
+      } else if (this.escape.heliParts.length === 3 && chains > 0) {
+        prompt = `Chopper Chained (${chains}/6 Chains Remaining)`;
+        sub = 'All 3 parts fitted — find Bolt Cutters to sever chains before turbine spin-up.';
+      }
+      return { prompt, sub };
+    }
+
+    if (rt.kind === 'ESCAPE_SUBMARINE') {
+      const isLever = rt.subTarget === 'LEVER';
+      if (!rt.inReach) {
+        return {
+          prompt: isLever
+            ? `Move Closer to Floodgate Launch Lever (${this.escape.submarineParts.length}/3)`
+            : `Move Closer to Deck 1 Submarine Dock (${this.escape.submarineParts.length}/3)`,
+          sub: isLever
+            ? 'Approach the northwest Floodgate Console.'
+            : 'Approach the submarine drydock hull.',
+        };
+      }
+      const heldSub = this.getHeldPartForRoute('SUBMARINE');
+      let prompt = isLever
+        ? `Floodgate Launch Console (${this.escape.submarineParts.length}/3 Parts)`
+        : `Deck 1 Submarine Dock (${this.escape.submarineParts.length}/3)`;
+      let sub = 'Press J to view required Submarine parts in your Field Journal.';
+      if (this.escape.submarineState === 'READY') {
+        prompt = `${actionKey} — Board Submarine & Dive!`;
+        sub = 'Moonpool floodgates open & hull pressurized — dive now!';
+      } else if (this.escape.submarineState === 'ACTIVATING') {
+        const pct = Math.round(this.escape.submarineActivationProgress * 100);
+        prompt = `Flooding Moonpool Chamber (${pct}%)`;
+        sub = 'Floodgate klaxon blaring — survive until 100%, then Click or press E at the sub!';
+      } else if (this.escape.submarineParts.length === 3) {
+        if (isLever) {
+          prompt = `Hold Click / E — Pull Floodgate Launch Lever`;
+          sub = 'All 3 parts installed — opening the sea lock blares klaxons & alerts the Brute!';
+        } else {
+          prompt = 'All Parts Installed — Pull Floodgate Lever Inside Bay';
+          sub = 'Aim at the Floodgate Console at the northwest corner of Submarine Bay.';
+        }
+      } else if (heldSub && !isLever) {
+        prompt = `Hold Click / E — Install ${ITEM_CATALOG[heldSub].name} (${this.escape.submarineParts.length}/3)`;
+        sub = 'Heavy retrofit (~5s) — loud clanging draws the Brute.';
+      } else if (isLever) {
+        prompt = `Floodgate Launch Console (${this.escape.submarineParts.length}/3 Parts)`;
+        sub = 'Install all 3 Submarine parts at the drydock hull before pulling the floodgate lever.';
+      }
+      return { prompt, sub };
+    }
+
+    return null;
+  }
+
   public emitHud(): void {
-    const nearest = this.findNearestInteractable();
-    let promptText = nearest ? nearest.prompt : null;
-    let promptSubtext = nearest ? nearest.sub : null;
+    const rayInfo =
+      this.raycastTarget && this.raycastTarget.hasLos
+        ? this.getRaycastPrompt(this.raycastTarget)
+        : null;
+    let promptText = rayInfo ? rayInfo.prompt : null;
+    let promptSubtext = rayInfo ? rayInfo.sub : null;
 
     if (this.player.climbingStairId !== null) {
       const st = this.map.stairwells.find((s) => s.id === this.player.climbingStairId);
@@ -4217,34 +4660,6 @@ export class MonstrumGameEngine {
       } else {
         promptText = 'Hiding — Press E to Exit · Hold Q to Peek';
         promptSubtext = 'Holding Q turns on your flashlight and drains battery to see out.';
-      }
-    } else if (
-      this.cursorTarget &&
-      this.cursorTarget.hasLos &&
-      (this.cursorTarget.inReach || !nearest)
-    ) {
-      const c = this.map.containers.find((item) => item.id === this.cursorTarget!.containerId);
-      if (c) {
-        const label = this.getContainerLabel(c.type);
-        if (!this.cursorTarget.inReach) {
-          promptText = `Move Closer to ${c.isOpen ? 'Close' : 'Open'} ${label}`;
-          promptSubtext = 'Aim cursor at drawers or toolboxes within reach and press E.';
-        } else if (!c.isOpen) {
-          promptText = `Press E to Open ${label}`;
-          promptSubtext = c.room;
-        } else if (this.cursorTarget.kind === 'CONTAINER_ITEM' && c.item) {
-          const meta = ITEM_CATALOG[c.item];
-          promptText =
-            c.item === 'BACKPACK'
-              ? 'Press E to Equip Crew Backpack'
-              : `Press E to Take ${meta.name}`;
-          promptSubtext = meta.description;
-        } else {
-          promptText = `Press E to Close ${label}`;
-          promptSubtext = c.item
-            ? 'Aim directly at the item inside and press E to take it.'
-            : `${c.room} · Empty compartment`;
-        }
       }
     }
 
@@ -4303,6 +4718,12 @@ export class MonstrumGameEngine {
       climbProgress,
       climbLabel,
       zoom: this.zoom,
+      viewMode: this.viewMode,
+      pointerLocked: this.pointerLocked,
+      raycastTargetKind: this.raycastTarget?.kind ?? null,
+      raycastTargetInReach: Boolean(
+        this.raycastTarget && this.raycastTarget.inReach && this.raycastTarget.hasLos
+      ),
     });
   }
 }

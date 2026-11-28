@@ -7,6 +7,7 @@ export type ToneMappingMode = 'ACES_FILMIC' | 'NEUTRAL' | 'REINHARD_EXTENDED';
 export const DEFAULT_CAMERA_PITCH_DEG = 15;
 export const DEFAULT_CAMERA_YAW_DEG = 0;
 export const DEFAULT_CAMERA_FOV_DEG = 75;
+export const DEFAULT_MOUSE_SENSITIVITY = 1.0;
 
 export interface GraphicsSettings {
   qualityPreset: QualityPreset;
@@ -21,6 +22,7 @@ export interface GraphicsSettings {
   cameraPitchDeg: number; // 0 .. 45 (default 15)
   cameraYawDeg: number; // -45 .. 45 (default 0)
   cameraFovDeg: number; // 40 .. 90 (default 75)
+  mouseSensitivity: number; // >= 0.01, uncapped on upper end (default 1.0)
   vignetteIntensity: number; // 0 .. 1.5
   filmGrain: number; // 0 .. 1.0
   colorGrade: ColorGradePreset;
@@ -88,6 +90,7 @@ export function getDefaultGraphicsSettings(): GraphicsSettings {
     cameraPitchDeg: DEFAULT_CAMERA_PITCH_DEG,
     cameraYawDeg: DEFAULT_CAMERA_YAW_DEG,
     cameraFovDeg: DEFAULT_CAMERA_FOV_DEG,
+    mouseSensitivity: DEFAULT_MOUSE_SENSITIVITY,
     vignetteIntensity: 1.0,
     filmGrain: 0.24,
     colorGrade: 'COLD_HORROR',
@@ -174,6 +177,12 @@ export function sanitizeGraphicsSettings(raw: Partial<GraphicsSettings> | null |
       typeof raw.cameraFovDeg === 'number' && Number.isFinite(raw.cameraFovDeg)
         ? clamp(raw.cameraFovDeg, 40, 90)
         : def.cameraFovDeg,
+    mouseSensitivity:
+      typeof raw.mouseSensitivity === 'number' &&
+      Number.isFinite(raw.mouseSensitivity) &&
+      raw.mouseSensitivity > 0
+        ? Math.max(0.01, raw.mouseSensitivity)
+        : def.mouseSensitivity,
     vignetteIntensity:
       typeof raw.vignetteIntensity === 'number' && Number.isFinite(raw.vignetteIntensity)
         ? clamp(raw.vignetteIntensity, 0, 1.5)

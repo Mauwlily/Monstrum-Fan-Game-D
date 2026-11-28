@@ -6,11 +6,11 @@ import { createShadedCharacterMaterial, ShadedCharacterMaterialBundle } from './
 import {
   Container,
   ContainerType,
-  CursorContainerTarget,
   FuseSocket,
   HidingSpot,
   ItemId,
   PaperMapStand,
+  RaycastInteractTarget,
   RoomLightSwitch,
   ShipDeck,
   ShipMap,
@@ -77,6 +77,7 @@ interface ContainerRig {
   itemHitMesh: THREE.Mesh;
   hoverRing: THREE.Mesh;
   itemHoverRing: THREE.Mesh;
+  occluderMeshes: THREE.Mesh[];
 }
 
 interface HidingSpotRig {
@@ -84,8 +85,11 @@ interface HidingSpotRig {
   deck: ShipDeck;
   root: THREE.Group;
   doorPivot?: THREE.Group;
+  lockerDoorLeaf?: THREE.Mesh;
   statusLightMesh?: THREE.Mesh;
   occupiedColorMat?: ShadedCharacterMaterialBundle;
+  hitMesh: THREE.Mesh;
+  occluderMeshes: THREE.Mesh[];
 }
 
 interface PaperMapRig {
@@ -93,6 +97,7 @@ interface PaperMapRig {
   deck: ShipDeck;
   root: THREE.Group;
   pinMesh: THREE.Mesh;
+  hitMesh: THREE.Mesh;
 }
 
 interface FuseSocketRig {
@@ -102,6 +107,7 @@ interface FuseSocketRig {
   cartridgeMesh: THREE.Mesh;
   ledMesh: THREE.Mesh;
   ledMat: ShadedCharacterMaterialBundle;
+  hitMesh: THREE.Mesh;
 }
 
 interface LightSwitchRig {
@@ -112,6 +118,7 @@ interface LightSwitchRig {
   lockCover: THREE.Mesh;
   ledMesh: THREE.Mesh;
   ledMat: ShadedCharacterMaterialBundle;
+  hitMesh: THREE.Mesh;
 }
 
 interface SteamPipeRig {
@@ -126,10 +133,12 @@ interface SteamPipeRig {
 }
 
 interface DynamicItemVisual {
+  deck: ShipDeck;
   group: THREE.Group;
   halo?: THREE.Mesh;
   haloMat?: THREE.MeshBasicMaterial;
   ember?: THREE.Mesh;
+  hitMesh?: THREE.Mesh;
 }
 
 interface StaticPropVisual {
@@ -138,6 +147,7 @@ interface StaticPropVisual {
   cy: number;
   halfSpan: number;
   root: THREE.Group;
+  occluderMeshes: THREE.Mesh[];
 }
 
 export class ShipObjects3D {
@@ -190,8 +200,13 @@ export class ShipObjects3D {
   private matGlassPane: ShadedCharacterMaterialBundle;
 
   private raycastHitMeshes: THREE.Object3D[] = [];
-  private raycastDeckKey = '';
+  private raycastOccluderMeshes: THREE.Object3D[] = [];
   private pickupHaloGeom: THREE.RingGeometry;
+  private pickupHitGeom: THREE.BoxGeometry;
+  private hidingHitGeom: THREE.BoxGeometry;
+  private paperMapHitGeom: THREE.BoxGeometry;
+  private fuseHitGeom: THREE.BoxGeometry;
+  private switchHitGeom: THREE.BoxGeometry;
 
   constructor(map: ShipMap, worldScene: THREE.Scene) {
     this.map = map;
@@ -249,8 +264,14 @@ export class ShipObjects3D {
       opacity: 0,
       colorWrite: false,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
     this.pickupHaloGeom = this.g(new THREE.RingGeometry(8.5, 11.2, 20));
+    this.pickupHitGeom = this.g(makeBox(18, 18, 18));
+    this.hidingHitGeom = this.g(makeBox(26, 26, 34));
+    this.paperMapHitGeom = this.g(makeBox(24, 28, 30));
+    this.fuseHitGeom = this.g(makeBox(18, 26, 38));
+    this.switchHitGeom = this.g(makeBox(16, 18, 28));
     this.hoverRingMat = new THREE.MeshBasicMaterial({
       color: 0xfbbf24,
       transparent: true,
@@ -468,17 +489,28 @@ export class ShipObjects3D {
         itemMount.add(itemGroup);
       }
 
+      const ownerKey = `CONTAINER:${c.id}`;
       const containerHitMesh = new THREE.Mesh(
         this.g(makeBox(hitW, hitD, hitH)),
         this.hitProxyMat
       );
       containerHitMesh.position.set(1.5, 0, 0);
-      containerHitMesh.userData = { pickKind: 'CONTAINER', containerId: c.id };
+      containerHitMesh.userData = {
+        pickKind: 'CONTAINER',
+        targetId: c.id,
+        containerId: c.id,
+        ownerKey,
+      };
       root.add(containerHitMesh);
 
       const itemHitMesh = new THREE.Mesh(itemHitGeom, this.hitProxyMat);
       itemHitMesh.position.set(0, 0, 3);
-      itemHitMesh.userData = { pickKind: 'CONTAINER_ITEM', containerId: c.id };
+      itemHitMesh.userData = {
+        pickKind: 'CONTAINER_ITEM',
+        targetId: c.id,
+        containerId: c.id,
+        ownerKey,
+      };
       itemHitMesh.visible = false;
       itemMount.add(itemHitMesh);
 
@@ -491,6 +523,20 @@ export class ShipObjects3D {
       itemHoverRing.position.set(0, 0, 1.8);
       itemHoverRing.visible = false;
       itemMount.add(itemHoverRing);
+
+      const occluderMeshes: THREE.Mesh[] = [];
+      root.traverse((obj) => {
+        if (
+          obj instanceof THREE.Mesh &&
+          obj !== containerHitMesh &&
+          obj !== itemHitMesh &&
+          obj !== hoverRing &&
+          obj !== itemHoverRing
+        ) {
+          obj.userData.occluderOwnerKey = ownerKey;
+          occluderMeshes.push(obj);
+        }
+      });
 
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
@@ -514,6 +560,7 @@ export class ShipObjects3D {
         itemHitMesh,
         hoverRing,
         itemHoverRing,
+        occluderMeshes,
       });
     }
   }
@@ -532,6 +579,7 @@ export class ShipObjects3D {
       this.sharedMaterials.push(occMat);
 
       let doorPivot: THREE.Group | undefined;
+      let lockerDoorLeaf: THREE.Mesh | undefined;
       let statusLightMesh: THREE.Mesh | undefined;
 
       if (s.type === 'LOCKER') {
@@ -547,6 +595,7 @@ export class ShipObjects3D {
         doorPivot.position.set(7.6, -10.5, 1.8);
         const doorLeaf = new THREE.Mesh(this.g(makeBox(2.2, 21.0, 38)), occMat.material);
         doorLeaf.position.set(0, 10.5, 0);
+        lockerDoorLeaf = doorLeaf;
         const vent1 = new THREE.Mesh(this.g(makeBox(2.6, 13.0, 1.6)), this.matSteelDark.material);
         vent1.position.set(0.3, 10.5, 30);
         const vent2 = new THREE.Mesh(this.g(makeBox(2.6, 13.0, 1.6)), this.matSteelDark.material);
@@ -582,16 +631,37 @@ export class ShipObjects3D {
         root.add(shell, trimT, trimB, hatch);
       }
 
+      const ownerKey = `HIDING:${s.id}`;
+      const hitMesh = new THREE.Mesh(this.hidingHitGeom, this.hitProxyMat);
+      hitMesh.userData = {
+        pickKind: 'HIDING',
+        targetId: s.id,
+        ownerKey,
+      };
+      root.add(hitMesh);
+
+      const occluderMeshes: THREE.Mesh[] = [];
+      root.traverse((obj) => {
+        if (obj instanceof THREE.Mesh && obj !== hitMesh) {
+          obj.userData.occluderOwnerKey = ownerKey;
+          occluderMeshes.push(obj);
+        }
+      });
+
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
+      hitMesh.renderOrder = 16;
       this.worldScene.add(root);
       this.hidingRigs.push({
         spot: s,
         deck: s.deck,
         root,
         doorPivot,
+        lockerDoorLeaf,
         statusLightMesh,
         occupiedColorMat: occMat,
+        hitMesh,
+        occluderMeshes,
       });
     }
   }
@@ -622,11 +692,18 @@ export class ShipObjects3D {
       pinMesh.position.set(1.5, -2.5, 2.4);
       topGroup.add(tray, sheet, bar, pinMesh);
 
-      root.add(base, post, topGroup);
+      const hitMesh = new THREE.Mesh(this.paperMapHitGeom, this.hitProxyMat);
+      hitMesh.userData = {
+        pickKind: 'PAPER_MAP',
+        targetId: stand.id,
+        ownerKey: `PAPER_MAP:${stand.id}`,
+      };
+      root.add(base, post, topGroup, hitMesh);
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
+      hitMesh.renderOrder = 16;
       this.worldScene.add(root);
-      this.paperMapRigs.push({ stand, deck: stand.deck, root, pinMesh });
+      this.paperMapRigs.push({ stand, deck: stand.deck, root, pinMesh, hitMesh });
     }
   }
 
@@ -673,10 +750,19 @@ export class ShipObjects3D {
       const ledMesh = new THREE.Mesh(this.g(makeBox(2.4, 3.6, 2.4)), ledMat.material);
       ledMesh.position.set(4.8, 0, 35.5);
 
-      root.add(pedestal, cabinet, busL, busR, glass, cartridgeMesh, ledMesh);
+      const hitMesh = new THREE.Mesh(this.fuseHitGeom, this.hitProxyMat);
+      hitMesh.position.set(1, 0, 0);
+      hitMesh.userData = {
+        pickKind: 'FUSE_SOCKET',
+        targetId: fs.id,
+        ownerKey: `FUSE_SOCKET:${fs.id}`,
+      };
+
+      root.add(pedestal, cabinet, busL, busR, glass, cartridgeMesh, ledMesh, hitMesh);
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
       glass.renderOrder = 14;
+      hitMesh.renderOrder = 16;
       this.worldScene.add(root);
       this.fuseRigs.push({
         socket: fs,
@@ -685,6 +771,7 @@ export class ShipObjects3D {
         cartridgeMesh,
         ledMesh,
         ledMat,
+        hitMesh,
       });
     }
   }
@@ -723,9 +810,18 @@ export class ShipObjects3D {
       const ledMesh = new THREE.Mesh(this.g(makeBox(2.2, 3.0, 2.0)), ledMat.material);
       ledMesh.position.set(2.8, 0, 32.8);
 
-      root.add(conduit, box, paddleGroup, lockCover, ledMesh);
+      const hitMesh = new THREE.Mesh(this.switchHitGeom, this.hitProxyMat);
+      hitMesh.position.set(1, 0, 12);
+      hitMesh.userData = {
+        pickKind: 'LIGHT_SWITCH',
+        targetId: sw.id,
+        ownerKey: `LIGHT_SWITCH:${sw.id}`,
+      };
+
+      root.add(conduit, box, paddleGroup, lockCover, ledMesh, hitMesh);
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
+      hitMesh.renderOrder = 16;
       this.worldScene.add(root);
       this.switchRigs.push({
         sw,
@@ -735,6 +831,7 @@ export class ShipObjects3D {
         lockCover,
         ledMesh,
         ledMat,
+        hitMesh,
       });
     }
   }
@@ -821,6 +918,14 @@ export class ShipObjects3D {
       root.position.set(cx, -cy, 0);
 
       this.populateStaticPropMesh(root, prop, pw, ph);
+      const occluderMeshes: THREE.Mesh[] = [];
+      const ownerKey = `PROP:${prop.id}`;
+      root.traverse((obj) => {
+        if (obj instanceof THREE.Mesh) {
+          obj.userData.occluderOwnerKey = ownerKey;
+          occluderMeshes.push(obj);
+        }
+      });
       root.visible = false;
       this.setRenderOrderRecursive(root, 6);
       this.worldScene.add(root);
@@ -830,6 +935,7 @@ export class ShipObjects3D {
         cy,
         halfSpan: Math.max(pw, ph) * 0.65 + 24,
         root,
+        occluderMeshes,
       });
     }
   }
@@ -1008,9 +1114,6 @@ export class ShipObjects3D {
   }
 
   public getRaycastTargets(activeDeck: ShipDeck): THREE.Object3D[] {
-    if (this.raycastDeckKey !== activeDeck) {
-      this.raycastDeckKey = activeDeck;
-    }
     this.raycastHitMeshes.length = 0;
     for (let i = 0; i < this.containerRigs.length; i++) {
       const rig = this.containerRigs[i];
@@ -1020,7 +1123,57 @@ export class ShipObjects3D {
       }
       this.raycastHitMeshes.push(rig.containerHitMesh);
     }
+    for (let i = 0; i < this.hidingRigs.length; i++) {
+      const hr = this.hidingRigs[i];
+      if (hr.deck !== activeDeck || !hr.root.visible) continue;
+      this.raycastHitMeshes.push(hr.hitMesh);
+    }
+    for (let i = 0; i < this.paperMapRigs.length; i++) {
+      const pm = this.paperMapRigs[i];
+      if (pm.deck !== activeDeck || !pm.root.visible) continue;
+      this.raycastHitMeshes.push(pm.hitMesh);
+    }
+    for (let i = 0; i < this.fuseRigs.length; i++) {
+      const fr = this.fuseRigs[i];
+      if (fr.deck !== activeDeck || !fr.root.visible) continue;
+      this.raycastHitMeshes.push(fr.hitMesh);
+    }
+    for (let i = 0; i < this.switchRigs.length; i++) {
+      const sr = this.switchRigs[i];
+      if (sr.deck !== activeDeck || !sr.root.visible) continue;
+      this.raycastHitMeshes.push(sr.hitMesh);
+    }
+    for (const vis of this.pickupVisuals.values()) {
+      if (vis.deck !== activeDeck || !vis.group.visible || !vis.hitMesh) continue;
+      this.raycastHitMeshes.push(vis.hitMesh);
+    }
     return this.raycastHitMeshes;
+  }
+
+  public getRaycastOccluders(activeDeck: ShipDeck): THREE.Object3D[] {
+    this.raycastOccluderMeshes.length = 0;
+    for (let i = 0; i < this.containerRigs.length; i++) {
+      const rig = this.containerRigs[i];
+      if (rig.deck !== activeDeck || !rig.root.visible) continue;
+      for (let m = 0; m < rig.occluderMeshes.length; m++) {
+        this.raycastOccluderMeshes.push(rig.occluderMeshes[m]);
+      }
+    }
+    for (let i = 0; i < this.hidingRigs.length; i++) {
+      const hr = this.hidingRigs[i];
+      if (hr.deck !== activeDeck || !hr.root.visible) continue;
+      for (let m = 0; m < hr.occluderMeshes.length; m++) {
+        this.raycastOccluderMeshes.push(hr.occluderMeshes[m]);
+      }
+    }
+    for (let i = 0; i < this.staticPropVisuals.length; i++) {
+      const pv = this.staticPropVisuals[i];
+      if (pv.deck !== activeDeck || !pv.root.visible) continue;
+      for (let m = 0; m < pv.occluderMeshes.length; m++) {
+        this.raycastOccluderMeshes.push(pv.occluderMeshes[m]);
+      }
+    }
+    return this.raycastOccluderMeshes;
   }
 
   public getContainerWorldHitCenter(
@@ -1045,6 +1198,57 @@ export class ShipObjects3D {
     return true;
   }
 
+  public getTargetWorldHitCenter(
+    kind: RaycastInteractTarget['kind'],
+    targetId: string,
+    outVec: THREE.Vector3
+  ): boolean {
+    if (kind === 'CONTAINER' || kind === 'CONTAINER_ITEM') {
+      return this.getContainerWorldHitCenter(targetId, kind, outVec);
+    }
+    if (kind === 'HIDING') {
+      const hr = this.hidingRigs.find((r) => r.spot.id === targetId);
+      if (!hr || !hr.root.visible) return false;
+      hr.root.updateMatrixWorld(true);
+      hr.hitMesh.getWorldPosition(outVec);
+      outVec.z = 16;
+      return true;
+    }
+    if (kind === 'PAPER_MAP') {
+      const pm = this.paperMapRigs.find((r) => r.stand.id === targetId);
+      if (!pm || !pm.root.visible) return false;
+      pm.root.updateMatrixWorld(true);
+      pm.hitMesh.getWorldPosition(outVec);
+      outVec.z = 18;
+      return true;
+    }
+    if (kind === 'FUSE_SOCKET') {
+      const fr = this.fuseRigs.find((r) => r.socket.id === targetId);
+      if (!fr || !fr.root.visible) return false;
+      fr.root.updateMatrixWorld(true);
+      fr.hitMesh.getWorldPosition(outVec);
+      outVec.z = 20;
+      return true;
+    }
+    if (kind === 'LIGHT_SWITCH') {
+      const sr = this.switchRigs.find((r) => r.sw.id === targetId);
+      if (!sr || !sr.root.visible) return false;
+      sr.root.updateMatrixWorld(true);
+      sr.hitMesh.getWorldPosition(outVec);
+      outVec.z = 24;
+      return true;
+    }
+    if (kind === 'PICKUP') {
+      const pv = this.pickupVisuals.get(Number(targetId));
+      if (!pv || !pv.group.visible || !pv.hitMesh) return false;
+      pv.group.updateMatrixWorld(true);
+      pv.hitMesh.getWorldPosition(outVec);
+      outVec.z = 8;
+      return true;
+    }
+    return false;
+  }
+
   public updateForFrame(
     engine: MonstrumGameEngine,
     renderDeck: ShipDeck,
@@ -1053,7 +1257,7 @@ export class ShipObjects3D {
     halfW: number,
     halfH: number,
     timeSec: number,
-    hoveredTarget: CursorContainerTarget | null
+    hoveredTarget: RaycastInteractTarget | null
   ): void {
     if (this.disposed) return;
 
@@ -1098,7 +1302,11 @@ export class ShipObjects3D {
       rig.itemMount.visible = showItem;
       rig.itemHitMesh.visible = c.item !== null && prog > 0.22;
 
-      const isHovered = hoveredTarget !== null && hoveredTarget.containerId === c.id && hoveredTarget.hasLos;
+      const isHovered =
+        hoveredTarget !== null &&
+        (hoveredTarget.kind === 'CONTAINER' || hoveredTarget.kind === 'CONTAINER_ITEM') &&
+        hoveredTarget.targetId === c.id &&
+        hoveredTarget.hasLos;
       const isItemHover = isHovered && hoveredTarget.kind === 'CONTAINER_ITEM' && showItem;
       const isBoxHover = isHovered && hoveredTarget.kind === 'CONTAINER';
 
@@ -1125,7 +1333,16 @@ export class ShipObjects3D {
       hr.root.visible = true;
       const isOccupied = engine.player.hidingSpotId === s.id;
       const isFlashing = s.checkedFlash > 0;
+      const isFpLive =
+        engine.viewMode === 'FIRST_PERSON' &&
+        !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
 
+      if (hr.lockerDoorLeaf) {
+        hr.lockerDoorLeaf.visible = !(isOccupied && isFpLive);
+      }
+      if (hr.statusLightMesh && s.type === 'CARGO_CRATE') {
+        hr.statusLightMesh.visible = !(isOccupied && isFpLive);
+      }
       if (hr.doorPivot) {
         hr.doorPivot.rotation.z = isFlashing ? -1.45 : isOccupied ? -0.18 : 0;
       }
@@ -1301,11 +1518,18 @@ export class ShipObjects3D {
         });
         const halo = new THREE.Mesh(this.pickupHaloGeom, haloMat);
         halo.position.z = 0.8;
-        group.add(halo, itemMesh);
+        const hitMesh = new THREE.Mesh(this.pickupHitGeom, this.hitProxyMat);
+        hitMesh.userData = {
+          pickKind: 'PICKUP',
+          targetId: String(wp.id),
+          ownerKey: `PICKUP:${wp.id}`,
+        };
+        group.add(halo, itemMesh, hitMesh);
         this.setRenderOrderRecursive(group, 7);
         halo.renderOrder = 15;
+        hitMesh.renderOrder = 16;
         this.worldScene.add(group);
-        vis = { group, halo, haloMat };
+        vis = { deck: wp.deck, group, halo, haloMat, hitMesh };
         this.pickupVisuals.set(wp.id, vis);
       }
       const pulse = 1 + Math.sin(timeSec * 5 + wp.id) * 0.14;
@@ -1317,7 +1541,13 @@ export class ShipObjects3D {
         itemChild.rotation.z = timeSec * 1.15 + wp.id;
       }
       if (vis.halo) {
-        vis.halo.scale.set(pulse, pulse, 1);
+        const isTarget =
+          hoveredTarget?.kind === 'PICKUP' && hoveredTarget.targetId === String(wp.id);
+        const s = isTarget ? pulse * 1.24 : pulse;
+        vis.halo.scale.set(s, s, 1);
+        if (vis.haloMat) {
+          vis.haloMat.opacity = isTarget ? 0.98 : wp.item === 'MASTER_FUSE' ? 0.85 : 0.65;
+        }
       }
     }
     for (const [id, vis] of this.pickupVisuals) {
@@ -1362,7 +1592,7 @@ export class ShipObjects3D {
         this.setRenderOrderRecursive(group, 7);
         if (ember) ember.renderOrder = 15;
         this.worldScene.add(group);
-        vis = { group, ember, haloMat };
+        vis = { deck: dlDeck, group, ember, haloMat };
         this.droppedLightVisuals.set(dl.id, vis);
       }
       vis.group.visible = true;

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Monitor, RotateCcw, Sliders, Sparkles, Sun } from 'lucide-react';
 import {
   AoQuality,
@@ -84,6 +84,34 @@ export const GraphicsSettingsPanel: React.FC<GraphicsSettingsPanelProps> = ({
   };
 
   const defaults = getDefaultGraphicsSettings();
+  const [mouseDraft, setMouseDraft] = useState<string>(() =>
+    String(settings.mouseSensitivity ?? defaults.mouseSensitivity)
+  );
+
+  useEffect(() => {
+    const numDraft = Number(mouseDraft);
+    if (!Number.isFinite(numDraft) || Math.abs(numDraft - settings.mouseSensitivity) > 1e-6) {
+      setMouseDraft(String(settings.mouseSensitivity));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.mouseSensitivity]);
+
+  const handleMouseDraftChange = (val: string) => {
+    setMouseDraft(val);
+    const trimmed = val.trim();
+    if (!trimmed) return;
+    const parsed = Number(trimmed);
+    if (Number.isFinite(parsed) && parsed >= 0.01) {
+      patchVisual({ mouseSensitivity: parsed });
+    }
+  };
+
+  const handleMouseDraftBlur = () => {
+    const parsed = Number(mouseDraft.trim());
+    if (!Number.isFinite(parsed) || parsed < 0.01) {
+      setMouseDraft(String(settings.mouseSensitivity));
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -333,6 +361,44 @@ export const GraphicsSettingsPanel: React.FC<GraphicsSettingsPanelProps> = ({
               className="h-1.5 w-full accent-emerald-400 cursor-pointer"
             />
           </label>
+        </div>
+
+        {/* First-Person Mouse Speed (slider 0.1..5.0 + uncapped direct numeric entry) */}
+        <div className="rounded border border-slate-800/80 bg-[#070a0f] p-2.5 space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <span className="text-slate-300 font-medium">
+              Mouse Speed <span className="text-slate-500 font-normal">(First-Person Look · Uncapped typing)</span>
+            </span>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                aria-label="Mouse Speed Value"
+                data-testid="mouse-speed-input"
+                min={0.01}
+                step="any"
+                value={mouseDraft}
+                onChange={(e) => handleMouseDraftChange(e.target.value)}
+                onBlur={handleMouseDraftBlur}
+                className="w-20 rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-right font-mono-num text-xs font-semibold text-emerald-300 focus:border-emerald-400 focus:outline-none"
+              />
+              <span className="font-mono-num text-[11px] text-slate-400">x</span>
+            </div>
+          </div>
+          <input
+            type="range"
+            aria-label="Mouse Speed"
+            data-testid="mouse-speed-slider"
+            min={0.1}
+            max={5.0}
+            step={0.05}
+            value={Math.min(5.0, Math.max(0.1, settings.mouseSensitivity))}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setMouseDraft(v.toFixed(2));
+              patchVisual({ mouseSensitivity: v });
+            }}
+            className="h-1.5 w-full accent-emerald-400 cursor-pointer"
+          />
         </div>
 
         <div className="grid gap-3 sm:grid-cols-2">

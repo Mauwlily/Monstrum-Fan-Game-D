@@ -1,4 +1,4 @@
-export const GAME_VERSION = '0.3.1';
+export const GAME_VERSION = '0.3.2';
 
 export const WALL_HEIGHT_RATIO = 1.25;
 export const DOOR_HEIGHT_PX = 46;
@@ -13,6 +13,8 @@ export function getViewportResolutionScale(width: number, height: number): numbe
 }
 
 export type GameStatus = 'TITLE_MENU' | 'PLAYING' | 'PAUSED' | 'VICTORY_CUTSCENE' | 'VICTORY' | 'GAME_OVER';
+
+export type GameViewMode = 'TOP_DOWN' | 'FIRST_PERSON';
 
 export type DifficultyLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'EXTREME';
 
@@ -571,6 +573,49 @@ export interface Container {
   item: ItemId | null;
 }
 
+export type RaycastTargetKind =
+  | 'DOOR'
+  | 'STAIRWELL'
+  | 'FUSE_SOCKET'
+  | 'LIGHT_SWITCH'
+  | 'PICKUP'
+  | 'HIDING'
+  | 'PAPER_MAP'
+  | 'CONTAINER'
+  | 'CONTAINER_ITEM'
+  | 'ESCAPE_LIFEBOAT'
+  | 'ESCAPE_HELI'
+  | 'ESCAPE_SUBMARINE';
+
+export interface RaycastInteractTarget {
+  kind: RaycastTargetKind;
+  targetId: string;
+  subTarget?: 'DOCK' | 'LEVER' | 'CHAIN' | 'HULL';
+  chainIndex?: number;
+  ownerKey: string;
+  dist: number;
+  inReach: boolean;
+  hasLos: boolean;
+  hitX: number;
+  hitY: number;
+  hitZ: number;
+  hitDist: number;
+  item?: ItemId;
+}
+
+export interface RaycastDebugInfo {
+  hitKind: RaycastTargetKind | null;
+  targetId: string | null;
+  subTarget: string | null;
+  inReach: boolean;
+  hasLos: boolean;
+  blockedBy: string | null;
+  hitDist: number | null;
+  occDist: number | null;
+  hitZ: number | null;
+  dist2d: number | null;
+}
+
 export interface CursorContainerTarget {
   kind: 'CONTAINER' | 'CONTAINER_ITEM';
   containerId: string;
@@ -902,6 +947,10 @@ export interface HudSnapshot {
   climbProgress: number;
   climbLabel: string | null;
   zoom: number;
+  viewMode: GameViewMode;
+  pointerLocked: boolean;
+  raycastTargetKind: RaycastTargetKind | null;
+  raycastTargetInReach: boolean;
 }
 
 export type DebugScenarioId =
@@ -954,6 +1003,7 @@ export interface DebugOverlayConfig {
   cameraFovDeg: number;
   wireframeStructure: boolean;
   hideWallCaps: boolean;
+  showCeilings: boolean;
   showStructureGizmos: boolean;
   debugDeckOverride: 'AUTO' | ShipDeck;
   freeCamEnabled: boolean;

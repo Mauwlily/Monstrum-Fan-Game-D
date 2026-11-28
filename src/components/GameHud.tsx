@@ -80,7 +80,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         {/* Top-Left: Location + Escape Journal Toggle */}
         <div
           data-hud-panel="top-left"
-          className="pointer-events-auto rounded-md border border-slate-800/80 bg-[#090d14]/88 px-2.5 py-2 sm:px-3.5 sm:py-2.5 backdrop-blur-sm max-w-[calc(100vw-215px)] sm:max-w-none"
+          className="pointer-events-auto rounded-md border border-slate-800/80 bg-[#090d14]/94 px-2.5 py-2 sm:px-3.5 sm:py-2.5 max-w-[calc(100vw-215px)] sm:max-w-none"
         >
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] sm:text-xs">
             <span className="font-medium text-slate-400">
@@ -99,7 +99,9 @@ export const GameHud: React.FC<GameHudProps> = ({
             <span className="text-slate-600" aria-hidden="true">
               ·
             </span>
-            <span className="font-mono-num text-slate-400">{hud.zoom.toFixed(2)}x</span>
+            <span className="font-mono-num text-slate-400">
+              {hud.viewMode === 'FIRST_PERSON' ? 'FPS' : `${hud.zoom.toFixed(2)}x`}
+            </span>
             {bruteAlertText && (
               <>
                 <span className="text-slate-600" aria-hidden="true">
@@ -176,6 +178,27 @@ export const GameHud: React.FC<GameHudProps> = ({
         </div>
       </div>
 
+      {/* First-Person Center Reticle & Pointer-Lock Hint */}
+      {hud.viewMode === 'FIRST_PERSON' && !hud.journalOpen && !hud.paperMapDeck && (
+        <>
+          <div className="pointer-events-none fixed inset-0 flex items-center justify-center">
+            <div
+              data-testid="fp-reticle"
+              className={`rounded-full transition-all duration-75 ${
+                hud.raycastTargetInReach
+                  ? 'h-3.5 w-3.5 border-2 border-amber-300 bg-amber-300/30 shadow-[0_0_10px_rgba(251,191,36,0.75)]'
+                  : 'h-1.5 w-1.5 bg-white/75 ring-1 ring-black/70'
+              }`}
+            />
+          </div>
+          {!hud.pointerLocked && !debugOpen && (
+            <div className="pointer-events-none fixed top-16 left-1/2 -translate-x-1/2 rounded border border-slate-700/80 bg-[#090d14]/92 px-3 py-1 text-[11px] font-medium text-slate-200">
+              Click viewport to capture mouse look · Drag also turns · <span className="text-amber-300">Esc</span> pauses
+            </div>
+          )}
+        </>
+      )}
+
       {/* Center-Bottom Toast & Interaction Prompt */}
       <div className="mt-auto mb-2.5 sm:mb-3.5 flex flex-col items-center gap-2 sm:gap-2.5">
         {hud.toastMessage && (
@@ -209,7 +232,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         )}
 
         {hud.promptText && (
-          <div className="max-w-[90vw] rounded-md border border-slate-700/70 bg-[#090d14]/90 px-3.5 py-1.5 sm:px-4 sm:py-2 text-center backdrop-blur-sm">
+          <div className="max-w-[90vw] rounded-md border border-slate-700/70 bg-[#090d14]/94 px-3.5 py-1.5 sm:px-4 sm:py-2 text-center">
             <div className="text-xs font-semibold text-slate-100">{hud.promptText}</div>
             {hud.promptSubtext && (
               <div className="mt-0.5 text-[11px] text-slate-400">{hud.promptSubtext}</div>
@@ -223,7 +246,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         {/* Bottom-Left: Stamina & Flashlight */}
         <div
           data-hud-panel="bottom-left"
-          className="pointer-events-auto w-44 sm:w-60 rounded-md border border-slate-800/80 bg-[#090d14]/88 p-2.5 sm:p-3 backdrop-blur-sm space-y-2 sm:space-y-2.5 shrink-0"
+          className="pointer-events-auto w-44 sm:w-60 rounded-md border border-slate-800/80 bg-[#090d14]/94 p-2.5 sm:p-3 space-y-2 sm:space-y-2.5 shrink-0"
         >
           {hud.steamStaggered && (
             <div className="flex items-center gap-1.5 rounded border border-rose-500/60 bg-rose-950/75 px-2 py-1 text-[10px] font-bold tracking-wide text-rose-200 uppercase">
@@ -276,7 +299,7 @@ export const GameHud: React.FC<GameHudProps> = ({
         {/* Bottom-Right: Dynamic 4-to-6 Slot Survival Tool & Escape Pack */}
         <div
           data-hud-panel="bottom-right"
-          className="pointer-events-auto flex items-center gap-1 sm:gap-1.5 rounded-md border border-slate-800/80 bg-[#090d14]/88 p-1.5 sm:p-2 backdrop-blur-sm max-w-full overflow-x-auto"
+          className="pointer-events-auto flex items-center gap-1 sm:gap-1.5 rounded-md border border-slate-800/80 bg-[#090d14]/94 p-1.5 sm:p-2 max-w-full overflow-x-auto"
         >
           {Array.from({ length: hud.maxInventorySlots }, (_, slotIdx) => {
             const itemId = hud.inventory[slotIdx];

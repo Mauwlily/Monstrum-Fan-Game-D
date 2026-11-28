@@ -22,6 +22,7 @@ import {
   DifficultyConfig,
   DifficultyLevel,
   GAME_VERSION,
+  GameViewMode,
 } from '../game/types';
 import { CrtFeedScene, CrtMonitorFeed } from './CrtMonitorFeed';
 import { GraphicsSettingsPanel } from './GraphicsSettingsPanel';
@@ -29,6 +30,8 @@ import { GraphicsSettingsPanel } from './GraphicsSettingsPanel';
 interface TitleMenuProps {
   difficulty: DifficultyConfig;
   onSelectDifficulty: (d: DifficultyConfig) => void;
+  viewMode: GameViewMode;
+  onChangeViewMode: (mode: GameViewMode) => void;
   seedInput: string;
   onSeedInputChange: (val: string) => void;
   muted: boolean;
@@ -158,6 +161,8 @@ const MAIN_MONITORS: MonitorConfig[] = [
 export const TitleMenu: React.FC<TitleMenuProps> = ({
   difficulty,
   onSelectDifficulty,
+  viewMode,
+  onChangeViewMode,
   seedInput,
   onSeedInputChange,
   muted,
@@ -764,8 +769,58 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
             {/* 1. SETUP DOSSIER */}
             {activeDossier === 'SETUP' && (
               <div className="space-y-5">
-                {/* Brute Presets */}
+                {/* View Perspective (Locked Pre-Run) */}
                 <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-medium text-slate-300">View Perspective</span>
+                    <span className="text-[11px] text-amber-400/90">
+                      Locked for entire run
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 rounded-md border border-slate-800 bg-slate-950 p-1">
+                    {(
+                      [
+                        {
+                          id: 'TOP_DOWN',
+                          label: 'Top-Down 3D',
+                          desc: 'Overhead perspective · Pointer aim',
+                        },
+                        {
+                          id: 'FIRST_PERSON',
+                          label: 'First-Person',
+                          desc: 'Pointer-lock FPS · Ceilings & Sky',
+                        },
+                      ] as const
+                    ).map((opt) => {
+                      const active = viewMode === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          data-testid={`viewmode-${opt.id.toLowerCase().replace('_', '-')}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onChangeViewMode(opt.id);
+                          }}
+                          className={`rounded px-3 py-2 text-left transition-colors cursor-pointer ${
+                            active
+                              ? 'border border-amber-500/70 bg-amber-500/15 text-amber-100'
+                              : 'border border-transparent text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <div className="text-xs font-semibold">{opt.label}</div>
+                          <div className="mt-0.5 text-[10px] opacity-80">{opt.desc}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Perspective cannot be switched mid-game once embarked.
+                  </p>
+                </div>
+
+                {/* Brute Presets */}
+                <div className="border-t border-slate-800/80 pt-4">
                   <div className="mb-2 flex items-center justify-between">
                     <span className="text-xs font-medium text-slate-300">Brute Presets</span>
                     <span
@@ -968,16 +1023,16 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                   </div>
                   <div className="grid gap-2 text-xs sm:grid-cols-2">
                     {[
-                      ['WASD / Arrows', 'Move'],
+                      ['WASD / Arrows', 'Move (Camera-relative in First-Person)'],
+                      ['Mouse Look / Aim', 'Pointer-Lock Look (First-Person) or Cursor Aim'],
                       ['Shift', 'Sprint (drains stamina, loud)'],
-                      ['C / Ctrl', 'Toggle Sneak (quiet steps)'],
+                      ['C / Ctrl', 'Toggle Sneak (quiet steps, crouch drop)'],
                       ['Hold Q', 'Peek Doors, Stairs & Locker Vents'],
-                      ['E / Space', 'Interact, Repair, Open Doors & Paper Maps'],
+                      ['Left-Click / E', 'Interact 3D Raycast Target (or Use Tool)'],
                       ['F / Right-Click', 'Toggle Flashlight'],
-                      ['Left-Click', 'Use Selected Tool / Bolt Cutters'],
                       ['G', 'Drop Selected Item'],
                       ['J', 'Open Escape Journal'],
-                      ['Mouse Wheel', 'Adjust Camera Zoom (1.0x–2.5x)'],
+                      ['Mouse Wheel', 'Adjust Camera Zoom (Top-Down 1.0x–2.5x)'],
                     ].map(([key, action]) => (
                       <div
                         key={key}
@@ -1144,12 +1199,12 @@ export const TitleMenu: React.FC<TitleMenuProps> = ({
                 <div className="rounded-md border border-slate-800 bg-slate-950/70 p-4 space-y-1.5 text-slate-400">
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
                     <ShieldAlert className="h-3.5 w-3.5 text-emerald-400" />
-                    <span>v{GAME_VERSION} Highlights (3D Brute &amp; Survivor Rigs)</span>
+                    <span>v{GAME_VERSION} Highlights (Dual Perspective &amp; 3D Raycast)</span>
                   </div>
-                  <p>• Articulated 34px Survivor in foul-weather marine gear with dynamic crouch drop (~23px), flashlight aim rig, and live Satchel-to-Crew-Backpack swap.</p>
-                  <p>• Towering 44px Armored Furnace Brute with riveted steel pauldrons, molten dorsal/flank/sternum vents, triple-claw gauntlets, hunt lunges, and stunned slump.</p>
-                  <p>• LoS-gated 3D visor eyes and sternum furnace gleams shine out of dark corridors and door keyholes while staying #000000 occluded behind bulkheads.</p>
-                  <p>• Straight top-down &amp; oblique 3D walls, framed hinged doors, and recessed stairwell shafts carried forward from Stage 1.</p>
+                  <p>• Choose locked Top-Down 3D or Pointer-Lock First-Person perspective before embarking—no mid-game switching.</p>
+                  <p>• First-Person renders full Deck 1, Deck 2, and Deck 3 indoor ceilings plus a stormy night sky overhead outside on Deck 3.</p>
+                  <p>• Unified Three.js 3D raycasting enforces true 3D occlusion and verticality across all Click / E interactables.</p>
+                  <p>• Shifted Deck 1 Submarine Bay moonpool 1 tile West away from the East bulkhead to keep every doorway clear.</p>
                 </div>
               </div>
             )}

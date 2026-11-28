@@ -1593,7 +1593,10 @@ export class ShipCharacters3D {
     includePlayer: boolean
   ): void {
     const p = engine.player;
-    if (!includePlayer || p.hidingSpotId !== null) {
+    const isFpBodyHidden =
+      engine.viewMode === 'FIRST_PERSON' &&
+      !(engine.debugConfig.enabled && engine.debugConfig.freeCamEnabled);
+    if (!includePlayer || p.hidingSpotId !== null || isFpBodyHidden) {
       this.playerRoot.visible = false;
       return;
     }

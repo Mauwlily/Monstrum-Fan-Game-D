@@ -471,6 +471,29 @@ export function computeVisibilityPolygon(
     });
   }
 
+  // Collapse collinear sub-pixel slivers on the exact same wall/door segment
+  // while preserving every segment endpoint and corner transition.
+  if (pts.length > 4) {
+    const cleaned: VisibilityVertex[] = [pts[0]];
+    for (let i = 1; i < pts.length - 1; i++) {
+      const prev = cleaned[cleaned.length - 1];
+      const curr = pts[i];
+      const next = pts[i + 1];
+      if (
+        curr.segId !== undefined &&
+        curr.segId > 0 &&
+        curr.segId === prev.segId &&
+        curr.segId === next.segId &&
+        Math.hypot(curr.x - prev.x, curr.y - prev.y) < 12
+      ) {
+        continue;
+      }
+      cleaned.push(curr);
+    }
+    cleaned.push(pts[pts.length - 1]);
+    return cleaned;
+  }
+
   return pts;
 }
 
@@ -653,11 +676,65 @@ export interface FanCurtainOptions {
   floorZ?: number;
   pushInwardPx?: number;
   curtainOnly?: boolean;
+  ceilingCapZ?: number;
+  canCapCeiling?: (wx: number, wy: number) => boolean;
+}
+
+function isContinuousCurtainEdge(a: VisibilityVertex, b: VisibilityVertex): boolean {
+  if (a.segId === undefined || a.segId <= 0 || b.segId === undefined || b.segId <= 0) {
+    return false;
+  }
+  if (a.segId === b.segId) return true;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  return dx * dx + dy * dy <= 144;
+}
+
+function clampCeilingVertex(
+  ox: number,
+  oy: number,
+  vx: number,
+  vy: number,
+  canCapCeiling: (wx: number, wy: number) => boolean
+): [number, number] {
+  if (canCapCeiling(vx, vy)) return [vx, vy];
+  let lo = 0;
+  let hi = 1;
+  for (let s = 0; s < 6; s++) {
+    const mid = (lo + hi) * 0.5;
+    if (canCapCeiling(ox + (vx - ox) * mid, oy + (vy - oy) * mid)) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return [ox + (vx - ox) * lo, oy + (vy - oy) * lo];
+}
+
+function clampEntryFromOutside(
+  ox: number,
+  oy: number,
+  vx: number,
+  vy: number,
+  canCapCeiling: (wx: number, wy: number) => boolean
+): [number, number] {
+  if (!canCapCeiling(vx, vy)) return [vx, vy];
+  let lo = 0;
+  let hi = 1;
+  for (let s = 0; s < 6; s++) {
+    const mid = (lo + hi) * 0.5;
+    if (canCapCeiling(ox + (vx - ox) * mid, oy + (vy - oy) * mid)) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  return [ox + (vx - ox) * hi, oy + (vy - oy) * hi];
 }
 
 /**
  * Triangulates a visibility polygon into a non-indexed triangle fan centered at (ox, oy)
- * plus optional 3D vertical wall/door illumination curtains along hit occluder segments.
+ * plus optional 3D vertical wall/door illumination curtains and ceiling caps along hit segments.
  */
 export function buildVisibilityFanBuffers(
   ox: number,
@@ -670,20 +747,39 @@ export function buildVisibilityFanBuffers(
   const n = poly.length;
   const triCount = n < 2 ? 0 : closedLoop ? n : n - 1;
   const includeFloor = !curtainOpts?.curtainOnly;
+  const ceilingCapZ = curtainOpts?.ceilingCapZ;
+  const canCapCeiling = curtainOpts?.canCapCeiling;
+  const includeCeilingCap = ceilingCapZ !== undefined;
+  const originInCapZone = includeCeilingCap && (!canCapCeiling || canCapCeiling(ox, oy));
 
   let curtainEdges = 0;
   if (curtainOpts && curtainOpts.wallHeight > 0) {
     for (let i = 0; i < triCount; i++) {
       const a = poly[i];
       const b = poly[(i + 1) % n];
-      if (a.segId !== undefined && a.segId > 0 && a.segId === b.segId) {
+      if (isContinuousCurtainEdge(a, b)) {
         curtainEdges++;
       }
     }
   }
 
+  let ceilingTris = 0;
+  if (includeCeilingCap) {
+    if (!canCapCeiling || originInCapZone) {
+      ceilingTris = triCount;
+    } else {
+      for (let i = 0; i < triCount; i++) {
+        const a = poly[i];
+        const b = poly[(i + 1) % n];
+        if (canCapCeiling(a.x, a.y) && canCapCeiling(b.x, b.y)) {
+          ceilingTris += 2;
+        }
+      }
+    }
+  }
+
   const floorTris = includeFloor ? triCount : 0;
-  const vertexCount = (floorTris + curtainEdges * 2) * 3;
+  const vertexCount = (floorTris + ceilingTris + curtainEdges * 2) * 3;
   const neededFloats3 = vertexCount * 3;
   const neededFloats2 = vertexCount * 2;
 
@@ -729,12 +825,72 @@ export function buildVisibilityFanBuffers(
     }
   }
 
+  if (includeCeilingCap && ceilingCapZ !== undefined) {
+    for (let i = 0; i < triCount; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % n];
+      if (canCapCeiling && !originInCapZone) {
+        if (!canCapCeiling(a.x, a.y) || !canCapCeiling(b.x, b.y)) continue;
+        const [eax, eay] = clampEntryFromOutside(ox, oy, a.x, a.y, canCapCeiling);
+        const [ebx, eby] = clampEntryFromOutside(ox, oy, b.x, b.y, canCapCeiling);
+
+        // Quad (eA, b, a) + (eA, eB, b) facing downward (-Z) strictly inside indoor zone
+        positions[pIdx++] = eax; positions[pIdx++] = -eay; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = eax - ox; radialOffsets[rIdx++] = -(eay - oy);
+
+        positions[pIdx++] = b.x; positions[pIdx++] = -b.y; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = b.x - ox; radialOffsets[rIdx++] = -(b.y - oy);
+
+        positions[pIdx++] = a.x; positions[pIdx++] = -a.y; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = a.x - ox; radialOffsets[rIdx++] = -(a.y - oy);
+
+        positions[pIdx++] = eax; positions[pIdx++] = -eay; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = eax - ox; radialOffsets[rIdx++] = -(eay - oy);
+
+        positions[pIdx++] = ebx; positions[pIdx++] = -eby; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = ebx - ox; radialOffsets[rIdx++] = -(eby - oy);
+
+        positions[pIdx++] = b.x; positions[pIdx++] = -b.y; positions[pIdx++] = ceilingCapZ;
+        radialOffsets[rIdx++] = b.x - ox; radialOffsets[rIdx++] = -(b.y - oy);
+        continue;
+      }
+
+      let ax = a.x;
+      let ay = a.y;
+      let bx = b.x;
+      let by = b.y;
+      if (canCapCeiling) {
+        [ax, ay] = clampCeilingVertex(ox, oy, a.x, a.y, canCapCeiling);
+        [bx, by] = clampCeilingVertex(ox, oy, b.x, b.y, canCapCeiling);
+      }
+
+      // Downward-facing ceiling cap triangle: center -> b -> a
+      positions[pIdx++] = ox;
+      positions[pIdx++] = threeOy;
+      positions[pIdx++] = ceilingCapZ;
+      radialOffsets[rIdx++] = 0;
+      radialOffsets[rIdx++] = 0;
+
+      positions[pIdx++] = bx;
+      positions[pIdx++] = -by;
+      positions[pIdx++] = ceilingCapZ;
+      radialOffsets[rIdx++] = bx - ox;
+      radialOffsets[rIdx++] = -(by - oy);
+
+      positions[pIdx++] = ax;
+      positions[pIdx++] = -ay;
+      positions[pIdx++] = ceilingCapZ;
+      radialOffsets[rIdx++] = ax - ox;
+      radialOffsets[rIdx++] = -(ay - oy);
+    }
+  }
+
   if (curtainOpts && curtainEdges > 0) {
     const push = curtainOpts.pushInwardPx ?? 0;
     for (let i = 0; i < triCount; i++) {
       const a = poly[i];
       const b = poly[(i + 1) % n];
-      if (a.segId === undefined || a.segId <= 0 || a.segId !== b.segId) continue;
+      if (!isContinuousCurtainEdge(a, b)) continue;
 
       const ch = a.hitKind === 'DOOR' ? curtainOpts.doorHeight : curtainOpts.wallHeight;
       if (ch <= 0) continue;
@@ -802,6 +958,8 @@ interface CachedLightEntry {
   y: number;
   range: number;
   rayCount: number;
+  ceilingCapZ?: number;
+  curtainCeilingCapZ?: number;
   nearbyDoors: Door[];
   doorHash1: number;
   doorHash2: number;
@@ -863,12 +1021,16 @@ export class LightPolygonCache {
     range: number,
     rayCount: number,
     curtainOpts?: FanCurtainOptions,
-    warmCurtainOpts?: FanCurtainOptions
+    warmCurtainOpts?: FanCurtainOptions,
+    curtainCeilingCapZ?: number
   ): CachedLightEntry {
     if (this.mapRef !== map) {
       this.mapRef = map;
       this.entries.clear();
     }
+
+    const wantFloorCeilingCap = curtainOpts?.ceilingCapZ;
+    const wantCurtainCeilingCap = curtainCeilingCapZ ?? curtainOpts?.ceilingCapZ;
 
     const existing = this.entries.get(key);
     const sameParams =
@@ -876,7 +1038,8 @@ export class LightPolygonCache {
       existing.x === x &&
       existing.y === y &&
       existing.range === range &&
-      existing.rayCount === rayCount;
+      existing.rayCount === rayCount &&
+      existing.ceilingCapZ === wantFloorCeilingCap;
 
     const nearbyDoors = sameParams
       ? existing.nearbyDoors
@@ -885,14 +1048,15 @@ export class LightPolygonCache {
     const [h1, h2] = this.hashDoors(nearbyDoors);
 
     if (sameParams && existing.doorHash1 === h1 && existing.doorHash2 === h2) {
-      if (curtainOpts && !existing.curtainFan) {
+      const curtainMismatch = existing.curtainCeilingCapZ !== wantCurtainCeilingCap;
+      if (curtainOpts && (!existing.curtainFan || curtainMismatch)) {
         existing.curtainFan = buildVisibilityFanBuffers(
           x,
           y,
           existing.poly,
           true,
-          undefined,
-          { ...curtainOpts, curtainOnly: true }
+          existing.curtainFan,
+          { ...curtainOpts, curtainOnly: true, ceilingCapZ: wantCurtainCeilingCap }
         );
       }
       if (warmCurtainOpts && !existing.warmFan) {
@@ -901,20 +1065,25 @@ export class LightPolygonCache {
           y,
           existing.poly,
           true,
-          undefined,
+          existing.warmFan,
           warmCurtainOpts
         );
       }
-      if (warmCurtainOpts && !existing.warmCurtainFan) {
+      if (warmCurtainOpts && (!existing.warmCurtainFan || curtainMismatch)) {
         existing.warmCurtainFan = buildVisibilityFanBuffers(
           x,
           y,
           existing.poly,
           true,
-          undefined,
-          { ...warmCurtainOpts, curtainOnly: true }
+          existing.warmCurtainFan,
+          {
+            ...warmCurtainOpts,
+            curtainOnly: true,
+            ceilingCapZ: curtainCeilingCapZ ?? warmCurtainOpts.ceilingCapZ,
+          }
         );
       }
+      existing.curtainCeilingCapZ = wantCurtainCeilingCap;
       return existing;
     }
 
@@ -927,7 +1096,7 @@ export class LightPolygonCache {
           poly,
           true,
           existing?.curtainFan,
-          { ...curtainOpts, curtainOnly: true }
+          { ...curtainOpts, curtainOnly: true, ceilingCapZ: wantCurtainCeilingCap }
         )
       : undefined;
     const warmFan = warmCurtainOpts
@@ -940,7 +1109,11 @@ export class LightPolygonCache {
           poly,
           true,
           existing?.warmCurtainFan,
-          { ...warmCurtainOpts, curtainOnly: true }
+          {
+            ...warmCurtainOpts,
+            curtainOnly: true,
+            ceilingCapZ: curtainCeilingCapZ ?? warmCurtainOpts.ceilingCapZ,
+          }
         )
       : undefined;
     const next: CachedLightEntry = {
@@ -948,6 +1121,8 @@ export class LightPolygonCache {
       y,
       range,
       rayCount,
+      ceilingCapZ: wantFloorCeilingCap,
+      curtainCeilingCapZ: wantCurtainCeilingCap,
       nearbyDoors,
       doorHash1: h1,
       doorHash2: h2,

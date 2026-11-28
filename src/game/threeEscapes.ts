@@ -1,7 +1,7 @@
 import * as THREE from 'three/webgpu';
 import { MonstrumGameEngine } from './engine';
 import { createShadedCharacterMaterial, ShadedCharacterMaterialBundle } from './threeTsl';
-import { ShipDeck, ShipMap } from './types';
+import { RaycastInteractTarget, ShipDeck, ShipMap } from './types';
 
 function makeCanvas(w: number, h: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
   const c = document.createElement('canvas');
@@ -565,6 +565,7 @@ interface HeliChainVisual {
   turnbuckleMesh: THREE.Mesh;
   cutStub: THREE.Mesh;
   heliDangleStub: THREE.Mesh;
+  hitMesh: THREE.Mesh;
 }
 
 export class ShipEscapes3D {
@@ -601,6 +602,7 @@ export class ShipEscapes3D {
   private matCavity: ShadedCharacterMaterialBundle;
   private matChainLink: ShadedCharacterMaterialBundle;
   private matShadow: THREE.MeshBasicMaterial;
+  private hitProxyMat: THREE.MeshBasicMaterial;
 
   // --- DECK 3: HELIDECK ---
   private heliRoot = new THREE.Group();
@@ -620,6 +622,8 @@ export class ShipEscapes3D {
   private heliRotorBlurMat: THREE.MeshBasicMaterial;
   private heliRotorBlurDisc!: THREE.Mesh;
   private heliChains: HeliChainVisual[] = [];
+  private heliHitMesh!: THREE.Mesh;
+  private heliOccluderMeshes: THREE.Mesh[] = [];
 
   // --- DECK 2: LIFEBOAT DAVIT ---
   private boatRoot = new THREE.Group();
@@ -646,6 +650,9 @@ export class ShipEscapes3D {
   private boatBeaconMat: ShadedCharacterMaterialBundle;
   private boatCableL!: THREE.Mesh;
   private boatCableR!: THREE.Mesh;
+  private boatHitMesh!: THREE.Mesh;
+  private boatHullHitMesh!: THREE.Mesh;
+  private boatOccluderMeshes: THREE.Mesh[] = [];
 
   // --- DECK 1: SUBMARINE MOONPOOL ---
   private subRoot = new THREE.Group();
@@ -668,8 +675,15 @@ export class ShipEscapes3D {
   private subLeverArmGroup = new THREE.Group();
   private subLeverHandleMat: ShadedCharacterMaterialBundle;
   private subLeverLampMat: ShadedCharacterMaterialBundle;
+  private subDockHitMesh!: THREE.Mesh;
+  private subHullHitMesh!: THREE.Mesh;
+  private subLeverHitMesh!: THREE.Mesh;
+  private subDockOccluderMeshes: THREE.Mesh[] = [];
+  private subLeverOccluderMeshes: THREE.Mesh[] = [];
 
-  // Scratch vectors to avoid per-frame allocations
+  // Scratch arrays & vectors to avoid per-frame allocations
+  private raycastHitMeshes: THREE.Object3D[] = [];
+  private raycastOccluderMeshes: THREE.Object3D[] = [];
   private tmpV1 = new THREE.Vector3();
   private tmpV2 = new THREE.Vector3();
 
@@ -703,7 +717,15 @@ export class ShipEscapes3D {
       opacity: 0.72,
       depthWrite: false,
     });
-    this.basicMats.push(this.matShadow);
+    this.hitProxyMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0,
+      colorWrite: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.basicMats.push(this.matShadow, this.hitProxyMat);
 
     this.matSteelDark = regMat({ color: 0x1b2432, roughness: 0.68, metalness: 0.52 });
     this.matSteelMid = regMat({ color: 0x475569, roughness: 0.52, metalness: 0.64 });
@@ -1280,6 +1302,26 @@ export class ShipEscapes3D {
       this.heliRotorBlurDisc,
       this.heliTailRotor
     );
+
+    this.heliBodyGroup.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && obj !== this.heliRotorBlurDisc) {
+        obj.userData.occluderOwnerKey = 'ESCAPE_HELI:HULL';
+        this.heliOccluderMeshes.push(obj);
+      }
+    });
+
+    this.heliHitMesh = new THREE.Mesh(
+      this.g(makeBox(108, 44, 42)),
+      this.hitProxyMat
+    );
+    this.heliHitMesh.position.set(2, 0, 2);
+    this.heliHitMesh.userData = {
+      pickKind: 'ESCAPE_HELI',
+      targetId: 'HELI',
+      subTarget: 'HULL',
+      ownerKey: 'ESCAPE_HELI:HULL',
+    };
+    this.heliBodyGroup.add(this.heliHitMesh);
     this.heliRoot.add(this.heliBodyGroup);
 
     // --- 6 Cast-Iron Deck Bollards + Forged Helicopter Fuselage Padeyes + Interlocking Tie-Down Chains ---
@@ -1382,7 +1424,33 @@ export class ShipEscapes3D {
       orientAxisZ(cutStub, stubX, stubY, 2.3, fX, fY, 1.8);
       cutStub.visible = false;
 
-      this.heliRoot.add(bollardBody, bollardCollar, bollardCap, chainMesh, turnbuckleMesh, cutStub);
+      const chainIndex = this.heliChains.length;
+      const chainHitMesh = new THREE.Mesh(
+        this.g(makeBox(30, 30, 20, true)),
+        this.hitProxyMat
+      );
+      chainHitMesh.position.set(
+        (fX + collarAnchorX) * 0.5,
+        (fY + collarAnchorY) * 0.5,
+        (cs.fz + 4.4) * 0.5
+      );
+      chainHitMesh.userData = {
+        pickKind: 'ESCAPE_HELI',
+        targetId: 'HELI',
+        subTarget: 'CHAIN',
+        chainIndex,
+        ownerKey: `ESCAPE_HELI:CHAIN:${chainIndex}`,
+      };
+
+      this.heliRoot.add(
+        bollardBody,
+        bollardCollar,
+        bollardCap,
+        chainMesh,
+        turnbuckleMesh,
+        cutStub,
+        chainHitMesh
+      );
       this.heliChains.push({
         fx: fX,
         fy: fY,
@@ -1395,6 +1463,7 @@ export class ShipEscapes3D {
         turnbuckleMesh,
         cutStub,
         heliDangleStub,
+        hitMesh: chainHitMesh,
       });
     }
 
@@ -1403,6 +1472,8 @@ export class ShipEscapes3D {
     heliContactShadow.renderOrder = 5;
     cockpitCanopy.renderOrder = 14;
     this.heliRotorBlurDisc.renderOrder = 15;
+    this.heliHitMesh.renderOrder = 16;
+    for (const ch of this.heliChains) ch.hitMesh.renderOrder = 16;
     this.worldScene.add(this.heliRoot);
   }
 
@@ -1726,10 +1797,42 @@ export class ShipEscapes3D {
     this.boatCableR = makeChainCableMesh(cableGeom, this.matSteelLight.material);
     this.boatRoot.add(this.boatCableL, this.boatCableR);
 
+    this.boatRoot.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && obj !== boatShadow) {
+        obj.userData.occluderOwnerKey = 'ESCAPE_LIFEBOAT';
+        this.boatOccluderMeshes.push(obj);
+      }
+    });
+
+    this.boatHitMesh = new THREE.Mesh(
+      this.g(makeBox(100, 56, 36)),
+      this.hitProxyMat
+    );
+    this.boatHitMesh.position.set(gantryX, gantryY + inDir * 4, 0);
+    this.boatHitMesh.userData = {
+      pickKind: 'ESCAPE_LIFEBOAT',
+      targetId: 'LIFEBOAT',
+      ownerKey: 'ESCAPE_LIFEBOAT',
+    };
+    this.boatHullHitMesh = new THREE.Mesh(
+      this.g(makeBox(88, 36, 28)),
+      this.hitProxyMat
+    );
+    this.boatHullHitMesh.position.set(0, 0, 0);
+    this.boatHullHitMesh.userData = {
+      pickKind: 'ESCAPE_LIFEBOAT',
+      targetId: 'LIFEBOAT',
+      ownerKey: 'ESCAPE_LIFEBOAT',
+    };
+    this.boatRoot.add(this.boatHitMesh);
+    this.boatHullGroup.add(this.boatHullHitMesh);
+
     this.boatRoot.visible = false;
     this.setRenderOrderRecursive(this.boatRoot, 6);
     boatShadow.renderOrder = 5;
     helmWindow.renderOrder = 14;
+    this.boatHitMesh.renderOrder = 16;
+    this.boatHullHitMesh.renderOrder = 16;
     this.worldScene.add(this.boatRoot);
   }
 
@@ -1739,7 +1842,7 @@ export class ShipEscapes3D {
   private buildSubmarine(): void {
     const ts = this.map.tileSize;
     const subPool = this.map.props.find((p) => p.kind === 'SUBMARINE_HULL');
-    const poolX = (subPool?.tx ?? 102) * ts;
+    const poolX = (subPool?.tx ?? 101) * ts;
     const poolY = (subPool?.ty ?? 92) * ts;
     const poolW = (subPool?.tw ?? 4) * ts;
     const poolH = (subPool?.th ?? 6) * ts;
@@ -2110,11 +2213,45 @@ export class ShipEscapes3D {
     );
     this.subRoot.add(this.subHullGroup);
 
+    this.subRoot.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && obj !== this.subWaterMesh && obj !== this.subWakeRing) {
+        obj.userData.occluderOwnerKey = 'ESCAPE_SUBMARINE:DOCK';
+        this.subDockOccluderMeshes.push(obj);
+      }
+    });
+
+    this.subDockHitMesh = new THREE.Mesh(
+      this.g(makeBox(112, 48, 28)),
+      this.hitProxyMat
+    );
+    this.subDockHitMesh.position.set(dockX + 32, dockY, 0);
+    this.subDockHitMesh.userData = {
+      pickKind: 'ESCAPE_SUBMARINE',
+      targetId: 'SUBMARINE',
+      subTarget: 'DOCK',
+      ownerKey: 'ESCAPE_SUBMARINE:DOCK',
+    };
+    this.subHullHitMesh = new THREE.Mesh(
+      this.g(makeBox(56, 178, 52)),
+      this.hitProxyMat
+    );
+    this.subHullHitMesh.position.set(0, 0, -2);
+    this.subHullHitMesh.userData = {
+      pickKind: 'ESCAPE_SUBMARINE',
+      targetId: 'SUBMARINE',
+      subTarget: 'DOCK',
+      ownerKey: 'ESCAPE_SUBMARINE:DOCK',
+    };
+    this.subRoot.add(this.subDockHitMesh);
+    this.subHullGroup.add(this.subHullHitMesh);
+
     this.subRoot.visible = false;
     this.setRenderOrderRecursive(this.subRoot, 6);
     this.setRenderOrderRecursive(this.subHullGroup, 9);
     this.subWaterMesh.renderOrder = 14;
     this.subWakeRing.renderOrder = 15;
+    this.subDockHitMesh.renderOrder = 16;
+    this.subHullHitMesh.renderOrder = 16;
     this.worldScene.add(this.subRoot);
 
     // --- Grounded Industrial Hydraulic Floodgate Lever Console (no floating translucent disc!) ---
@@ -2180,10 +2317,117 @@ export class ShipEscapes3D {
       slotQuadrant,
       this.subLeverArmGroup
     );
+    this.subLeverRoot.traverse((obj) => {
+      if (obj instanceof THREE.Mesh && obj !== leverShadow) {
+        obj.userData.occluderOwnerKey = 'ESCAPE_SUBMARINE:LEVER';
+        this.subLeverOccluderMeshes.push(obj);
+      }
+    });
+    this.subLeverHitMesh = new THREE.Mesh(
+      this.g(makeBox(36, 36, 38)),
+      this.hitProxyMat
+    );
+    this.subLeverHitMesh.userData = {
+      pickKind: 'ESCAPE_SUBMARINE',
+      targetId: 'SUBMARINE',
+      subTarget: 'LEVER',
+      ownerKey: 'ESCAPE_SUBMARINE:LEVER',
+    };
+    this.subLeverRoot.add(this.subLeverHitMesh);
+
     this.subLeverRoot.visible = false;
     this.setRenderOrderRecursive(this.subLeverRoot, 6);
     leverShadow.renderOrder = 5;
+    this.subLeverHitMesh.renderOrder = 16;
     this.worldScene.add(this.subLeverRoot);
+  }
+
+  public getRaycastTargets(activeDeck: ShipDeck): THREE.Object3D[] {
+    this.raycastHitMeshes.length = 0;
+    if (activeDeck === 'DECK_3' && this.heliRoot.visible) {
+      for (let i = 0; i < this.heliChains.length; i++) {
+        if (this.heliChains[i].hitMesh.visible) {
+          this.raycastHitMeshes.push(this.heliChains[i].hitMesh);
+        }
+      }
+      this.raycastHitMeshes.push(this.heliHitMesh);
+    } else if (activeDeck === 'DECK_2' && this.boatRoot.visible) {
+      this.raycastHitMeshes.push(this.boatHullHitMesh, this.boatHitMesh);
+    } else if (activeDeck === 'DECK_1') {
+      if (this.subRoot.visible) {
+        this.raycastHitMeshes.push(this.subHullHitMesh, this.subDockHitMesh);
+      }
+      if (this.subLeverRoot.visible) {
+        this.raycastHitMeshes.push(this.subLeverHitMesh);
+      }
+    }
+    return this.raycastHitMeshes;
+  }
+
+  public getRaycastOccluders(activeDeck: ShipDeck): THREE.Object3D[] {
+    this.raycastOccluderMeshes.length = 0;
+    if (activeDeck === 'DECK_3' && this.heliRoot.visible) {
+      for (let i = 0; i < this.heliOccluderMeshes.length; i++) {
+        this.raycastOccluderMeshes.push(this.heliOccluderMeshes[i]);
+      }
+    } else if (activeDeck === 'DECK_2' && this.boatRoot.visible) {
+      for (let i = 0; i < this.boatOccluderMeshes.length; i++) {
+        this.raycastOccluderMeshes.push(this.boatOccluderMeshes[i]);
+      }
+    } else if (activeDeck === 'DECK_1') {
+      if (this.subRoot.visible) {
+        for (let i = 0; i < this.subDockOccluderMeshes.length; i++) {
+          this.raycastOccluderMeshes.push(this.subDockOccluderMeshes[i]);
+        }
+      }
+      if (this.subLeverRoot.visible) {
+        for (let i = 0; i < this.subLeverOccluderMeshes.length; i++) {
+          this.raycastOccluderMeshes.push(this.subLeverOccluderMeshes[i]);
+        }
+      }
+    }
+    return this.raycastOccluderMeshes;
+  }
+
+  public getTargetWorldHitCenter(
+    kind: RaycastInteractTarget['kind'],
+    subTarget: RaycastInteractTarget['subTarget'] | undefined,
+    outVec: THREE.Vector3
+  ): boolean {
+    if (kind === 'ESCAPE_HELI' && this.heliRoot.visible) {
+      this.heliRoot.updateMatrixWorld(true);
+      if (subTarget === 'CHAIN') {
+        const ch = this.heliChains.find((c) => c.hitMesh.visible);
+        if (ch) {
+          ch.hitMesh.getWorldPosition(outVec);
+          return true;
+        }
+      }
+      this.heliHitMesh.getWorldPosition(outVec);
+      outVec.z = 22;
+      return true;
+    }
+    if (kind === 'ESCAPE_LIFEBOAT' && this.boatRoot.visible) {
+      this.boatRoot.updateMatrixWorld(true);
+      this.boatHitMesh.getWorldPosition(outVec);
+      outVec.z = 16;
+      return true;
+    }
+    if (kind === 'ESCAPE_SUBMARINE') {
+      if (subTarget === 'LEVER' && this.subLeverRoot.visible) {
+        this.subLeverRoot.updateMatrixWorld(true);
+        this.subLeverHitMesh.getWorldPosition(outVec);
+        outVec.z = 18;
+        return true;
+      }
+      if (this.subRoot.visible) {
+        this.subRoot.updateMatrixWorld(true);
+        this.subDockHitMesh.getWorldPosition(outVec);
+        outVec.z = 12;
+        return true;
+      }
+    }
+    return false;
   }
 
   public updateForFrame(
@@ -2272,6 +2516,7 @@ export class ShipEscapes3D {
           ch.bollardCap.material = intact ? this.matYellow.material : this.matSteelMid.material;
           ch.cutStub.visible = !intact;
           ch.heliDangleStub.visible = !intact;
+          ch.hitMesh.visible = intact;
           if (intact) {
             const fx = ch.fx + vibX;
             const fy = ch.fy - vibY;
@@ -2280,6 +2525,7 @@ export class ShipEscapes3D {
             const my = (fy + ch.by) * 0.5;
             const mz = (fz + ch.bz) * 0.5;
             orientLinkMesh(ch.chainMesh, fx, fy, fz, ch.bx, ch.by, ch.bz);
+            ch.hitMesh.position.set(mx, my, mz);
             const tDx = (ch.bx - fx) * 0.12;
             const tDy = (ch.by - fy) * 0.12;
             const tDz = (ch.bz - fz) * 0.12;
