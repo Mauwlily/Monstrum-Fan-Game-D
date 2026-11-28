@@ -79,3 +79,8 @@ Brutey-balls get more brainz (details are rough for now):
 0.4.0 -> Search overhaul
 0.4.1 -> Chase overhaul
 0.4.2 -> Stalk/Investigate overhaul
+
+0.5 -> Eventually
+0.6 -> Eventually
+
+
